@@ -19,6 +19,7 @@ mod reader_http;
 mod reader_server;
 mod settings;
 mod storage;
+pub mod tasks;
 mod temporary_content;
 mod tools;
 #[cfg(any(target_os = "macos", target_os = "ios"))]

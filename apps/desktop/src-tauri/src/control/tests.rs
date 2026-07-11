@@ -1,4 +1,8 @@
 use super::{CommandClaim, ControlDb};
+use crate::tasks::{
+    LifecycleState, ProgressMode, RequiredAction, TaskEvent, TaskKind, TaskOutcome, TaskProgress,
+    TaskSnapshot,
+};
 use std::fs;
 
 #[test]
@@ -104,5 +108,112 @@ fn migration_runs_survive_reopening_and_keep_receipt_location() {
     );
     assert_eq!(run.result_json.as_deref(), Some(r#"{"status":"success"}"#));
     drop(reopened);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+fn task_event(sequence: u64, revision: u64) -> TaskEvent {
+    let now = "2026-07-11T12:00:00Z".to_string();
+    let snapshot = TaskSnapshot {
+        id: "podcast-1".to_string(),
+        kind: TaskKind::Podcast,
+        revision,
+        last_sequence: sequence,
+        lifecycle_state: LifecycleState::Running,
+        outcome: TaskOutcome::None,
+        required_action: RequiredAction::None,
+        progress: TaskProgress {
+            mode: ProgressMode::Determinate,
+            percent: Some(sequence as f64 * 10.0),
+            completed_units: Some(sequence),
+            total_units: Some(10),
+            label: Some("transcribing".to_string()),
+        },
+        error_code: None,
+        error_message: None,
+        engine_stage: "transcribe".to_string(),
+        engine_status: "working".to_string(),
+        recoverable: true,
+        can_pause: true,
+        can_resume: false,
+        can_retry: false,
+        can_cancel: true,
+        book_id: None,
+        source_id: Some("sha256".to_string()),
+        cache_lease_bytes: 42,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    TaskEvent {
+        schema_version: 1,
+        task_id: snapshot.id.clone(),
+        sequence,
+        revision,
+        event_type: "progress".to_string(),
+        snapshot,
+        created_at: now,
+    }
+}
+
+#[test]
+fn task_snapshot_and_events_survive_reopen() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-task-events-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    {
+        let mut database = ControlDb::open(&path).expect("control database must open");
+        database
+            .persist_task_event(&task_event(1, 1))
+            .expect("first event must persist");
+        database
+            .persist_task_event(&task_event(2, 2))
+            .expect("second event must persist");
+    }
+
+    let reopened = ControlDb::open(&path).expect("control database must reopen");
+    let snapshot = reopened
+        .task_snapshot("podcast-1")
+        .expect("snapshot must load")
+        .expect("snapshot must exist");
+    assert_eq!(snapshot.revision, 2);
+    assert_eq!(snapshot.last_sequence, 2);
+    let events = reopened
+        .task_events("podcast-1", 1, 100)
+        .expect("event gap must load");
+    assert_eq!(events, vec![task_event(2, 2)]);
+    drop(reopened);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn task_event_rejects_sequence_gaps_and_old_revisions() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-task-conflict-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    database
+        .persist_task_event(&task_event(1, 1))
+        .expect("first event must persist");
+
+    assert_eq!(
+        database
+            .persist_task_event(&task_event(3, 2))
+            .expect_err("sequence gap must fail"),
+        "EVENT_SEQUENCE_CONFLICT"
+    );
+    assert_eq!(
+        database
+            .persist_task_event(&task_event(2, 1))
+            .expect_err("old revision must fail"),
+        "REVISION_CONFLICT"
+    );
+    drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

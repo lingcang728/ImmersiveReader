@@ -45,20 +45,12 @@ fn settings_migration_is_verified_receipted_and_idempotent() {
     let preview =
         preview_for(&legacy, &target, MigrationScope::Settings).expect("preview must succeed");
 
-    let first = execute_settings_migration(
-        &legacy,
-        &target,
-        &preview.preview_id,
-        "settings-request-1",
-    )
-    .expect("settings migration must succeed");
-    let second = execute_settings_migration(
-        &legacy,
-        &target,
-        &preview.preview_id,
-        "settings-request-1",
-    )
-    .expect("same request must replay");
+    let first =
+        execute_settings_migration(&legacy, &target, &preview.preview_id, "settings-request-1")
+            .expect("settings migration must succeed");
+    let second =
+        execute_settings_migration(&legacy, &target, &preview.preview_id, "settings-request-1")
+            .expect("same request must replay");
 
     assert_eq!(first, second);
     let migrated: serde_json::Value = serde_json::from_str(
@@ -67,10 +59,9 @@ fn settings_migration_is_verified_receipted_and_idempotent() {
     .expect("target settings must be valid json");
     assert_eq!(migrated["schemaVersion"], 3);
     assert_eq!(migrated["libraryRoot"], r"D:\Reader Library");
-    let receipt: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&first.receipt_path).expect("receipt must exist"),
-    )
-    .expect("receipt must be valid json");
+    let receipt: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&first.receipt_path).expect("receipt must exist"))
+            .expect("receipt must be valid json");
     assert_eq!(receipt["status"], "success");
     assert!(receipt["nonSensitiveHashes"]["sourceSettingsSha256"].is_string());
     let control = ControlDb::open(&target.data_root.join(r"App\control.db"))

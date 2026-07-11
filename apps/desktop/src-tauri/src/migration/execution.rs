@@ -134,9 +134,10 @@ pub fn execute_settings_migration(
         "MIGRATION_FAILED",
     );
     receipt.started_at = chrono::Utc::now().to_rfc3339();
-    receipt
-        .non_sensitive_hashes
-        .insert("sourceSettingsSha256".to_string(), sha256(&legacy.settings)?);
+    receipt.non_sensitive_hashes.insert(
+        "sourceSettingsSha256".to_string(),
+        sha256(&legacy.settings)?,
+    );
     write_receipt(&receipt_path, &receipt)?;
     control.begin_migration_run(&migration_id, preview_id, "settings")?;
 
@@ -150,9 +151,10 @@ pub fn execute_settings_migration(
         receipt.status = "success".to_string();
         receipt.error_code = None;
         receipt.completed_at = Some(chrono::Utc::now().to_rfc3339());
-        receipt
-            .non_sensitive_hashes
-            .insert("targetSettingsSha256".to_string(), sha256(&target.settings_path)?);
+        receipt.non_sensitive_hashes.insert(
+            "targetSettingsSha256".to_string(),
+            sha256(&target.settings_path)?,
+        );
         write_receipt(&receipt_path, &receipt)
     })();
 

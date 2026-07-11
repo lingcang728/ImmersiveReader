@@ -1,3 +1,4 @@
+use crate::tasks::{TaskEvent, TaskSnapshot};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -238,10 +239,7 @@ impl ControlDb {
         Ok(())
     }
 
-    pub fn migration_run(
-        &self,
-        migration_id: &str,
-    ) -> Result<Option<MigrationRunRecord>, String> {
+    pub fn migration_run(&self, migration_id: &str) -> Result<Option<MigrationRunRecord>, String> {
         self.connection
             .query_row(
                 "SELECT migration_id, preview_id, scope, status, receipt_path, result_json FROM migration_runs WHERE migration_id = ?1",
@@ -259,6 +257,119 @@ impl ControlDb {
             )
             .optional()
             .map_err(|error| error.to_string())
+    }
+
+    pub fn persist_task_event(&mut self, event: &TaskEvent) -> Result<(), String> {
+        if event.schema_version != 1
+            || event.task_id != event.snapshot.id
+            || event.sequence != event.snapshot.last_sequence
+            || event.revision != event.snapshot.revision
+        {
+            return Err("INVALID_TASK_EVENT".to_string());
+        }
+        let event_sequence =
+            i64::try_from(event.sequence).map_err(|_| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        let event_revision =
+            i64::try_from(event.revision).map_err(|_| "INVALID_TASK_REVISION".to_string())?;
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let current = transaction
+            .query_row(
+                "SELECT revision, last_sequence FROM task_snapshots WHERE id = ?1",
+                [&event.task_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        match current {
+            Some((revision, sequence)) => {
+                if event_sequence != sequence + 1 {
+                    return Err("EVENT_SEQUENCE_CONFLICT".to_string());
+                }
+                if event_revision <= revision {
+                    return Err("REVISION_CONFLICT".to_string());
+                }
+            }
+            None if event.sequence != 1 || event.revision != 1 => {
+                return Err("EVENT_SEQUENCE_CONFLICT".to_string());
+            }
+            None => {}
+        }
+        let snapshot_json =
+            serde_json::to_string(&event.snapshot).map_err(|error| error.to_string())?;
+        let event_json = serde_json::to_string(event).map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO task_snapshots(id, kind, revision, last_sequence, snapshot_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, revision=excluded.revision, last_sequence=excluded.last_sequence, snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at",
+                params![
+                    event.task_id,
+                    match &event.snapshot.kind {
+                        crate::tasks::TaskKind::Podcast => "podcast",
+                        crate::tasks::TaskKind::Zhihu => "zhihu",
+                    },
+                    event_revision,
+                    event_sequence,
+                    snapshot_json,
+                    event.snapshot.updated_at
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO task_events(task_id, sequence, revision, event_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    event.task_id,
+                    event_sequence,
+                    event_revision,
+                    event_json,
+                    event.created_at
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub fn task_snapshot(&self, task_id: &str) -> Result<Option<TaskSnapshot>, String> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT snapshot_json FROM task_snapshots WHERE id = ?1",
+                [task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        json.map(|value| serde_json::from_str(&value).map_err(|error| error.to_string()))
+            .transpose()
+    }
+
+    pub fn task_events(
+        &self,
+        task_id: &str,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<TaskEvent>, String> {
+        let after_sequence =
+            i64::try_from(after_sequence).map_err(|_| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT event_json FROM task_events WHERE task_id = ?1 AND sequence > ?2 ORDER BY sequence LIMIT ?3",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(
+                params![task_id, after_sequence, limit.clamp(1, 1_000)],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            let json = row.map_err(|error| error.to_string())?;
+            serde_json::from_str(&json).map_err(|error| error.to_string())
+        })
+        .collect()
     }
 
     pub fn table_names(&self) -> Result<Vec<String>, String> {
