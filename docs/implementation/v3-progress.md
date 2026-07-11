@@ -30,12 +30,24 @@ test. It does not waive any independent authorization gate in the V3 plan.
   choosing or deleting conflicting candidates.
 - [x] Create `control.db` and persist request-id claims and completed results
   across application restarts.
+- [x] Persist migration-run lifecycle and execute Settings schema migration with
+  preview freshness, rollback material, receipt verification, and request replay.
+- [x] Persist structured task snapshots and events with monotonic revision and
+  sequence checks plus event-gap queries.
+- [x] Isolate DeepSeek production/development targets in Windows Credential
+  Manager without returning secrets to the frontend.
+- [x] Add channel-scoped Tauri single-instance handling.
+- [x] Add a Windows Job Object with `KILL_ON_JOB_CLOSE` and verify that closing
+  it terminates an assigned process tree.
+- [x] Add a schema-versioned Podcast single-task entry with independent Data,
+  Cache, and Library roots plus sidecar path revalidation.
+- [x] Copy Podcast input through `input.partial`, stream SHA-256 verification,
+  source stability checks, atomic promotion, and an active cache lease.
 
 ## In progress
 
-- [ ] Add a persistent migration execution coordinator that revalidates the
-  preview, records the run, executes only supported typed operations, and can
-  replay an idempotent result after restart.
+- [ ] Extend the persistent migration coordinator beyond the completed Settings
+  operation to every legacy data class.
 - [ ] Inherit legacy Settings, recent content, single-file reading state,
   Library reading state, temporary Podcast content/config/tasks, Zhihu data and
   profile, manifests, and trash metadata with per-class validation and rollback.
@@ -44,14 +56,12 @@ test. It does not waive any independent authorization gate in the V3 plan.
 
 ## Remaining product work
 
-- [ ] Complete the Rust task snapshot/event state machine, revisions, event-gap
-  recovery, and persistent command idempotency at every mutating command.
-- [ ] Store DeepSeek credentials in channel-specific Windows Credential Manager
-  targets and keep secrets out of disk, logs, IPC payloads, and backups.
-- [ ] Add channel-scoped single instance, Windows Job Objects, authenticated
-  asynchronous sidecars, READY protocol validation, and one unified tray.
-- [ ] Add Podcast single-task TaskSpec, verified input copy, compatibility
-  recovery, pause/cancel semantics, deduplication, revisions, and budget gates.
+- [ ] Expose the completed task snapshot/event store through the full Tauri
+  command contract and emit persisted events to the frontend.
+- [ ] Add suspended sidecar spawning, ToolManager ownership, authenticated async
+  IPC, READY protocol validation, crash mapping, and one unified tray.
+- [ ] Finish Podcast TaskSpec creation, preview/budget estimates, compatibility
+  recovery, pause/cancel semantics, deduplication, revisions, and publishing.
 - [ ] Split Zhihu acquisition history from the permanent archive catalog and
   make recrawls non-destructive.
 - [ ] Build the unified shell, acquisition pages, task/event panels, settings,
@@ -76,3 +86,11 @@ test. It does not waive any independent authorization gate in the V3 plan.
 - Force-push of `origin/main` or changes to other remote refs.
 - Restoration or archival of the external `Zhihu_packer` repository.
 
+## Latest verification
+
+- `scripts\verify.ps1`: passed on 2026-07-11.
+- Desktop TypeScript tests: 35 passed.
+- Desktop Rust tests: 58 passed.
+- Zhihu tests: 15 passed.
+- Podcast tests with the managed runtime Python: 19 passed.
+- Podcast quick validation: passed.
