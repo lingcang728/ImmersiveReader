@@ -1,0 +1,962 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>播客转写器 v2</title>
+<link rel="icon" href="/assets/icon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ─── Tokens (hex fallback) ─── */
+:root[data-theme="dark"] {
+  --bg: #1a1b1e; --bg-elevated: #252629; --surface: #2a2b2f; --surface-hover: #32333a;
+  --fg: #eaedf3; --fg-secondary: #9ea2ad; --fg-tertiary: #6b6f7d;
+  --border: #383a42; --border-subtle: #2e3038;
+  --accent: #5ec977; --accent-dim: rgba(94,201,119,0.14);
+  --accent-amber: #deb862; --accent-amber-dim: rgba(222,184,98,0.12);
+  --accent-rose: #e06b6b; --accent-rose-dim: rgba(224,107,107,0.12);
+  --accent-blue: #5ba0e6; --accent-blue-dim: rgba(91,160,230,0.12);
+  --shadow: 0 2px 8px rgba(0,0,0,0.35), 0 8px 32px rgba(0,0,0,0.25);
+  --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px; --radius-pill: 999px;
+  --gradient-bg: linear-gradient(160deg, #1a1b1e 0%, #1e2028 50%, #1c1e24 100%);
+  --glass: rgba(42,43,47,0.7);
+  --glass-border: rgba(255,255,255,0.06);
+}
+:root[data-theme="light"] {
+  --bg: #f0f1f5; --bg-elevated: #ffffff; --surface: #ffffff; --surface-hover: #f5f6f9;
+  --fg: #1a1b2e; --fg-secondary: #5c5e6e; --fg-tertiary: #8e90a0;
+  --border: #d4d6de; --border-subtle: #e8eaf0;
+  --accent: #3aa355; --accent-dim: rgba(58,163,85,0.10);
+  --accent-amber: #c5a030; --accent-amber-dim: rgba(197,160,48,0.10);
+  --accent-rose: #d04545; --accent-rose-dim: rgba(208,69,69,0.08);
+  --accent-blue: #3a7fd5; --accent-blue-dim: rgba(58,127,213,0.10);
+  --shadow: 0 1px 3px rgba(0,0,0,0.05), 0 6px 24px rgba(0,0,0,0.06);
+  --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px; --radius-pill: 999px;
+  --gradient-bg: linear-gradient(160deg, #f0f1f5 0%, #eceef4 50%, #f0f1f5 100%);
+  --glass: rgba(255,255,255,0.8);
+  --glass-border: rgba(0,0,0,0.04);
+}
+
+/* ─── Base ─── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; }
+html { font-size: 15px; }
+body {
+  font-family: 'Inter', "Segoe UI", "Microsoft YaHei UI", system-ui, -apple-system, sans-serif;
+  background: var(--gradient-bg); color: var(--fg); line-height: 1.5;
+  -webkit-font-smoothing: antialiased; min-height: 100dvh;
+}
+
+/* ─── Layout ─── */
+.app {
+  width: 100%; max-width: 1200px; margin: 0 auto;
+  padding: 28px 32px 40px;
+  display: flex; flex-direction: column; gap: 24px;
+  min-height: 100dvh;
+  animation: fadeInApp 0.5s ease both;
+}
+@keyframes fadeInApp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Header ─── */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+}
+.header-left { display: flex; align-items: center; gap: 14px; }
+.brand-icon {
+  width: 38px; height: 38px; border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--accent) 0%, #3aa0c5 100%);
+  display: grid; place-items: center;
+  box-shadow: 0 2px 8px rgba(94,201,119,0.3);
+}
+.brand-icon svg { width: 20px; height: 20px; }
+.brand-title {
+  font-size: 1.25rem; font-weight: 600;
+  display: flex; align-items: baseline; gap: 8px;
+}
+.brand-title span { color: var(--fg-secondary); font-weight: 400; font-size: 0.95rem; }
+
+.header-stats {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg); padding: 6px;
+}
+.stat-pill {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: var(--radius-md);
+  font-size: 0.85rem; font-weight: 500; color: var(--fg-secondary);
+  white-space: nowrap;
+}
+.stat-pill .dot {
+  width: 7px; height: 7px; border-radius: 50%; display: inline-block;
+}
+.stat-pill .val { color: var(--fg); font-weight: 600; margin-left: 2px; }
+.stat-pill.active { background: var(--accent-dim); color: var(--accent); }
+.stat-pill.active .val { color: var(--accent); }
+.stat-pill.success .dot { background: var(--accent); }
+.stat-pill.success .val { color: var(--accent); }
+.stat-pill.error .dot { background: var(--accent-rose); }
+.stat-pill.error .val { color: var(--accent-rose); }
+
+.header-actions { display: flex; align-items: center; gap: 10px; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 18px; border-radius: var(--radius-pill); font-size: 0.88rem;
+  font-weight: 500; cursor: pointer; border: none;
+  transition: transform .1s, opacity .15s, box-shadow .2s;
+  font-family: inherit;
+}
+.btn:active { transform: scale(0.96); }
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent) 0%, #3ec78c 100%);
+  color: #fff; box-shadow: 0 2px 12px rgba(94,201,119,0.3);
+}
+.btn-primary:hover { box-shadow: 0 4px 20px rgba(94,201,119,0.4); }
+.btn-ghost {
+  background: var(--glass); color: var(--fg-secondary);
+  border: 1px solid var(--border); backdrop-filter: blur(8px);
+}
+.btn-ghost:hover { background: var(--surface-hover); color: var(--fg); border-color: var(--fg-tertiary); }
+.btn-danger {
+  background: linear-gradient(135deg, var(--accent-rose) 0%, #d04545 100%);
+  color: white; box-shadow: 0 2px 12px rgba(224,107,107,0.3);
+}
+
+.theme-toggle {
+  width: 34px; height: 34px; border-radius: var(--radius-pill);
+  display: grid; place-items: center; cursor: pointer; border: 1px solid var(--border);
+  background: transparent; color: var(--fg-secondary); transition: .15s;
+}
+.theme-toggle:hover { background: var(--surface-hover); color: var(--fg); }
+
+/* ─── Banner ─── */
+.backend-banner {
+  display: none; padding: 10px 14px;
+  border: 1px solid var(--accent-rose-dim); border-radius: var(--radius-md);
+  background: var(--accent-rose-dim); color: var(--fg); font-size: 0.86rem;
+}
+.backend-banner.show { display: block; }
+
+/* ─── Job cards ─── */
+.jobs-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+}
+.job-card {
+  background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg); padding: 18px 20px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+  transition: border-color .15s, box-shadow .25s, transform .2s;
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+}
+.job-card:hover { box-shadow: var(--shadow); transform: translateY(-2px); }
+.job-card.selected {
+  border-color: var(--accent-amber); box-shadow: 0 0 0 1px var(--accent-amber) inset, 0 4px 20px rgba(222,184,98,0.15);
+}
+.job-card.running {
+  border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset, 0 4px 20px rgba(94,201,119,0.12);
+}
+.job-card.done { border-color: var(--accent-dim); }
+.job-card.error { border-color: var(--accent-rose-dim); }
+.job-card.empty {
+  border-style: dashed; background: transparent;
+  align-items: center; justify-content: center;
+  min-height: 180px; color: var(--fg-tertiary); text-align: center; gap: 10px;
+}
+
+.card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.file-name {
+  font-size: 0.95rem; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 260px;
+}
+.file-meta { font-size: 0.78rem; color: var(--fg-tertiary); margin-top: 3px; }
+
+.status-badge {
+  font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+  padding: 3px 9px; border-radius: var(--radius-pill); white-space: nowrap; flex-shrink: 0;
+}
+.status-badge.idle    { background: var(--border-subtle); color: var(--fg-tertiary); }
+.status-badge.running { background: var(--accent-dim); color: var(--accent); }
+.status-badge.success { background: var(--accent-dim); color: var(--accent); }
+.status-badge.failed  { background: var(--accent-rose-dim); color: var(--accent-rose); }
+
+.stage-label { font-size: 0.82rem; color: var(--fg-secondary); }
+
+.progress-track {
+  height: 6px; border-radius: var(--radius-pill);
+  background: var(--border-subtle); overflow: hidden; position: relative;
+}
+.progress-fill {
+  height: 100%; border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, var(--accent), #3ec78c);
+  transition: width .6s cubic-bezier(.4,0,.2,1);
+}
+.job-card.running .progress-track::after {
+  content: '';
+  position: absolute; top: 0; bottom: 0; left: 0; width: 34%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.16) 50%, transparent 100%);
+  animation: shimmer 1.8s linear infinite;
+}
+@keyframes shimmer {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+.job-card.done .progress-fill { background: var(--accent); }
+.job-card.error .progress-fill { background: var(--accent-rose); }
+.job-card:not(.running) .progress-track::after { animation: none; }
+
+.progress-label {
+  display: flex; justify-content: space-between;
+  font-size: 0.78rem; color: var(--fg-tertiary);
+}
+.progress-label .pct { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--fg-secondary); }
+
+.error-msg {
+  font-size: 0.78rem; color: var(--accent-rose);
+  line-height: 1.4; word-break: break-word;
+}
+
+.card-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.card-actions .btn-sm {
+  padding: 5px 12px; font-size: 0.78rem; border-radius: var(--radius-pill);
+  font-weight: 500; cursor: pointer; border: none; transition: .12s;
+}
+.btn-sm-primary { background: var(--fg); color: var(--bg); }
+.btn-sm-ghost { background: transparent; color: var(--fg-secondary); border: 1px solid var(--border); }
+.btn-sm-ghost:hover { background: var(--surface-hover); color: var(--fg); }
+.btn-sm-danger { background: var(--accent-rose); color: white; }
+
+/* ─── Log panel ─── */
+.log-panel {
+  background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg); padding: 16px 18px;
+  backdrop-filter: blur(12px);
+  position: relative; overflow: hidden;
+}
+.log-panel::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-amber), var(--accent-blue, var(--accent)));
+  opacity: 0.6;
+}
+.log-panel-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  font-size: 0.7rem; font-weight: 600; color: var(--fg-secondary);
+  text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 10px;
+}
+.log-title {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.log-subtitle {
+  color: var(--fg-tertiary); font-weight: 500; text-transform: none; letter-spacing: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%;
+}
+.log-content {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 0.75rem; color: var(--fg-tertiary);
+  max-height: 200px; overflow-y: auto;
+  line-height: 1.6; white-space: pre-wrap; word-break: break-all;
+}
+
+/* ─── Empty state ─── */
+.empty-illustration {
+  width: 40px; height: 40px; border-radius: var(--radius-md);
+  border: 2px dashed var(--border); display: grid; place-items: center;
+  color: var(--fg-tertiary); margin-bottom: 4px;
+}
+.empty-text { font-size: 0.85rem; font-weight: 500; color: var(--fg-secondary); }
+.empty-hint { font-size: 0.78rem; color: var(--fg-tertiary); }
+
+/* ─── Animations ─── */
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
+}
+.pulse-dot { animation: pulse-soft 2s ease-in-out infinite; }
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.job-card.is-new { animation: slideIn .35s ease both; }
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-tertiary); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* ─── Settings Panel ─── */
+.settings-panel {
+  background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg); overflow: hidden;
+  transition: border-color .15s;
+  backdrop-filter: blur(12px);
+}
+.settings-panel:hover { border-color: var(--accent-dim); }
+.settings-toggle {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; cursor: pointer; user-select: none;
+  background: transparent; border: none; width: 100%; color: var(--fg);
+  font-size: 0.88rem; font-weight: 600; font-family: inherit;
+}
+.settings-toggle:hover { background: var(--surface-hover); }
+.settings-toggle .chevron {
+  transition: transform .2s; color: var(--fg-tertiary);
+}
+.settings-panel.open .settings-toggle .chevron { transform: rotate(180deg); }
+.settings-body {
+  max-height: 0; overflow: hidden;
+  transition: max-height .3s cubic-bezier(.4,0,.2,1), padding .2s;
+  padding: 0 18px;
+}
+.settings-panel.open .settings-body {
+  max-height: 760px; padding: 0 18px 18px;
+}
+.settings-section {
+  padding: 14px 0; border-top: 1px solid var(--border-subtle);
+}
+.settings-section:first-child { border-top: none; padding-top: 4px; }
+.settings-section-title {
+  font-size: 0.78rem; font-weight: 600; color: var(--fg-secondary);
+  text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 12px;
+}
+.setting-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 10px;
+}
+.setting-row:last-child { margin-bottom: 0; }
+.setting-label {
+  font-size: 0.84rem; color: var(--fg-secondary); flex-shrink: 0;
+}
+.setting-control { display: flex; align-items: center; gap: 6px; }
+.setting-input {
+  width: min(420px, 52vw); min-width: 260px;
+  padding: 7px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg-elevated);
+  color: var(--fg); font: inherit; font-size: 0.82rem;
+}
+.setting-input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.seg-control {
+  display: inline-flex; border-radius: var(--radius-pill);
+  border: 1px solid var(--border); overflow: hidden;
+}
+.seg-btn {
+  padding: 5px 14px; font-size: 0.78rem; font-weight: 500;
+  border: none; cursor: pointer; background: transparent;
+  color: var(--fg-secondary); transition: .12s; font-family: inherit;
+  white-space: nowrap;
+}
+.seg-btn:hover { background: var(--surface-hover); color: var(--fg); }
+.seg-btn.active {
+  background: var(--fg); color: var(--bg); font-weight: 600;
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--border); }
+.setting-hint {
+  font-size: 0.72rem; color: var(--fg-tertiary); margin-top: 4px;
+}
+.settings-saved {
+  font-size: 0.78rem; color: var(--accent); font-weight: 500;
+  opacity: 0; transition: opacity .3s;
+}
+.settings-saved.show { opacity: 1; }
+/* ─── Key toggle ─── */
+.key-toggle {
+  padding: 5px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: transparent;
+  color: var(--fg-secondary); cursor: pointer; font-size: 0.78rem;
+  font-family: inherit; transition: .12s; white-space: nowrap;
+}
+.key-toggle:hover { background: var(--surface-hover); color: var(--fg); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="backend-banner" id="banner"></div>
+
+  <header class="header">
+    <div class="header-left">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:#fff">
+          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="22"/>
+        </svg>
+      </div>
+      <h1 class="brand-title">播客转写器 <span>v2</span></h1>
+    </div>
+
+    <div class="header-stats" id="stats-bar">
+      <div class="stat-pill"><span class="dot" style="background:var(--fg-tertiary)"></span> 文件 <span class="val" id="s-total">0</span></div>
+      <div class="stat-pill" id="pill-active"><span class="dot pulse-dot" style="background:var(--accent)"></span> 进行中 <span class="val" id="s-active">0</span></div>
+      <div class="stat-pill" id="pill-done"><span class="dot" style="background:var(--accent)"></span> 已完成 <span class="val" id="s-done">0</span></div>
+      <div class="stat-pill" id="pill-failed"><span class="dot" style="background:var(--accent-rose)"></span> 失败 <span class="val" id="s-failed">0</span></div>
+    </div>
+
+    <div class="header-actions">
+      <button class="btn btn-primary" id="btn-start" onclick="doAction('start')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        启动
+      </button>
+      <button class="btn btn-danger" id="btn-stop" onclick="doAction('stop')" style="display:none">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        停止
+      </button>
+      <button class="btn btn-ghost" onclick="doAction('open_output')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        打开输出
+      </button>
+      <button class="btn btn-ghost" id="btn-settings" onclick="toggleSettings()" aria-label="Settings">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        设置
+      </button>
+      <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
+        <svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        <svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Settings Panel -->
+  <div class="settings-panel" id="settings-panel">
+    <button class="settings-toggle" onclick="toggleSettings()">
+      <span>⚙ LLM 翻译 / 润色设置</span>
+      <span class="chevron">▾</span>
+    </button>
+    <div class="settings-body">
+      <div class="settings-section">
+        <div class="settings-section-title">翻译后端</div>
+        <div class="setting-row">
+          <span class="setting-label">翻译引擎</span>
+          <div class="setting-control">
+            <div class="seg-control" id="seg-trans-backend">
+              <button class="seg-btn" data-val="ollama" onclick="setTransBackend('ollama')">🖥 本地 Ollama</button>
+              <button class="seg-btn" data-val="deepseek" onclick="setTransBackend('deepseek')">☁ DeepSeek API</button>
+              <button class="seg-btn" data-val="none" onclick="setTransBackend('none')">🚫 关闭</button>
+            </div>
+          </div>
+        </div>
+        <div class="setting-hint" id="trans-hint">本地模型需要足够的显存/内存；API 模式需要 DeepSeek API Key</div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-title">Markdown 润色后端</div>
+        <div class="setting-row">
+          <span class="setting-label">润色引擎</span>
+          <div class="setting-control">
+            <div class="seg-control" id="seg-polish-backend">
+              <button class="seg-btn" data-val="ollama" onclick="setPolishBackend('ollama')">🖥 本地 Ollama</button>
+              <button class="seg-btn" data-val="deepseek" onclick="setPolishBackend('deepseek')">☁ DeepSeek API</button>
+            </div>
+          </div>
+        </div>
+        <div class="setting-hint">润色使用 LLM 优化最终 Markdown 的可读性</div>
+      </div>
+      <div class="settings-section" id="deepseek-settings">
+        <div class="settings-section-title">DeepSeek API</div>
+        <div class="setting-row">
+          <span class="setting-label">API Key</span>
+          <div class="setting-control">
+            <input class="setting-input" id="deepseek-key" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 DeepSeek API Key">
+            <button class="key-toggle" id="key-toggle" onclick="toggleKeyVisibility()" title="显示/隐藏 Key">👁</button>
+            <button class="btn btn-ghost" onclick="saveDeepSeekKey()">保存 Key</button>
+          </div>
+        </div>
+        <div class="setting-hint" id="deepseek-hint">Base URL: https://api.deepseek.com · 默认模型: deepseek-v4-flash</div>
+      </div>
+      <div style="text-align:right;margin-top:8px">
+        <span class="settings-saved" id="settings-saved">✓ 已保存</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="jobs-grid" id="jobs-grid"></div>
+
+  <div class="log-panel">
+    <div class="log-panel-header">
+      <span class="log-title">日志</span>
+      <span class="log-subtitle" id="log-selected">全局</span>
+    </div>
+    <div class="log-content" id="log-content">等待启动...</div>
+  </div>
+</div>
+
+<script>
+/* ─── State ─── */
+let connected = false;
+let pollTimer = null;
+const POLL_MS = 1500;
+const POLL_MS_ACTIVE = 800;
+let prevTaskIds = new Set();
+let selectedTaskId = localStorage.getItem('selectedTaskId') || '';
+let realApiKey = '';  // Holds actual key input by user (not persisted to localStorage for security)
+let maskedApiKey = '';  // Masked key from backend
+
+/* ─── Init ─── */
+window.addEventListener('DOMContentLoaded', () => {
+  loadTheme();
+  loadConfigUI();
+  bindDeepSeekKeyInput();
+  poll();
+  pollTimer = setInterval(poll, POLL_MS);
+});
+
+/* ─── Polling ─── */
+async function poll() {
+  try {
+    const res = await fetch('/api/snapshot', {cache: 'no-store'});
+    const data = await res.json();
+    connected = true;
+    hideBanner();
+    render(data);
+
+    // Adaptive polling
+    const active = data.stats?.active || 0;
+    const interval = active > 0 ? POLL_MS_ACTIVE : POLL_MS;
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(poll, interval);
+  } catch (e) {
+    connected = false;
+    showBanner('GUI 服务暂时不可达，正在重试...');
+  }
+}
+
+/* ─── Render ─── */
+function render(data) {
+  renderStats(data.stats || {});
+  renderTasks(data.tasks || []);
+  renderWorker(data.worker || {});
+  renderLogs(data.logs || [], data.tasks || []);
+}
+
+function renderStats(s) {
+  setText('s-total', s.total || 0);
+  setText('s-active', s.active || 0);
+  setText('s-done', s.done || 0);
+  setText('s-failed', s.failed || 0);
+
+  toggleClass('pill-active', 'active', (s.active || 0) > 0);
+  toggleClass('pill-done', 'success', (s.done || 0) > 0);
+  toggleClass('pill-failed', 'error', (s.failed || 0) > 0);
+}
+
+function renderWorker(w) {
+  const btnStart = document.getElementById('btn-start');
+  const btnStop = document.getElementById('btn-stop');
+  if (w.running) {
+    btnStart.style.display = 'none';
+    btnStop.style.display = '';
+  } else {
+    btnStart.style.display = '';
+    btnStop.style.display = 'none';
+  }
+}
+
+function renderTasks(tasks) {
+  const grid = document.getElementById('jobs-grid');
+  if (!tasks.length) {
+    selectedTaskId = '';
+    grid.innerHTML = `
+      <div class="job-card empty">
+        <div class="empty-illustration">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="22"/>
+          </svg>
+        </div>
+        <div class="empty-text">没有任务</div>
+        <div class="empty-hint">将音频/视频文件放入 input/ 目录，然后点击"启动"</div>
+      </div>`;
+    return;
+  }
+
+  const newIds = new Set(tasks.map(t => t.task_id));
+  if (!selectedTaskId || !newIds.has(selectedTaskId)) {
+    const running = tasks.find(t => t.state === 'running');
+    selectedTaskId = (running || tasks[0]).task_id;
+  }
+  let html = '';
+
+  for (const t of tasks) {
+    const isNew = !prevTaskIds.has(t.task_id);
+    const selectedClass = t.task_id === selectedTaskId ? ' selected' : '';
+    const cardClass = `job-card ${t.state}${selectedClass}${isNew ? ' is-new' : ''}`;
+    const badgeClass = {running: 'running', done: 'success', error: 'failed', waiting: 'idle'}[t.state] || 'idle';
+    const badgeText = {running: '运行中', done: '已完成', error: '失败', waiting: '等待中'}[t.state] || t.state;
+
+    let progressHtml = '';
+    if (t.state === 'running' || t.state === 'waiting') {
+      const pct = Math.min(100, Math.max(0, t.progress || 0));
+      progressHtml = `
+        <div class="progress-label">
+          <span>${t.stage_label || '处理中'}</span>
+          <span class="pct">${Math.round(pct)}%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" style="width:${pct}%"></div>
+        </div>`;
+
+      if (t.total_chunks > 0) {
+        progressHtml += `<div class="file-meta">块: ${t.current_chunk} / ${t.total_chunks}</div>`;
+      }
+      if (t.translation_pct > 0) {
+        progressHtml += `
+          <div class="progress-label">
+            <span>翻译</span>
+            <span class="pct">${Math.round(t.translation_pct)}%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" style="width:${t.translation_pct}%;background:var(--accent-amber)"></div>
+          </div>`;
+      }
+      if (t.polish_total > 0) {
+        progressHtml += `
+          <div class="progress-label">
+            <span>润色</span>
+            <span class="pct">${t.polish_done} / ${t.polish_total}</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" style="width:${t.polish_pct}%;background:var(--accent-green, #4ade80)"></div>
+          </div>`;
+      }
+    } else if (t.state === 'done') {
+      progressHtml = `
+        <div class="progress-label">
+          <span>${t.stage_label}</span>
+          <span class="pct">100%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" style="width:100%"></div>
+        </div>`;
+      if (t.polish_summary && t.polish_summary.polish_enabled) {
+        const ps = t.polish_summary;
+        const warn = ps.disabled_after_errors
+          ? ' <span style="color:var(--accent-amber)">⚠ 连续错误致润色中途停用，建议重跑</span>'
+          : '';
+        progressHtml += `<div class="file-meta">润色小结: ${ps.polish_targets} 段送润 · 覆盖率 ${ps.coverage_percent}%${warn}</div>`;
+      }
+    }
+
+    let errorHtml = '';
+    if (t.error && t.state === 'error') {
+      const safeError = escapeHtml(t.error).substring(0, 200);
+      errorHtml = `<div class="error-msg">${safeError}</div>`;
+    }
+
+    let langInfo = '';
+    if (t.detected_language) {
+      langInfo = ` · ${t.detected_language.toUpperCase()}`;
+    }
+
+    html += `
+      <div class="${cardClass}" data-id="${t.task_id}" onclick="selectTask('${escapeAttr(t.task_id)}')">
+        <div class="card-top">
+          <div>
+            <div class="file-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
+            <div class="file-meta">${t.status}${langInfo}</div>
+          </div>
+          <span class="status-badge ${badgeClass}">${badgeText}</span>
+        </div>
+        ${progressHtml}
+        ${errorHtml}
+      </div>`;
+  }
+
+  grid.innerHTML = html;
+  prevTaskIds = newIds;
+}
+
+function selectTask(taskId) {
+  selectedTaskId = taskId;
+  localStorage.setItem('selectedTaskId', taskId);
+  poll();
+}
+
+function renderLogs(logs, tasks) {
+  const el = document.getElementById('log-content');
+  const label = document.getElementById('log-selected');
+  const selected = tasks.find(t => t.task_id === selectedTaskId);
+  const selectedLogs = selected?.log_tail || [];
+  if (label) label.textContent = selected ? selected.name : '全局';
+  // When a task is selected, show its dedicated per-task log.
+  // Fall back to global logs only when no task is selected.
+  if (selected) {
+    if (selectedLogs.length > 0) {
+      el.textContent = selectedLogs.join('\n');
+    } else {
+      // Task selected but log is empty — show status hint
+      const hint = selected.state === 'waiting' ? '任务排队中，尚无日志输出…'
+                 : selected.state === 'running' ? '任务正在运行，等待日志写入…'
+                 : selected.state === 'done' ? '任务已完成。'
+                 : selected.state === 'error' ? `任务失败: ${selected.error || '未知错误'}`
+                 : '等待启动…';
+      el.textContent = hint;
+    }
+  } else {
+    // No task selected — show global worker stdout logs
+    if (logs.length > 0) {
+      el.textContent = logs.join('\n');
+    } else {
+      el.textContent = '等待启动…';
+    }
+  }
+  el.scrollTop = el.scrollHeight;
+}
+
+/* ─── Actions ─── */
+async function doAction(action) {
+  try {
+    await fetch('/api/action', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action}),
+    });
+    setTimeout(poll, 300);
+  } catch (e) {
+    console.error('Action failed:', e);
+  }
+}
+
+/* ─── Settings ─── */
+let settingsLoaded = false;
+
+function toggleSettings() {
+  const panel = document.getElementById('settings-panel');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open') && !settingsLoaded) loadConfigUI();
+}
+
+async function loadConfigUI() {
+  try {
+    const res = await fetch('/api/config', {cache: 'no-store'});
+    const cfg = await res.json();
+    settingsLoaded = true;
+    activateSegBtn('seg-trans-backend', cfg.translation_backend || 'ollama');
+    activateSegBtn('seg-polish-backend', cfg.polish_backend || 'ollama');
+    updateTransHint(cfg.translation_backend || 'ollama', cfg);
+    updateDeepSeekPanel(cfg);
+    // Restore masked API key into the input field
+    maskedApiKey = cfg.masked_api_key || '';
+    const keyInput = document.getElementById('deepseek-key');
+    if (keyInput && maskedApiKey && !realApiKey) {
+      keyInput.value = maskedApiKey;
+      keyInput.type = 'password';
+    }
+  } catch (e) {
+    console.error('Failed to load config:', e);
+  }
+}
+
+function activateSegBtn(groupId, value) {
+  const group = document.getElementById(groupId);
+  if (!group) return;
+  for (const btn of group.querySelectorAll('.seg-btn')) {
+    btn.classList.toggle('active', btn.dataset.val === value);
+  }
+}
+
+function updateTransHint(backend, cfg = null) {
+  const hints = {
+    ollama: '使用本地 Ollama 运行翻译模型，需要足够的显存/内存（推荐 ≥8GB）',
+    deepseek: '使用 DeepSeek 云端 API 翻译，可在下方直接粘贴并保存 API Key（按量计费）',
+    none: '翻译已关闭，仅输出原始语言的转写文本',
+  };
+  const el = document.getElementById('trans-hint');
+  if (!el) return;
+  if (backend === 'deepseek' && cfg && cfg.translation_api_configured && !cfg.translation_api_key_available) {
+    el.textContent = '已选择 DeepSeek API；检测到 API 入口，但当前进程未读到可用 Key。请在下方保存 Key。';
+    return;
+  }
+  el.textContent = hints[backend] || '';
+}
+
+function updateDeepSeekPanel(cfg = null) {
+  const hint = document.getElementById('deepseek-hint');
+  const transBackend = cfg?.translation_backend || activeSegValue('seg-trans-backend');
+  const polishBackend = cfg?.polish_backend || activeSegValue('seg-polish-backend');
+  const usingDeepSeek = transBackend === 'deepseek' || polishBackend === 'deepseek';
+  if (!hint) return;
+  const keyOk = !!(cfg?.translation_api_key_available || cfg?.polish_api_key_available);
+  const status = keyOk ? 'Key 已保存' : '尚未保存 Key';
+  const mode = usingDeepSeek ? 'DeepSeek 已启用' : '可先保存，选用 DeepSeek 后生效';
+  hint.textContent = `${status} · ${mode} · Base URL: ${cfg?.deepseek_base_url || 'https://api.deepseek.com'} · 默认模型: deepseek-v4-flash`;
+}
+
+function activeSegValue(groupId) {
+  const active = document.querySelector(`#${groupId} .seg-btn.active`);
+  return active ? active.dataset.val : '';
+}
+
+async function saveConfigField(data) {
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data),
+    });
+    const result = await res.json();
+    if (data.translation_backend) updateTransHint(data.translation_backend, result);
+    updateDeepSeekPanel(result);
+    if (result.ok && ((result.changed && result.changed.length > 0) || data.deepseek_api_key)) {
+      flashSaved();
+    }
+  } catch (e) {
+    console.error('Failed to save config:', e);
+  }
+}
+
+function setTransBackend(val) {
+  activateSegBtn('seg-trans-backend', val);
+  updateTransHint(val);
+  updateDeepSeekPanel();
+  saveConfigField({translation_backend: val, translation_enabled: val !== 'none'});
+}
+
+function setPolishBackend(val) {
+  activateSegBtn('seg-polish-backend', val);
+  updateDeepSeekPanel();
+  saveConfigField({polish_backend: val});
+}
+
+async function saveDeepSeekKey() {
+  const input = document.getElementById('deepseek-key');
+  // Use realApiKey if the user typed a new one, otherwise get from input
+  const key = realApiKey || (input?.value || '').trim();
+  // Don't save masked key or empty key
+  if (!key || key === maskedApiKey) {
+    showBanner('请先粘贴新的 DeepSeek API Key。');
+    return;
+  }
+  await saveConfigField({deepseek_api_key: key});
+  // After save, reload config to get the new masked key
+  realApiKey = '';  // Clear the real key from memory
+  await loadConfigUI();
+  hideBanner();
+}
+
+function bindDeepSeekKeyInput() {
+  const input = document.getElementById('deepseek-key');
+  if (!input) return;
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      saveDeepSeekKey();
+    }
+  });
+  // Track when user types a new key (replacing the masked one)
+  input.addEventListener('input', () => {
+    const val = input.value.trim();
+    // If user modifies the masked key, treat the full input as a new key
+    if (val && val !== maskedApiKey) {
+      realApiKey = val;
+    } else {
+      realApiKey = '';
+    }
+  });
+  // When the input is focused, if it shows the masked key, clear it for fresh paste
+  input.addEventListener('focus', () => {
+    if (input.value === maskedApiKey && !realApiKey) {
+      input.value = '';
+      input.type = 'text'; // Show plaintext for pasting
+    }
+  });
+  // On blur, if empty, restore the masked key
+  input.addEventListener('blur', () => {
+    if (!input.value.trim() && maskedApiKey && !realApiKey) {
+      input.value = maskedApiKey;
+      input.type = 'password';
+    }
+  });
+}
+
+function toggleKeyVisibility() {
+  const input = document.getElementById('deepseek-key');
+  const btn = document.getElementById('key-toggle');
+  if (!input) return;
+  if (input.type === 'password') {
+    input.type = 'text';
+    if (btn) btn.textContent = '🙈';
+  } else {
+    input.type = 'password';
+    if (btn) btn.textContent = '👁';
+  }
+}
+
+let savedTimer = null;
+function flashSaved() {
+  const el = document.getElementById('settings-saved');
+  if (!el) return;
+  el.classList.add('show');
+  if (savedTimer) clearTimeout(savedTimer);
+  savedTimer = setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+/* ─── Theme ─── */
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+  updateThemeIcons(next);
+}
+
+function loadTheme() {
+  const saved = localStorage.getItem('theme');
+  if (saved) {
+    document.documentElement.setAttribute('data-theme', saved);
+    updateThemeIcons(saved);
+  }
+}
+
+function updateThemeIcons(theme) {
+  document.getElementById('icon-moon').style.display = theme === 'dark' ? '' : 'none';
+  document.getElementById('icon-sun').style.display = theme === 'light' ? '' : 'none';
+}
+
+/* ─── Helpers ─── */
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function toggleClass(id, cls, on) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle(cls, on);
+}
+
+function showBanner(msg) {
+  const el = document.getElementById('banner');
+  el.textContent = msg;
+  el.classList.add('show');
+}
+
+function hideBanner() {
+  document.getElementById('banner').classList.remove('show');
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function escapeAttr(str) {
+  return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/\n/g, '');
+}
+</script>
+</body>
+</html>

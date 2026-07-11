@@ -1,0 +1,135 @@
+{
+  "_note": "Copy this file to config.json and adjust values. Set DEEPSEEK_API_KEY environment variable instead of filling api_key fields.",
+  "_stability_note": "Fast profile for RTX 4060 Laptop 8GB: use large-v3-turbo, keep Whisper inference serialized, run DeepSeek translation/polish through the shared API limiter, and reduce API concurrency if 429s appear.",
+  "input_dir": "input",
+  "output_dir": "output",
+  "work_dir": "work",
+  "audio": {
+    "supported_extensions": [".mp3", ".m4a", ".wav"],
+    "normalize_to_wav": true,
+    "sample_rate": 16000,
+    "channels": 1
+  },
+  "video": {
+    "_note": "Drop a video here and its audio track is extracted via ffmpeg, then transcribed like audio.",
+    "supported_extensions": [".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts", ".flv", ".wmv"]
+  },
+  "subtitles": {
+    "_note": "If a same-stem .srt/.ass sits next to the input (e.g. talk.mp4 + talk.srt), it is used as the transcript source instead of Whisper. Use the original-language subtitle; translation/polish still run normally.",
+    "use_sidecar": true,
+    "sidecar_extensions": [".srt", ".ass", ".ssa", ".vtt"]
+  },
+  "asr": {
+    "backend": "faster-whisper",
+    "model": "large-v3-turbo",
+    "fallback_models": ["medium", "small"],
+    "language": "auto",
+    "device_preference": "auto",
+    "compute_type_preference": ["int8_float16", "float16", "int8"],
+    "vad_filter": true,
+    "beam_size": 5,
+    "batch_size": 4,
+    "chunk_seconds": 1800,
+    "use_batched_inference": true,
+    "cpu_threads": 4,
+    "num_workers": 5
+  },
+  "pipeline": {
+    "max_parallel_audio_files": 3,
+    "max_parallel_translations": 6,
+    "max_parallel_postprocess_files": 3,
+    "max_deepseek_api_requests": 6
+  },
+  "watchdog": {
+    "stall_seconds": 120,
+    "transcription_stall_seconds": 300
+  },
+  "translation": {
+    "english_required": true,
+    "chinese_skip": true,
+    "backend": "deepseek",
+    "ollama_url": "http://127.0.0.1:11434/api/generate",
+    "auto_start_ollama": true,
+    "ollama_start_timeout_seconds": 20,
+    "model": "deepseek-v4-flash",
+    "target_language": "zh-CN",
+    "source_language": "en",
+    "batch_segments": 32,
+    "max_batch_chars": 12000,
+    "timeout_seconds": 240,
+    "keep_alive": "30m",
+    "think": false,
+    "temperature": 0.3,
+    "glossary": {},
+    "num_ctx": 8192,
+    "num_predict": 8192,
+    "max_tokens": 8192,
+    "max_batch_workers": 6,
+    "num_thread": 4,
+    "layout": "zh_then_en",
+    "strict_output": true,
+    "base_url": "https://api.deepseek.com",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "api_key": "",
+    "pricing_per_million_tokens": {
+      "input": 0.14,
+      "cache_hit_input": 0.0028,
+      "output": 0.28
+    }
+  },
+  "diarization": {
+    "enabled": true,
+    "fallback_roles": ["采访者", "受访者"]
+  },
+  "markdown": {
+    "one_audio_one_md": true,
+    "include_metadata": true,
+    "include_english_original_for_english_audio": true,
+    "speaker_labels_enabled": false,
+    "speaker_labels": {
+      "host": "采访者",
+      "guest": "受访者"
+    },
+    "merge_same_speaker": true,
+    "max_paragraph_chars": 700,
+    "zh_max_paragraph_chars": 420,
+    "zh_merge_chars": 420,
+    "include_timestamps": false,
+    "sponsor_mode": "section",
+    "llm_polish": {
+      "enabled": true,
+      "model": "deepseek-v4-flash",
+      "timeout_seconds": 300,
+      "fallback_on_error": true,
+      "only_suspect_blocks": true,
+      "max_blocks_per_file": 24,
+      "min_chinese_suspect_blocks": 32,
+      "batch_blocks": 12,
+      "zh_batch_blocks": 4,
+      "max_batch_chars": 12000,
+      "zh_max_batch_chars": 5000,
+      "max_tokens": 4096,
+      "backend": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "api_key": "",
+      "pricing_per_million_tokens": {
+        "input": 0.14,
+        "cache_hit_input": 0.0028,
+        "output": 0.28
+      }
+    },
+    "fail_on_quality_errors": true
+  },
+  "skip_processed_files": false,
+  "always_reprocess_inputs": true,
+  "launcher": {
+    "open_folder_after_run": true,
+    "open_folder": "output",
+    "pause_on_exit": "interactive"
+  },
+  "ffmpeg_threads": 2,
+  "omp_num_threads": 4,
+  "process_priority": "BelowNormal",
+  "process_affinity_mask": null
+}

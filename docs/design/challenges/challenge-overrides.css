@@ -1,0 +1,129 @@
+:root {
+  --challenge-ink: #0d1112;
+  --challenge-panel: #151b1c;
+  --challenge-line: rgba(183, 151, 92, 0.28);
+  --challenge-brass: #b7975c;
+  --challenge-paper: #ded8ca;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--challenge-ink) !important;
+}
+
+.app-frame {
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  max-height: none !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.titlebar,
+.screen-nav {
+  display: none !important;
+}
+
+.bookshelf,
+.reader {
+  height: 100vh !important;
+  background:
+    linear-gradient(90deg, rgba(183, 151, 92, 0.035) 1px, transparent 1px) 0 0 / 72px 72px,
+    var(--challenge-ink) !important;
+}
+
+.bs-header {
+  height: 84px !important;
+  padding: 0 64px !important;
+  border-bottom-color: var(--challenge-line) !important;
+}
+
+.bs-body {
+  max-width: 1280px !important;
+  padding: 36px 64px 88px !important;
+}
+
+.resume {
+  min-height: 170px !important;
+  padding: 32px 40px !important;
+  border: 0 !important;
+  border-left: 3px solid var(--challenge-brass) !important;
+  border-radius: 0 18px 18px 0 !important;
+  background: linear-gradient(90deg, rgba(183, 151, 92, 0.11), rgba(21, 27, 28, 0.94) 44%, rgba(21, 27, 28, 0.72)) !important;
+}
+
+.collection-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 12px !important;
+}
+
+.book-card {
+  min-height: 190px !important;
+  border-color: rgba(222, 216, 202, 0.09) !important;
+  border-radius: 8px !important;
+  background: rgba(21, 27, 28, 0.84) !important;
+}
+
+.book-card:hover {
+  border-color: var(--challenge-line) !important;
+  transform: translateY(-2px) !important;
+}
+
+.reader-top {
+  height: 64px !important;
+  background: rgba(13, 17, 18, 0.94) !important;
+  border-bottom: 1px solid var(--challenge-line) !important;
+}
+
+.reader-scroll {
+  height: calc(100vh - 64px) !important;
+}
+
+.article {
+  max-width: 690px !important;
+  padding-top: 74px !important;
+}
+
+.toc-overlay {
+  justify-content: flex-end !important;
+  align-items: stretch !important;
+  padding: 64px 0 0 !important;
+  background: linear-gradient(90deg, rgba(13, 17, 18, 0.2), rgba(13, 17, 18, 0.82)) !important;
+}
+
+.toc-panel {
+  width: min(520px, 42vw) !important;
+  max-height: none !important;
+  height: 100% !important;
+  border-width: 0 0 0 1px !important;
+  border-color: var(--challenge-line) !important;
+  border-radius: 0 !important;
+  background: rgba(21, 27, 28, 0.98) !important;
+  box-shadow: -32px 0 80px rgba(0, 0, 0, 0.45) !important;
+}
+
+.focus-mode .reader-scroll {
+  background:
+    radial-gradient(circle at 50% 52%, rgba(183, 151, 92, 0.08), transparent 24%),
+    var(--challenge-ink) !important;
+}
+
+.focus-mode .article {
+  max-width: 650px !important;
+}
+
+.focus-mode .article-body .lit {
+  color: var(--challenge-paper) !important;
+  text-shadow: 0 0 24px rgba(183, 151, 92, 0.18) !important;
+}
+
+.focus-hint {
+  border: 1px solid rgba(222, 216, 202, 0.08) !important;
+  border-radius: 6px !important;
+  background: rgba(13, 17, 18, 0.88) !important;
+}

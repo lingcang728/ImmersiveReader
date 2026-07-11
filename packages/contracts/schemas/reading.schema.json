@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://immersive-reader.local/schemas/reading-v1.json",
+  "title": "Immersive Reader Reading State v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "current", "position", "read", "updated"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "current": { "type": "string", "minLength": 1 },
+    "position": { "type": "number", "minimum": 0, "maximum": 1 },
+    "read": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "updated": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="darkreader-lock">
+  <meta name="color-scheme" content="dark">
+  <title>沉浸式 Markdown 阅读器</title>
+  <style>
+    /* 沉浸阅读 — Night Lamp design tokens */
+    :root {
+      --bg-color: #161412 !important;
+      --bg-raised: #1c1916 !important;
+      --bg-elevated: #23201c !important;
+      --card-bg: rgba(28, 25, 22, 0.72) !important;
+      --card-bg-active: rgba(35, 32, 28, 0.94) !important;
+      --border-color: rgba(228, 221, 208, 0.07) !important;
+      --border-color-active: rgba(196, 164, 106, 0.35) !important;
+      --line: rgba(228, 221, 208, 0.07) !important;
+      --text-color: #e4ddd0 !important;
+      --text-secondary: #a39c8f !important;
+      --text-muted: #8f887d !important;
+      --text-light: #e4ddd0 !important;
+      --accent-color: #c4a46a !important;
+      --accent-gradient: linear-gradient(135deg, #c4a46a, #b28e52) !important;
+      --accent-glow: rgba(196, 164, 106, 0.18) !important;
+      --p-font-size: 18px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: radial-gradient(ellipse 80% 42% at 50% -10%, rgba(196, 164, 106, 0.055), transparent 58%), var(--bg-color);
+      color: var(--text-color);
+      font-family: "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+      overflow-x: hidden;
+      scroll-behavior: smooth;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    /* 滚动条美化 */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.25);
+    }
+
+    /* --- 极客磨砂玻璃风格导入页 --- */
+    .landing-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 40px 24px;
+      background: var(--bg-color);
+    }
+
+    .landing-card {
+      width: 100%;
+      max-width: 520px;
+      padding: 40px 32px;
+      background: rgba(28, 25, 22, 0.92) !important;
+      backdrop-filter: blur(24px) saturate(120%);
+      border: 1px solid var(--border-color);
+      border-radius: 20px;
+      box-shadow: 0 28px 64px rgba(0, 0, 0, 0.48),
+                  0 0 40px rgba(196, 164, 106, 0.06);
+      text-align: center;
+    }
+
+    .landing-content {
+      width: min(520px, calc(100vw - 48px));
+      padding: 40px 32px;
+      background: rgba(28, 25, 22, 0.96);
+      border: 1px solid var(--border-color-active);
+      border-radius: 18px;
+      box-shadow: 0 28px 64px rgba(0, 0, 0, 0.48);
+      text-align: center;
+    }
+
+    .landing-content h1 {
+      margin-bottom: 14px;
+      color: var(--text-light);
+      font: 600 1.75rem/1.35 "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+    }
+
+    .landing-content p {
+      margin-bottom: 24px;
+      color: var(--text-secondary);
+      line-height: 1.7;
+      overflow-wrap: anywhere;
+    }
+
+    .landing-logo {
+      font-size: 2.25rem;
+      font-family: "Noto Serif SC", "SimSun", serif;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      margin-bottom: 8px;
+      color: var(--text-light);
+      background: var(--accent-gradient);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .landing-desc {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      margin-bottom: 32px;
+    }
+
+    .drop-zone {
+      border: 1px dashed var(--border-color);
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 12px;
+      padding: 48px 24px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      margin-bottom: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .drop-zone:hover {
+      border-color: var(--accent-color);
+      background: rgba(196, 164, 106, 0.05);
+    }
+
+    .drop-zone.dragover {
+      border-color: var(--accent-color);
+      background: rgba(196, 164, 106, 0.14);
+      box-shadow: 0 0 20px rgba(196, 164, 106, 0.16);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px 24px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-light);
+      background: var(--accent-gradient);
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      box-shadow: 0 4px 15px rgba(196, 164, 106, 0.18);
+      transition: all 0.25s ease;
+      width: 100%;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(196, 164, 106, 0.24);
+      opacity: 0.95;
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border-color);
+      color: var(--text-color);
+      margin-top: 10px;
+      box-shadow: none;
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: var(--text-muted);
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn-error {
+      background: #EF4444 !important;
+      color: #FFFFFF !important;
+      box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none !important;
+      box-shadow: none !important;
+    }
+
+    .landing-tips {
+      margin-top: 32px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      text-align: left;
+      border-top: 1px solid var(--border-color);
+      padding-top: 16px;
+      line-height: 1.6;
+    }
+
+    .landing-tips code {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border-color);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: monospace;
+      color: var(--text-light);
+    }
+
+    /* --- 布局系统 --- */
+    .app-container {
+      display: flex;
+      min-height: 100vh;
+      position: relative;
+    }
+
+    /* 侧边大纲目录 - 覆盖式抽屉设计 (默认收起) */
+    .sidebar {
+      width: 320px;
+      max-width: 85vw;
+      height: 100vh;
+      position: fixed;
+      left: 0;
+      top: 0;
+      background: rgba(10, 10, 12, 0.85);
+      backdrop-filter: blur(24px) saturate(120%);
+      border-right: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      z-index: 1000;
+      transform: translateX(-320px);
+      transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1), box-shadow 0.3s ease;
+    }
+    
+    .sidebar.active {
+      transform: translateX(0);
+      box-shadow: 20px 0 50px rgba(0, 0, 0, 0.8), 0 0 30px rgba(0, 0, 0, 0.5);
+    }
+
+    /* 侧栏半透明遮罩背景 */
+    .sidebar-overlay {
+      position: fixed;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(5, 5, 8, 0.5);
+      backdrop-filter: blur(2px);
+      z-index: 999;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+
+    .sidebar-overlay.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .sidebar-header {
+      padding: 24px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .sidebar-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--text-light);
+      background: var(--accent-gradient);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+
+    .sidebar-subtitle {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+
+    .sidebar-search-box {
+      padding: 16px 24px;
+      position: relative;
+    }
+
+    .sidebar-search-input {
+      width: 100%;
+      padding: 10px 14px 10px 36px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-color);
+      color: var(--text-light);
+      font-size: 0.9rem;
+      outline: none;
+      transition: all 0.3s ease;
+    }
+
+    .sidebar-search-input:focus {
+      border-color: var(--accent-color);
+      box-shadow: 0 0 10px rgba(196, 164, 106, 0.16);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .search-icon-svg {
+      position: absolute;
+      left: 36px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 16px;
+      height: 16px;
+      fill: var(--text-muted);
+      pointer-events: none;
+    }
+
+    .sidebar-menu {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      position: relative;
+    }
+
+    /* 目录气泡滚动背景 */
+    .menu-bubble {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      height: 40px;
+      background: rgba(196, 164, 106, 0.12);
+      border-radius: 8px;
+      border-left: 3px solid var(--accent-color);
+      pointer-events: none;
+      transition: top 0.25s cubic-bezier(0.25, 1, 0.5, 1), height 0.25s cubic-bezier(0.25, 1, 0.5, 1);
+      z-index: 0;
+      display: none;
+    }
+
+    .menu-item {
+      display: block;
+      width: 100%;
+      border: 0;
+      background: transparent;
+      text-align: left;
+      font-family: inherit;
+      padding: 10px 14px;
+      border-radius: 8px;
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-size: 0.88rem;
+      line-height: 1.4;
+      cursor: pointer;
+      position: relative;
+      z-index: 1;
+      transition: color 0.3s ease, background-color 0.3s ease;
+      margin-bottom: 2px;
+    }
+
+    .menu-item > div:first-child {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .menu-item:hover {
+      color: var(--text-light);
+      background-color: rgba(255, 255, 255, 0.03);
+    }
+
+    .menu-item.active {
+      color: var(--text-light);
+      font-weight: 600;
+    }
+
+    .menu-item-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+
+    /* 目录分组 */
+    .menu-group-header {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      font-family: inherit;
+      padding: 12px 14px 6px 14px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text-light);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .menu-group-header::after {
+      content: '▼';
+      font-size: 0.6rem;
+      color: var(--text-muted);
+      transition: transform 0.2s ease;
+    }
+
+    .menu-group-header.collapsed::after {
+      transform: rotate(-90deg);
+    }
+
+    .menu-group-container {
+      max-height: 2000px;
+      overflow: hidden;
+      transition: max-height 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+
+    .menu-group-container.collapsed {
+      max-height: 0 !important;
+    }
+
+    .group-count {
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+      margin-left: 6px;
+    }
+
+    /* 极简左上角悬浮菜单触发按钮 */
+    .menu-trigger-btn {
+      position: fixed;
+      left: 24px;
+      top: 24px;
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: rgba(16, 15, 13, 0.76);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 500;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      transition: all 0.3s ease;
+    }
+
+    .menu-trigger-btn:hover {
+      background: rgba(35, 32, 28, 0.94);
+      border-color: rgba(255, 255, 255, 0.2);
+      transform: scale(1.05);
+    }
+
+    .menu-trigger-btn svg {
+      width: 20px;
+      height: 20px;
+      fill: var(--text-muted);
+      transition: fill 0.3s ease;
+    }
+
+    .menu-trigger-btn:hover svg {
+      fill: var(--text-light);
+    }
+
+    .menu-trigger-btn:focus-visible,
+    .menu-item:focus-visible,
+    .menu-group-header:focus-visible,
+    .palette-item:focus-visible,
+    .palette-input:focus-visible,
+    .btn:focus-visible {
+      outline: 2px solid var(--accent-color);
+      outline-offset: 3px;
+    }
+
+    /* --- 主正文区域 --- */
+    .main-content {
+      flex: 1;
+      margin-left: 0;
+      padding: 80px 24px 240px 24px;
+      display: flex;
+      justify-content: center;
+      transition: all 0.3s ease;
+      width: 100%;
+    }
+
+    .articles-container {
+      width: 100%;
+      max-width: 720px;
+      display: flex;
+      flex-direction: column;
+      gap: 100px;
+    }
+
+    /* --- 文章卡片 (Raycast/Linear 风格) --- */
+    .article-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 20px;
+      padding: 44px;
+      position: relative;
+      transition: transform 0.6s cubic-bezier(0.25, 1, 0.5, 1),
+                  box-shadow 0.6s cubic-bezier(0.25, 1, 0.5, 1),
+                  border-color 0.6s cubic-bezier(0.25, 1, 0.5, 1),
+                  opacity 0.6s cubic-bezier(0.25, 1, 0.5, 1);
+      
+      opacity: 0.55;
+      transform: scale(0.98);
+    }
+
+    .article-card.active {
+      background: var(--card-bg-active);
+      border-color: var(--border-color-active);
+      box-shadow: 0 0 50px var(--accent-glow), 
+                  0 0 100px rgba(196, 164, 106, 0.06),
+                  inset 0 0 15px rgba(255, 255, 255, 0.02);
+      opacity: 1;
+      transform: scale(1.01);
+    }
+
+    .article-header {
+      margin-bottom: 28px;
+      position: relative;
+    }
+
+    .article-title {
+      font-size: 2.25rem;
+      font-weight: 800;
+      font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+      color: var(--text-light);
+      line-height: 1.35;
+      letter-spacing: -0.02em;
+      margin-bottom: 20px;
+      transition: color 0.3s ease;
+    }
+
+    .article-divider {
+      height: 1px;
+      background: linear-gradient(90deg, var(--accent-color), rgba(196, 164, 106, 0.2), transparent);
+      width: 100%;
+      margin-bottom: 20px;
+    }
+
+    .article-meta-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 0.88rem;
+      color: var(--text-secondary);
+      flex-wrap: wrap;
+    }
+
+    .meta-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      padding: 6px 12px;
+      border-radius: 30px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .meta-badge-upvote {
+      background: rgba(196, 164, 106, 0.08);
+      border-color: rgba(196, 164, 106, 0.2);
+      color: var(--accent-color);
+    }
+    
+    .meta-badge-upvote svg {
+      fill: var(--accent-color);
+      width: 14px;
+      height: 14px;
+    }
+
+    .article-body {
+      font-size: var(--p-font-size);
+      line-height: 1.9;
+      letter-spacing: 0.015em;
+      color: var(--text-color);
+      font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+      transition: font-size 0.25s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+
+    .article-body p {
+      margin-bottom: 1.8rem;
+    }
+
+    .article-body p:last-child {
+      margin-bottom: 0;
+    }
+
+    .article-body h1, .article-body h2, .article-body h3, .article-body h4 {
+      color: var(--text-light);
+      margin-top: 2rem;
+      margin-bottom: 1rem;
+      line-height: 1.4;
+    }
+    
+    .article-body h1 { font-size: 1.8rem; }
+    .article-body h2 { font-size: 1.5rem; border-bottom: 1px solid var(--border-color); padding-bottom: 8px; }
+    .article-body h3 { font-size: 1.3rem; }
+
+    .article-body ul, .article-body ol {
+      margin-bottom: 1.8rem;
+      padding-left: 28px;
+    }
+
+    .article-body li {
+      margin-bottom: 0.6em;
+    }
+
+    /* 代码块美化 */
+    .article-body pre {
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--border-color);
+      padding: 20px;
+      border-radius: 12px;
+      overflow-x: auto;
+      margin-bottom: 1.8rem;
+    }
+
+    .article-body code {
+      font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.9em;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 3px 6px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .article-body pre code {
+      background: transparent;
+      padding: 0;
+      border: none;
+    }
+
+    /* 图片美化 */
+    .image-wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      margin: 2rem 0;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid var(--border-color);
+    }
+
+    .image-wrapper img, .article-body img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 8px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      cursor: zoom-in;
+      transition: transform 0.3s ease;
+      background: rgba(255, 255, 255, 0.02);
+      min-height: 100px;
+    }
+
+    .image-wrapper img:hover {
+      transform: scale(1.015);
+    }
+
+    /* 引用块美化 */
+    .article-body blockquote {
+      border-left: 4px solid var(--accent-color);
+      padding: 12px 20px;
+      background: rgba(196, 164, 106, 0.03);
+      border-radius: 0 8px 8px 0;
+      color: var(--text-muted);
+      margin: 1.5rem 0;
+    }
+
+    /* 表格 */
+    .article-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1.8rem;
+      font-size: 0.92em;
+    }
+
+    .article-body th, .article-body td {
+      border: 1px solid var(--border-color);
+      padding: 12px 14px;
+      text-align: left;
+    }
+
+    .article-body th {
+      background: rgba(255, 255, 255, 0.02);
+      font-weight: 700;
+      color: var(--text-light);
+    }
+
+    /* 裂图占位 */
+    .img-missing {
+      max-width: 240px !important;
+      opacity: 0.5;
+    }
+
+    .article-loading-placeholder, .article-error-placeholder {
+      padding: 48px;
+      text-align: center;
+      color: var(--text-muted);
+      border: 1px dashed var(--border-color);
+      border-radius: 12px;
+      font-size: 0.95rem;
+    }
+
+    .article-error-placeholder {
+      color: #f28b7d;
+      background: rgba(239, 68, 68, 0.02);
+      border-color: rgba(239, 68, 68, 0.15);
+    }
+
+    /* 极简底部悬浮元信息 (取代控制台) */
+    .floating-progress-label {
+      position: fixed;
+      right: 24px;
+      top: 24px;
+      background: rgba(16, 15, 13, 0.82);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 10px 16px;
+      font-size: 0.88rem;
+      font-family: monospace;
+      color: var(--text-light);
+      z-index: 500;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
+    
+    .floating-progress-label span {
+      color: var(--accent-color);
+      font-weight: 700;
+    }
+
+    /* --- Command Palette (Figma / Raycast) --- */
+    .search-overlay {
+      position: fixed;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(16, 15, 13, 0.84);
+      backdrop-filter: blur(8px);
+      z-index: 2000;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding-top: 12vh;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+    }
+
+    .search-overlay.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .search-palette {
+      width: 640px;
+      max-width: 90vw;
+      background: rgba(28, 25, 22, 0.96);
+      backdrop-filter: blur(24px) saturate(120%);
+      border: 1px solid var(--accent-color);
+      border-radius: 16px;
+      box-shadow: 0 30px 70px rgba(0, 0, 0, 0.8),
+                  0 0 40px rgba(196, 164, 106, 0.1);
+      overflow: hidden;
+      transform: translateY(-20px) scale(0.98);
+      transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+
+    .search-overlay.active .search-palette {
+      transform: translateY(0) scale(1);
+    }
+
+    .palette-input-wrapper {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .palette-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text-light);
+      font-size: 1.15rem;
+      font-family: inherit;
+    }
+
+    .palette-input::placeholder {
+      color: var(--text-secondary);
+    }
+
+    .palette-results {
+      max-height: 380px;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    .palette-item {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      font-family: inherit;
+      padding: 12px 16px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: background-color 0.2s ease, transform 0.1s ease;
+      gap: 12px;
+    }
+
+    .palette-item:hover, .palette-item.selected {
+      background: rgba(196, 164, 106, 0.14);
+    }
+    
+    .palette-item.selected {
+      border-left: 3px solid var(--accent-color);
+      padding-left: 13px;
+    }
+
+    .palette-item-title {
+      font-size: 0.95rem;
+      font-weight: 500;
+      color: var(--text-light);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+
+    .palette-item-meta {
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      display: flex;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    
+    .palette-item-meta span {
+      background: rgba(255, 255, 255, 0.04);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    .palette-no-results {
+      padding: 32px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    .palette-footer {
+      padding: 12px 24px;
+      background: rgba(0, 0, 0, 0.2);
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      justify-content: flex-end;
+      gap: 16px;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      flex-wrap: wrap;
+    }
+
+    .palette-footer kbd {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-family: inherit;
+      color: var(--text-light);
+      margin: 0 2px;
+    }
+
+    /* Lightbox 图片放大 */
+    .lightbox-overlay {
+      position: fixed;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.95);
+      z-index: 3000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+      cursor: zoom-out;
+    }
+    
+    .lightbox-overlay.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .lightbox-img {
+      max-width: 90%;
+      max-height: 90%;
+      object-fit: contain;
+      border-radius: 4px;
+      box-shadow: 0 10px 50px rgba(0, 0, 0, 0.8);
+      transform: scale(0.95);
+      transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+
+    .lightbox-overlay.active .lightbox-img {
+      transform: scale(1);
+    }
+
+    /* 顶部阅读进度条 */
+    .top-indicator {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 3px;
+      background: transparent;
+      z-index: 1500;
+    }
+
+    .top-progress-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent-gradient);
+      box-shadow: 0 0 10px var(--accent-color);
+      transition: width 0.1s linear;
+    }
+
+    /* 页面精确定位跳转准备遮罩 */
+    .jump-loading-indicator {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(9, 9, 11, 0.85);
+      backdrop-filter: blur(8px);
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .jump-loading-content {
+      text-align: center;
+      background: rgba(28, 25, 22, 0.94);
+      padding: 32px 48px;
+      border-radius: 16px;
+      border: 1px solid var(--border-color);
+      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+    }
+
+    .jump-loading-text {
+      font-size: 1.1rem;
+      color: var(--text-color);
+      margin-top: 16px;
+      margin-bottom: 8px;
+    }
+
+    .jump-loading-progress {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid rgba(196, 164, 106, 0.1);
+      border-top-color: var(--accent-color);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* --- 文章转场动画系统已由 Web Animations API 接管，移除旧的长列表横向转场样式 --- */
+
+    @media (max-width: 768px) {
+      .menu-trigger-btn { left: 16px; top: 16px; }
+      .floating-progress-label { right: 16px; top: 16px; }
+      .article-card { padding: 24px; border-radius: 12px; }
+      .article-title { font-size: 1.75rem; }
+    }
+
+    @media (min-width: 769px) and (max-width: 1024px) {
+      .floating-progress-label {
+        right: 12px;
+        padding: 8px 10px;
+        font-size: 0.78rem;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 顶部阅读指示器 -->
+  <div class="top-indicator">
+    <div class="top-progress-fill" id="top-progress"></div>
+  </div>
+
+  <section id="landing-section" class="landing-container hidden">
+    <div class="landing-card">
+      <div class="landing-logo">沉浸阅读</div>
+      <div class="landing-desc">本地优先的 Markdown 连读工具</div>
+
+      <!-- 拖拽框 -->
+      <div class="drop-zone" id="drop-zone">
+        <svg style="width: 32px; height: 32px; fill: var(--text-muted); margin-bottom: 12px;" viewBox="0 0 24 24">
+          <path d="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" />
+        </svg>
+        <span style="font-size: 0.9rem; color: var(--text-muted); font-weight: 500;">拖拽本地文件夹到此处导入</span>
+      </div>
+
+      <!-- 选择文件夹按钮 -->
+      <button class="btn" id="select-folder-btn">选择 Markdown 文件夹</button>
+      <input type="file" id="fallback-folder-input" class="hidden" webkitdirectory multiple>
+
+      <!-- 恢复上次按钮 -->
+      <button class="btn btn-secondary hidden" id="restore-last-btn">尝试恢复上次阅读</button>
+
+      <!-- 快捷键提示 -->
+      <div class="landing-tips">
+        <p style="margin-bottom: 6px; font-weight: 600; color: var(--text-light);">常用快捷键</p>
+        <p style="margin-bottom: 4px;"><code>J / K</code> 切换上下篇文章</p>
+        <p style="margin-bottom: 4px;"><code>M</code> 展开或收起左侧目录</p>
+        <p style="margin-bottom: 4px;"><code>/</code> 打开 Command Palette 搜索</p>
+        <p style="margin-bottom: 4px;"><code>+ / -</code> 自由无级缩放正文字号</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- --- 阅读器主页面 --- -->
+  <section id="app-container" class="app-container hidden">
+    <!-- 左上角极简悬浮菜单触控 -->
+    <button type="button" class="menu-trigger-btn" id="menu-trigger" title="展开目录 (M)" aria-label="展开目录" aria-controls="sidebar" aria-expanded="false">
+      <svg viewBox="0 0 24 24">
+        <path d="M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z"/>
+      </svg>
+    </button>
+
+    <!-- 右上角极简页码 -->
+    <div class="floating-progress-label" id="floating-progress">
+      <span>1</span> / 1
+    </div>
+
+    <!-- 侧栏抽屉遮罩背景 -->
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <!-- 侧栏目录 (抽屉式，默认 collapsed) -->
+    <aside class="sidebar" id="sidebar" aria-hidden="true" inert>
+      <div class="sidebar-header">
+        <h1 class="sidebar-title">内容归档</h1>
+        <div class="sidebar-subtitle">沉浸阅读</div>
+      </div>
+      
+      <div class="sidebar-search-box">
+        <svg class="search-icon-svg" viewBox="0 0 24 24">
+          <path d="M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" />
+        </svg>
+        <input type="text" class="sidebar-search-input" id="sidebar-search" placeholder="过滤目录... (/)">
+      </div>
+
+      <nav class="sidebar-menu" id="sidebar-menu">
+        <div class="menu-bubble" id="menu-bubble"></div>
+        <!-- 目录列表项动态插入 -->
+      </nav>
+    </aside>
+
+    <!-- 主正文区域 -->
+    <main class="main-content" id="main-content">
+      <div class="articles-container" id="articles-container">
+        <!-- ARTICLES_DOM_PLACEHOLDER -->
+      </div>
+    </main>
+  </section>
+
+  <!-- Command Palette 检索浮层 -->
+  <div class="search-overlay" id="search-overlay" role="dialog" aria-modal="true" aria-label="搜索篇目" aria-hidden="true" inert>
+    <div class="search-palette">
+      <div class="palette-input-wrapper">
+        <svg style="width: 20px; height: 20px; fill: var(--accent-color);" viewBox="0 0 24 24">
+          <path d="M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" />
+        </svg>
+        <input type="text" class="palette-input" id="palette-input" placeholder="输入拼音、首字母、汉字进行检索..." autocomplete="off">
+      </div>
+      
+      <div class="palette-results" id="palette-results"></div>
+      
+      <div class="palette-footer">
+        <span>移动: <kbd>↑</kbd> <kbd>↓</kbd></span>
+        <span>跳转: <kbd>Enter</kbd></span>
+        <span>退出: <kbd>Esc</kbd></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lightbox 图片放大遮罩 -->
+  <div class="lightbox-overlay" id="lightbox-overlay">
+    <img class="lightbox-img" id="lightbox-img" src="" alt="放大图">
+  </div>
+
+  <!-- 预注入的文章数据 JSON -->
+  <script id="articles-json" type="application/json">
+    /* ARTICLES_JSON_PLACEHOLDER */
+  </script>
+
+  <!-- 1. 第三方 Markdown 解析器 -->
+  <script id="marked-js">
+    /* MARKED_JS_PLACEHOLDER */
+  </script>
+
+  <!-- 2. 第三方 HTML 净化器 -->
+  <script id="dompurify-js">
+    /* DOMPURIFY_JS_PLACEHOLDER */
+  </script>
+
+  <!-- 3. 前端应用 JS Bundle -->
+  <script id="frontend-bundle-js">
+    /* FRONTEND_BUNDLE_PLACEHOLDER */
+  </script>
+
+</body>
+</html>

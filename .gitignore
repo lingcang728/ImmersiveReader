@@ -1,0 +1,53 @@
+# Workspace dependencies and build products
+**/node_modules/
+**/.svelte-kit/
+**/build/
+**/dist/
+**/target/
+**/.pytest_cache/
+**/__pycache__/
+**/*.py[cod]
+
+# Local runtimes and models
+runtime/
+**/.venv/
+**/venv/
+**/models/
+**/.browser-profile/
+**/.obscura-profile/
+
+# User content and runtime state
+/Library/
+**/input/*
+**/output/*
+**/work/
+!**/input/.gitkeep
+!**/output/.gitkeep
+**/*.db
+**/*.db-*
+**/*.sqlite*
+**/*.log
+**/config.json
+**/.env*
+!**/.env.example
+
+# Credentials and package artifacts
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/*.msi
+**/*.exe
+**/*.zip
+
+# QA artifacts
+artifacts/
+playwright-report/
+test-results/
+*.tmp
+*.bak
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+desktop.ini

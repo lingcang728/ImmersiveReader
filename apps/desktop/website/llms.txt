@@ -1,0 +1,36 @@
+# ImmersiveReader（沉浸阅读）
+
+> A local Windows reading system that unifies Zhihu archiving, podcast transcription, and Markdown deep-reading in one library. Spotlight focus mode is inherited from MMbook.
+
+ImmersiveReader is the successor to **MMbook**, **PodcastTranscriber**, and **Zhihu Packer**. Those repositories are deprecated/archived; all new development continues here.
+
+## What ImmersiveReader does
+
+- **Unified local library**: books from Zhihu, manual Markdown imports, and other sources live under one Documents library with per-book `manifest.json` and reading progress.
+- **Markdown deep reading**: spotlight focus mode, themes, search, TOC, inline paragraph editing (from MMbook).
+- **Podcast transcription**: audio/video → polished bilingual Markdown notes (from PodcastTranscriber).
+- **Zhihu archiving**: pack long-form Zhihu content into the same library (from Zhihu Packer).
+- **Deep read + continuous read**: desktop immersive reading; browser continuous reading shares progress with the desktop app.
+- **Privacy-first**: content, progress, credentials, and models stay on the local machine.
+
+## Links
+
+- Product site (this page): https://immersivereader.vercel.app/
+- Source code: https://github.com/lingcang728/ImmersiveReader
+- Issues / feedback: https://github.com/lingcang728/ImmersiveReader/issues
+
+## Deprecated predecessors
+
+- MMbook: https://github.com/lingcang728/MMbook (archived)
+- PodcastTranscriber: https://github.com/lingcang728/PodcastTranscriber (archived)
+
+## Stack
+
+- Desktop: Tauri 2 + Svelte 5 + TypeScript + Rust
+- Podcast runtime: Python + faster-whisper (+ optional DeepSeek / Ollama)
+- Zhihu runtime: Node + local Chromium profile
+- Storage: local filesystem library under Documents
+
+## Author
+
+凌苍 (LingCang) — independent developer.

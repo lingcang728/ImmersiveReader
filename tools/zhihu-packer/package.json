@@ -1,0 +1,42 @@
+{
+  "name": "zhihu_packer",
+  "version": "1.0.0",
+  "description": "Zhihu Content Archival Tool",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "test": "node --test tests/*.test.ts",
+    "doctor": "tsx src/cli.ts doctor",
+    "login": "tsx src/cli.ts login",
+    "cli": "tsx src/cli.ts",
+    "web": "tsx src/server.ts",
+    "build-manifests": "tsx src/generate-manifests.ts",
+    "build-reader": "npm run compile-reader && npm run build-manifests && tsx src/build-html.ts",
+    "build-reader:from-manifests": "npm run compile-reader && tsx src/build-html.ts",
+    "compile-reader": "tsx src/compile-reader.ts",
+    "serve-reader": "tsx src/serve-reader.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/express": "^5.0.0",
+    "commander": "^12.1.0",
+    "dompurify": "^3.4.5",
+    "express": "^4.21.2",
+    "playwright-core": "^1.60.0",
+    "typescript": "^5.7.3"
+  },
+  "devDependencies": {
+    "@types/dompurify": "^3.0.5",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^22.13.0",
+    "esbuild": "^0.28.0",
+    "jsdom": "^29.1.1",
+    "marked": "^18.0.4",
+    "pinyin-pro": "^3.28.1",
+    "tsx": "^4.19.2"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "bookId": "zhihu:fixture-author",
+  "title": "契约测试文集",
+  "source": "zhihu",
+  "sourceId": "fixture-author",
+  "generatedAt": "2026-07-10T00:00:00.000Z",
+  "updatedAt": "2026-07-10T00:00:00.000Z",
+  "chapters": [
+    {
+      "id": "answer:fixture-1",
+      "path": "001.md",
+      "title": "第一篇",
+      "date": "2026-07-01",
+      "voteCount": 12,
+      "wordCount": 800,
+      "metadataStatus": "complete"
+    }
+  ]
+}

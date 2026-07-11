@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://immersivereader.vercel.app/sitemap.xml

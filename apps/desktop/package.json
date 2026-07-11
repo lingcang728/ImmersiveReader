@@ -1,0 +1,51 @@
+{
+  "name": "immersive-reader",
+  "version": "1.0.0",
+  "description": "A local-first immersive reading library",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "tauri": "tauri",
+    "install:latest": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RegisterMarkdownAssociations",
+    "ship:local": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -Build -RegisterMarkdownAssociations"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@shikijs/langs": "^4.0.2",
+    "@shikijs/themes": "^4.0.2",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-fs": "^2.4.5",
+    "@tauri-apps/plugin-opener": "^2",
+    "katex": "^0.17.0",
+    "mermaid": "^11.16.0",
+    "rehype-katex": "^7.0.1",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "rehype-stringify": "^10.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "remark-parse": "^11.0.0",
+    "remark-rehype": "^11.1.2",
+    "shiki": "^4.0.2",
+    "unified": "^11.0.5"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/kit": "^2.57.1",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tauri-apps/cli": "^2",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "~5.6.2",
+    "vite": "^6.4.2",
+    "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "picomatch": "^4.0.4"
+  }
+}

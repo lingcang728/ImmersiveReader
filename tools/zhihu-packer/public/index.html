@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zhihu Packer 控制中心</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-color: #080710;
+      --card-bg: rgba(255, 255, 255, 0.03);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --primary: #00f2fe;
+      --secondary: #4facfe;
+      --accent: #f35588;
+      --success: #00ff87;
+      --warning: #fcf150;
+      --text: #ffffff;
+      --text-muted: rgba(255, 255, 255, 0.6);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text);
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(79, 172, 254, 0.15) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(243, 85, 136, 0.12) 0%, transparent 45%);
+    }
+
+    header {
+      padding: 2rem 4rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--card-border);
+      backdrop-filter: blur(10px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .logo {
+      font-size: 1.8rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--primary) 0%, #4facfe 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: 1px;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 2rem 4rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+    }
+
+    @media (max-width: 1024px) {
+      .container {
+        grid-template-columns: 1fr;
+        padding: 2rem;
+      }
+      header {
+        padding: 2rem;
+      }
+    }
+
+    h2 {
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+      font-size: 1.4rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+      border-radius: 16px;
+      padding: 2rem;
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+      transition: all 0.3s ease;
+    }
+
+    .card:hover {
+      border-color: rgba(255, 255, 255, 0.15);
+      box-shadow: 0 8px 32px 0 rgba(79, 172, 254, 0.1);
+    }
+
+    /* 表单组件 */
+    .form-group {
+      margin-bottom: 1.2rem;
+    }
+
+    label {
+      display: block;
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: var(--text-muted);
+    }
+
+    input, select {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 1rem;
+      transition: all 0.3s ease;
+    }
+
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 10px rgba(0, 242, 254, 0.2);
+    }
+
+    .btn {
+      background: linear-gradient(135deg, var(--secondary) 0%, var(--primary) 100%);
+      color: #000;
+      font-weight: 800;
+      border: none;
+      padding: 0.9rem 1.8rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 1rem;
+      transition: all 0.3s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      width: 100%;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(0, 242, 254, 0.4);
+    }
+
+    /* 任务列表 */
+    .task-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      max-height: 700px;
+      overflow-y: auto;
+      padding-bottom: 5rem;
+    }
+
+    .task-item {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      position: relative;
+      transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+    }
+
+    .task-item:hover {
+      border-color: rgba(255, 255, 255, 0.12);
+      box-shadow: 0 6px 24px rgba(79, 172, 254, 0.08);
+      transform: translateY(-2px);
+    }
+
+    .task-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .task-title {
+      font-weight: 600;
+      font-size: 1.1rem;
+    }
+
+    .task-meta {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 0.2rem;
+    }
+
+    .badge {
+      padding: 0.3rem 0.6rem;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    .badge-pending { background: rgba(255, 255, 255, 0.1); color: #fff; }
+    .badge-running { background: rgba(79, 172, 254, 0.2); color: var(--primary); border: 1px solid var(--primary); }
+    .badge-success { background: rgba(0, 255, 135, 0.2); color: var(--success); border: 1px solid var(--success); }
+    .badge-failed { background: rgba(243, 85, 136, 0.2); color: var(--accent); border: 1px solid var(--accent); }
+    .badge-paused { background: rgba(252, 241, 80, 0.2); color: var(--warning); border: 1px solid var(--warning); }
+
+    /* 进度条 */
+    .progress-container {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .progress-bar-bg {
+      background: rgba(255, 255, 255, 0.05);
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--secondary) 0%, var(--primary) 100%);
+      width: 0%;
+      border-radius: 4px;
+      transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .progress-stats {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    /* 按钮组 */
+    .task-actions {
+      display: flex;
+      gap: 0.8rem;
+    }
+
+    .btn-sm {
+      padding: 0.5rem 1rem;
+      font-size: 0.85rem;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--text);
+      transition: all 0.3s ease;
+    }
+
+    .btn-sm:hover {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.3);
+      transform: translateY(-1px);
+    }
+
+    #btn-download-zip:hover {
+      box-shadow: 0 0 12px rgba(0, 242, 254, 0.4);
+    }
+
+    #btn-open-dir:hover {
+      box-shadow: 0 0 12px rgba(255, 255, 255, 0.15);
+    }
+
+    .btn-start {
+      color: var(--success);
+      border-color: rgba(0, 255, 135, 0.3);
+    }
+    .btn-start:hover {
+      background: rgba(0, 255, 135, 0.1);
+      border-color: var(--success);
+      box-shadow: 0 0 10px rgba(0, 255, 135, 0.3);
+    }
+
+    .btn-pause {
+      color: var(--warning);
+      border-color: rgba(252, 241, 80, 0.3);
+    }
+    .btn-pause:hover {
+      background: rgba(252, 241, 80, 0.1);
+      border-color: var(--warning);
+      box-shadow: 0 0 10px rgba(252, 241, 80, 0.3);
+    }
+
+    /* 终端终端日志 */
+    .terminal {
+      background: #020208;
+      border: 1px solid #1a1a2e;
+      border-radius: 12px;
+      padding: 1.5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      height: 350px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      box-shadow: inset 0 0 10px rgba(0,0,0,0.8);
+    }
+
+    .log-line {
+      line-height: 1.4;
+      word-break: break-all;
+    }
+
+    .log-info { color: #00ffff; }
+    .log-warn { color: var(--warning); }
+    .log-error { color: var(--accent); }
+    .log-success { color: var(--success); }
+
+    /* Web UI 装饰 */
+    .header-info {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      border: 1px solid var(--card-border);
+      padding: 0.5rem 1rem;
+      border-radius: 30px;
+      background: rgba(255, 255, 255, 0.01);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">ZHIHU PACKER //</div>
+    <div style="display: flex; gap: 1rem; align-items: center;">
+      <button class="btn-sm" id="btn-force-crawl" style="color: var(--accent); border-color: rgba(243, 85, 136, 0.3);" title="清空并重新爬取 output 目录下已存在的所有作者">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+        一键重爬已有作者
+      </button>
+      <button class="btn-sm" id="btn-retry-failed" style="color: #7CFC9B; border-color: rgba(124, 252, 155, 0.3);" title="重跑所有含失败条目的任务（登录过期中断后，重新 login 再点此按钮即可断点续跑）">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+        重跑失败条目
+      </button>
+      <button class="btn-sm" id="btn-open-dir">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        打开输出目录
+      </button>
+      <button class="btn-sm" id="btn-download-zip" style="color: var(--primary); border-color: rgba(0, 242, 254, 0.3);">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        打包下载 ZIP
+      </button>
+      <div class="header-info" id="conn-status">SSE 连接中...</div>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- 左边：创建任务与日志终端 -->
+    <div style="display: flex; flex-direction: column; gap: 2rem;">
+      <div class="card">
+        <h2>创建备份任务</h2>
+        <form id="create-task-form">
+          <div class="form-group">
+            <label for="peopleId">知乎答主 ID (People ID)</label>
+            <input type="text" id="peopleId" placeholder="例如: li-kai-fu" required>
+          </div>
+          <div class="form-group" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+            <div>
+              <label for="itemTypes">抓取内容类型</label>
+              <select id="itemTypes">
+                <option value="all">全部 (回答 & 文章)</option>
+                <option value="answers">仅回答</option>
+                <option value="articles">仅文章</option>
+              </select>
+            </div>
+            <div>
+              <label for="sortBy">排序规则</label>
+              <select id="sortBy">
+                <option value="time">按发布时间 (最新优先)</option>
+                <option value="vote">按赞同数 (高赞优先)</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="topN">限制数量 (Top N - 留空不限)</label>
+            <input type="number" id="topN" placeholder="可选，例如 20">
+          </div>
+          <button type="submit" class="btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            创建并加入队列
+          </button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>实时日志终端</h2>
+        <div class="terminal" id="log-terminal">
+          <div class="log-line log-info">[SYSTEM] 控制台就绪，正在等待事件流推送...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右边：任务大屏 -->
+    <div class="card" style="display: flex; flex-direction: column; gap: 1.5rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 style="margin-bottom: 0; display: flex; align-items: center; gap: 0.5rem;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg>
+          当前任务大屏
+        </h2>
+        <button class="btn-sm" id="btn-clear-completed" style="color: var(--accent); border-color: rgba(243, 85, 136, 0.3);" title="清理所有已结束任务（成功/失败/暂停）">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"/></svg>
+          清理历史任务
+        </button>
+      </div>
+      <div class="task-list" id="task-list-container">
+        <!-- 动态生成 -->
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const terminal = document.getElementById('log-terminal');
+    const taskContainer = document.getElementById('task-list-container');
+    const connStatus = document.getElementById('conn-status');
+    let apiToken = '';
+    let refreshTimer = null;
+    const MAX_LOG_LINES = 300;
+
+    async function initApiToken() {
+      const res = await fetch('/api/config');
+      const json = await res.json();
+      if (!json.success || !json.token) {
+        throw new Error(json.error || '无法获取本地控制令牌');
+      }
+      apiToken = json.token;
+    }
+
+    function apiFetch(url, options = {}) {
+      const headers = new Headers(options.headers || {});
+      headers.set('X-Zhihu-Packer-Token', apiToken);
+      return fetch(url, { ...options, headers });
+    }
+
+    function scheduleLoadTasks() {
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        loadTasks();
+      }, 350);
+    }
+
+    function appendLog(message, level = 'info') {
+      const line = document.createElement('div');
+      line.className = `log-line log-${level}`;
+      
+      const time = new Date().toLocaleTimeString();
+      line.textContent = `[${time}] ${message}`;
+      terminal.appendChild(line);
+      while (terminal.children.length > MAX_LOG_LINES) {
+        terminal.removeChild(terminal.firstElementChild);
+      }
+      
+      // 自动平滑滚动到底部
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    // 加载任务列表
+    async function loadTasks() {
+      try {
+        const res = await fetch('/api/tasks');
+        const json = await res.json();
+        if (json.success) {
+          renderTasks(json.data);
+        }
+      } catch (e) {
+        appendLog('加载任务列表失败: ' + e.message, 'error');
+      }
+    }
+
+    function renderTasks(tasks) {
+      taskContainer.innerHTML = '';
+      if (tasks.length === 0) {
+        const empty = document.createElement('div');
+        empty.style.color = 'var(--text-muted)';
+        empty.style.textAlign = 'center';
+        empty.style.padding = '2rem';
+        empty.textContent = '暂无任务';
+        taskContainer.appendChild(empty);
+        return;
+      }
+
+      tasks.forEach(t => {
+        const pct = t.total_count > 0 ? Math.floor(((t.success_count + t.failed_count) / t.total_count) * 100) : 0;
+        
+        const item = document.createElement('div');
+        item.className = 'task-item';
+        item.id = `task-el-${t.id}`;
+        
+        const header = document.createElement('div');
+        header.className = 'task-header';
+
+        const titleWrap = document.createElement('div');
+        const title = document.createElement('div');
+        title.className = 'task-title';
+        title.textContent = t.id;
+        const meta = document.createElement('div');
+        meta.className = 'task-meta';
+        meta.textContent = `答主: ${t.author_id} (${t.author_name || '未拉取姓名'}) | 类型: ${t.item_types}`;
+        titleWrap.append(title, meta);
+
+        const statusWrap = document.createElement('div');
+        statusWrap.style.display = 'flex';
+        statusWrap.style.gap = '0.5rem';
+        statusWrap.style.alignItems = 'center';
+        const badge = document.createElement('span');
+        badge.className = `badge badge-${t.status === 'partial_success' ? 'failed' : t.status}`;
+        badge.textContent = t.status;
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'btn-sm';
+        deleteBtn.title = '删除任务记录';
+        deleteBtn.style.cssText = 'padding: 0.3rem; min-width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; color: var(--accent); border-color: rgba(243, 85, 136, 0.2);';
+        deleteBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>';
+        deleteBtn.addEventListener('click', () => deleteSingleTask(t.id));
+        statusWrap.append(badge, deleteBtn);
+        header.append(titleWrap, statusWrap);
+
+        const progressContainer = document.createElement('div');
+        progressContainer.className = 'progress-container';
+        const progressBg = document.createElement('div');
+        progressBg.className = 'progress-bar-bg';
+        const progressFill = document.createElement('div');
+        progressFill.className = 'progress-bar-fill';
+        progressFill.style.width = `${pct}%`;
+        progressBg.appendChild(progressFill);
+        const stats = document.createElement('div');
+        stats.className = 'progress-stats';
+        const pctText = document.createElement('span');
+        pctText.textContent = `进度: ${pct}%`;
+        const countText = document.createElement('span');
+        countText.textContent = `成功: ${t.success_count} | 失败: ${t.failed_count} | 总数: ${t.total_count}`;
+        stats.append(pctText, countText);
+        progressContainer.append(progressBg, stats);
+
+        const actions = document.createElement('div');
+        actions.className = 'task-actions';
+        const startBtn = document.createElement('button');
+        startBtn.className = 'btn-sm btn-start';
+        startBtn.disabled = t.status === 'running';
+        startBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+        startBtn.appendChild(document.createTextNode(' 启动 / 继续'));
+        startBtn.addEventListener('click', () => startTask(t.id));
+        const pauseBtn = document.createElement('button');
+        pauseBtn.className = 'btn-sm btn-pause';
+        pauseBtn.disabled = t.status !== 'running';
+        pauseBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+        pauseBtn.appendChild(document.createTextNode(' 暂停'));
+        pauseBtn.addEventListener('click', () => pauseTask(t.id));
+        actions.append(startBtn, pauseBtn);
+
+        item.append(header, progressContainer, actions);
+        taskContainer.appendChild(item);
+      });
+    }
+
+    // 控制任务
+    async function startTask(taskId) {
+      appendLog(`准备启动任务 ${taskId}...`, 'info');
+      try {
+        const res = await apiFetch(`/api/tasks/${taskId}/start`, { method: 'POST' });
+        const json = await res.json();
+        if (json.success) {
+          appendLog(`任务 ${taskId} 启动指令已发送`, 'success');
+          loadTasks();
+        }
+      } catch (e) {
+        appendLog(`启动任务失败: ${e.message}`, 'error');
+      }
+    }
+
+    async function pauseTask(taskId) {
+      appendLog(`准备暂停任务 ${taskId}...`, 'info');
+      try {
+        const res = await apiFetch(`/api/tasks/${taskId}/pause`, { method: 'POST' });
+        const json = await res.json();
+        if (json.success) {
+          appendLog(`任务 ${taskId} 暂停指令已发送`, 'warn');
+          loadTasks();
+        }
+      } catch (e) {
+        appendLog(`暂停任务失败: ${e.message}`, 'error');
+      }
+    }
+
+    // 创建表单提交
+    document.getElementById('create-task-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const peopleId = document.getElementById('peopleId').value.trim();
+      const itemTypes = document.getElementById('itemTypes').value;
+      const sortBy = document.getElementById('sortBy').value;
+      const topN = document.getElementById('topN').value;
+
+      appendLog(`正在请求创建任务 (答主: ${peopleId})...`, 'info');
+
+      try {
+        const res = await apiFetch('/api/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ peopleId, itemTypes, topN, sortBy })
+        });
+        const json = await res.json();
+        if (json.success) {
+          appendLog(`任务创建成功！任务ID: ${json.taskId}`, 'success');
+          document.getElementById('peopleId').value = '';
+          document.getElementById('topN').value = '';
+          loadTasks();
+        } else {
+          appendLog(`创建任务失败: ${json.error}`, 'error');
+        }
+      } catch (err) {
+        appendLog(`创建任务请求出错: ${err.message}`, 'error');
+      }
+    });
+
+    // 建立 SSE 连接
+    function connectSSE() {
+      const eventSource = new EventSource('/api/events');
+      
+      eventSource.onopen = () => {
+        connStatus.textContent = 'SSE 已连接';
+        connStatus.style.borderColor = 'var(--success)';
+        connStatus.style.color = 'var(--success)';
+        appendLog('实时事件流 SSE 连接成功！', 'success');
+      };
+
+      eventSource.onerror = (e) => {
+        connStatus.textContent = 'SSE 断开，重连中...';
+        connStatus.style.borderColor = 'var(--accent)';
+        connStatus.style.color = 'var(--accent)';
+        // 浏览器会自动尝试重连
+      };
+
+      eventSource.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'progress') {
+          let level = 'info';
+          if (data.status === 'success') level = 'success';
+          if (data.status === 'failed') level = 'error';
+          if (data.status === 'paused') level = 'warn';
+
+          appendLog(`[${data.taskId}] [${data.status.toUpperCase()}] ${data.message}`, level);
+          scheduleLoadTasks();
+        }
+      };
+    }
+
+    // 打开输出目录
+    async function openOutputDir() {
+      appendLog('正在请求打开输出目录...', 'info');
+      try {
+        const res = await apiFetch('/api/open-dir', { method: 'POST' });
+        const json = await res.json();
+        if (json.success) {
+          appendLog('成功在本地文件资源管理器中打开输出目录', 'success');
+        } else {
+          appendLog('无法打开输出目录: ' + json.error, 'error');
+        }
+      } catch (e) {
+        appendLog('请求打开输出目录出错: ' + e.message, 'error');
+      }
+    }
+
+    // 打包下载 ZIP
+    function downloadZipArchive() {
+      appendLog('正在请求打包下载...', 'info');
+      window.location.href = `/api/download?token=${encodeURIComponent(apiToken)}`;
+      appendLog('已触发压缩包生成和浏览器下载', 'success');
+    }
+
+    // 强制一键重爬已有作者
+    async function forceRestartExisting() {
+      if (!confirm('【警告】您确定要一键强制重爬所有已备份的作者吗？\n该操作会清空当前 output 中这些作者已下载的 Markdown 归档文件并重新开始抓取正文，以应用全新的排版格式。')) {
+        return;
+      }
+      appendLog('正在请求强制一键重爬已有作者任务...', 'info');
+      try {
+        const res = await apiFetch('/api/tasks/force-restart-existing', { method: 'POST' });
+        const json = await res.json();
+        if (json.success) {
+          appendLog(`一键重爬触发成功！已启动 ${json.count} 个作者的强制重爬任务`, 'success');
+          loadTasks();
+        } else {
+          appendLog('一键重爬触发失败: ' + json.error, 'error');
+        }
+      } catch (e) {
+        appendLog('一键重爬请求出错: ' + e.message, 'error');
+      }
+    }
+
+    // 重跑所有含失败条目的任务（断点续跑，不清空已成功的归档）
+    async function retryFailedTasks() {
+      appendLog('正在请求重跑所有失败条目...', 'info');
+      try {
+        const res = await apiFetch('/api/tasks/retry-failed', { method: 'POST' });
+        const json = await res.json();
+        if (json.success) {
+          appendLog(json.message, json.count > 0 ? 'success' : 'info');
+          loadTasks();
+        } else {
+          appendLog('重跑失败条目触发失败: ' + json.error, 'error');
+        }
+      } catch (e) {
+        appendLog('重跑失败条目请求出错: ' + e.message, 'error');
+      }
+    }
+
+    // 清理已结束的任务历史
+    async function clearCompletedTasks() {
+      if (!confirm('您确定要清理所有已完成、已失败或已暂停的备份任务记录吗？\n（这只会从大屏中清除历史卡片，不会删除您已备份在 output 目录下的 Markdown 归档文件）')) {
+        return;
+      }
+      appendLog('正在请求清理已结束的任务历史...', 'info');
+      try {
+        const res = await apiFetch('/api/tasks/clear-completed', { method: 'DELETE' });
+        const json = await res.json();
+        if (json.success) {
+          appendLog(`成功清理了 ${json.count} 个已结束的任务历史`, 'success');
+          loadTasks();
+        } else {
+          appendLog('清理历史任务失败: ' + json.error, 'error');
+        }
+      } catch (e) {
+        appendLog('请求清理任务出错: ' + e.message, 'error');
+      }
+    }
+
+    // 删除单个任务记录
+    async function deleteSingleTask(taskId) {
+      if (!confirm(`确认要删除任务 ${taskId} 吗？\n（此操作会清除它的抓取进度，这只会在大屏中移除它，不影响已导出的 Markdown 文件）`)) {
+        return;
+      }
+      appendLog(`正在删除任务 ${taskId}...`, 'info');
+      try {
+        const res = await apiFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+        const json = await res.json();
+        if (json.success) {
+          appendLog(`任务 ${taskId} 删除成功`, 'success');
+          loadTasks();
+        } else {
+          appendLog(`删除任务失败: ${json.error}`, 'error');
+        }
+      } catch (e) {
+        appendLog(`请求删除任务出错: ${e.message}`, 'error');
+      }
+    }
+
+    document.getElementById('btn-force-crawl').addEventListener('click', forceRestartExisting);
+    document.getElementById('btn-retry-failed').addEventListener('click', retryFailedTasks);
+    document.getElementById('btn-open-dir').addEventListener('click', openOutputDir);
+    document.getElementById('btn-download-zip').addEventListener('click', downloadZipArchive);
+    document.getElementById('btn-clear-completed').addEventListener('click', clearCompletedTasks);
+
+    // 初始化
+    initApiToken()
+      .then(() => {
+        loadTasks();
+        connectSSE();
+      })
+      .catch((err) => {
+        connStatus.textContent = '本地令牌获取失败';
+        connStatus.style.borderColor = 'var(--accent)';
+        connStatus.style.color = 'var(--accent)';
+        appendLog(`初始化失败: ${err.message}`, 'error');
+      });
+  </script>
+</body>
+</html>
