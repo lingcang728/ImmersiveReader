@@ -6,7 +6,7 @@ mod channel;
 pub use channel::AppChannel;
 mod recovery;
 use recovery::load_status_from;
-pub use recovery::{SettingsLoadState, SettingsRecovery};
+pub use recovery::SettingsLoadState;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
