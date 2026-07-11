@@ -7,6 +7,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 mod atomic_file;
+pub mod cache;
 mod contracts;
 mod importer;
 mod library;
@@ -355,6 +356,18 @@ fn update_app_settings(value: settings::AppSettings) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn clear_safe_cache(
+    categories: Vec<cache::CacheCategory>,
+    task_ids: Option<Vec<String>>,
+) -> Result<cache::CacheClearResult, String> {
+    cache::clear_safe_cache_at(
+        &storage::StorageLocations::current()?,
+        &categories,
+        task_ids.as_deref().unwrap_or_default(),
+    )
+}
+
+#[tauri::command]
 fn scan_library() -> Result<library::LibraryScan, String> {
     let value = settings::load_settings()?;
     library::scan_library(Path::new(&value.library_root))
@@ -446,6 +459,7 @@ pub fn run() {
             get_app_settings,
             get_storage_locations,
             update_app_settings,
+            clear_safe_cache,
             scan_library,
             open_book,
             get_book_chapter_path,
