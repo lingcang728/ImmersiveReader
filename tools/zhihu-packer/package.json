@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
-    "test": "node --test tests/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
     "doctor": "tsx src/cli.ts doctor",
     "login": "tsx src/cli.ts login",
     "cli": "tsx src/cli.ts",

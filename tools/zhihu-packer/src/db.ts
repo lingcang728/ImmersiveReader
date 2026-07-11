@@ -4,7 +4,7 @@ import * as path from 'path';
 import { logger } from './utils.js';
 import { resolveDatabasePath } from './runtime-paths.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 let db: DatabaseSync | null = null;
 let transactionDepth = 0;
 
@@ -94,6 +94,71 @@ function createSchema(database: DatabaseSync) {
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_task_items_task_status ON task_items(task_id, status);
     CREATE INDEX IF NOT EXISTS idx_items_author_created ON items(author_id, created_time DESC);
+
+    CREATE TABLE IF NOT EXISTS archive_authors (
+      author_id TEXT PRIMARY KEY NOT NULL,
+      author_name TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS archive_items (
+      item_id TEXT PRIMARY KEY NOT NULL,
+      author_id TEXT NOT NULL,
+      source_url TEXT NOT NULL DEFAULT '',
+      current_revision INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (author_id) REFERENCES archive_authors(author_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS archive_revisions (
+      item_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      task_id TEXT NOT NULL,
+      output_path TEXT NOT NULL,
+      manifest_sha256 TEXT,
+      provenance_sha256 TEXT,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (item_id, revision),
+      UNIQUE (item_id, output_path),
+      FOREIGN KEY (item_id) REFERENCES archive_items(item_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_archive_items_author ON archive_items(author_id, updated_at DESC);
+  `);
+}
+
+function backfillArchiveCatalog(database: DatabaseSync) {
+  database.exec(`
+    INSERT OR IGNORE INTO archive_authors (author_id, author_name, created_at, updated_at)
+    SELECT i.author_id, MAX(i.author_name), MIN(ti.created_at), MAX(ti.updated_at)
+    FROM task_items ti
+    JOIN items i ON i.id = ti.item_id
+    WHERE ti.status = 'success' AND ti.output_path IS NOT NULL AND i.author_id != ''
+    GROUP BY i.author_id;
+
+    INSERT OR IGNORE INTO archive_items (item_id, author_id, source_url, current_revision, created_at, updated_at)
+    SELECT i.id, i.author_id, i.url, 0, MIN(ti.created_at), MAX(ti.updated_at)
+    FROM task_items ti
+    JOIN items i ON i.id = ti.item_id
+    WHERE ti.status = 'success' AND ti.output_path IS NOT NULL AND i.author_id != ''
+    GROUP BY i.id;
+
+    INSERT OR IGNORE INTO archive_revisions (item_id, revision, task_id, output_path, created_at)
+    SELECT item_id, revision, task_id, output_path, updated_at
+    FROM (
+      SELECT ti.item_id, ti.task_id, ti.output_path, ti.updated_at,
+             ROW_NUMBER() OVER (PARTITION BY ti.item_id ORDER BY ti.updated_at, ti.task_id) AS revision
+      FROM task_items ti
+      JOIN archive_items ai ON ai.item_id = ti.item_id
+      WHERE ti.status = 'success' AND ti.output_path IS NOT NULL
+    );
+
+    UPDATE archive_items
+    SET current_revision = COALESCE((
+      SELECT MAX(ar.revision) FROM archive_revisions ar WHERE ar.item_id = archive_items.item_id
+    ), 0);
   `);
 }
 
@@ -102,8 +167,10 @@ function migrateToV1(database: DatabaseSync, absolutePath: string) {
   const version = Number(versionRow?.user_version || 0);
   const hasLegacyTables = tableExists(database, 'tasks') || tableExists(database, 'items') || tableExists(database, 'task_items');
 
-  if (version >= SCHEMA_VERSION && hasLegacyTables) {
+  if (version >= 1 && hasLegacyTables) {
     createSchema(database);
+    backfillArchiveCatalog(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     return;
   }
 
@@ -196,6 +263,7 @@ function migrateToV1(database: DatabaseSync, absolutePath: string) {
     if (tableExists(database, 'items_old')) database.exec('DROP TABLE items_old');
     if (tableExists(database, 'tasks_old')) database.exec('DROP TABLE tasks_old');
 
+    backfillArchiveCatalog(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec('COMMIT');
   } catch (err) {
@@ -301,6 +369,12 @@ export function initDb(dbPath?: string) {
   db.exec('PRAGMA foreign_keys = ON');
   migrateToV1(db, absolutePath);
   db.exec('PRAGMA foreign_keys = ON');
+}
+
+export function closeDb() {
+  db?.close();
+  db = null;
+  transactionDepth = 0;
 }
 
 function getDb(): DatabaseSync {
@@ -450,30 +524,66 @@ export function getItem(id: string): Item | null {
 }
 
 export function saveTaskItem(taskItem: TaskItem) {
-  const database = getDb();
-  const task = getTask(taskItem.task_id);
-  const stmt = database.prepare(`
-    INSERT INTO task_items (
-      task_id, item_id, status, output_path, failure_code, error_message, created_at, updated_at
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?
-    ) ON CONFLICT(task_id, item_id) DO UPDATE SET
-      status = excluded.status,
-      output_path = excluded.output_path,
-      failure_code = excluded.failure_code,
-      error_message = excluded.error_message,
-      updated_at = excluded.updated_at
-  `);
-  stmt.run(...cleanParams([
-    taskItem.task_id,
-    taskItem.item_id,
-    taskItem.status,
-    normalizeStoredPath(taskItem.output_path, task?.output_dir || 'output'),
-    taskItem.failure_code,
-    taskItem.error_message,
-    taskItem.created_at,
-    taskItem.updated_at
-  ]));
+  runInTransaction(() => {
+    const database = getDb();
+    const task = getTask(taskItem.task_id);
+    const outputPath = normalizeStoredPath(taskItem.output_path, task?.output_dir || 'output');
+    const stmt = database.prepare(`
+      INSERT INTO task_items (
+        task_id, item_id, status, output_path, failure_code, error_message, created_at, updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?
+      ) ON CONFLICT(task_id, item_id) DO UPDATE SET
+        status = excluded.status,
+        output_path = excluded.output_path,
+        failure_code = excluded.failure_code,
+        error_message = excluded.error_message,
+        updated_at = excluded.updated_at
+    `);
+    stmt.run(...cleanParams([
+      taskItem.task_id,
+      taskItem.item_id,
+      taskItem.status,
+      outputPath,
+      taskItem.failure_code,
+      taskItem.error_message,
+      taskItem.created_at,
+      taskItem.updated_at
+    ]));
+    if (taskItem.status === 'success' && outputPath) {
+      archiveSuccessfulTaskItem(database, taskItem, outputPath);
+    }
+  });
+}
+
+function archiveSuccessfulTaskItem(database: DatabaseSync, taskItem: TaskItem, outputPath: string) {
+  const item = getItem(taskItem.item_id);
+  if (!item?.author_id) return;
+  database.prepare(`
+    INSERT INTO archive_authors (author_id, author_name, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(author_id) DO UPDATE SET author_name = excluded.author_name, updated_at = excluded.updated_at
+  `).run(item.author_id, item.author_name, taskItem.created_at, taskItem.updated_at);
+  database.prepare(`
+    INSERT INTO archive_items (item_id, author_id, source_url, current_revision, created_at, updated_at)
+    VALUES (?, ?, ?, 0, ?, ?)
+    ON CONFLICT(item_id) DO UPDATE SET author_id = excluded.author_id, source_url = excluded.source_url, updated_at = excluded.updated_at
+  `).run(item.id, item.author_id, item.url, taskItem.created_at, taskItem.updated_at);
+  const existing = database.prepare(
+    'SELECT revision FROM archive_revisions WHERE item_id = ? AND output_path = ?'
+  ).all(item.id, outputPath)[0] as { revision: number } | undefined;
+  const revision = existing?.revision ?? Number((database.prepare(
+    'SELECT COALESCE(MAX(revision), 0) + 1 AS revision FROM archive_revisions WHERE item_id = ?'
+  ).all(item.id)[0] as any).revision);
+  if (!existing) {
+    database.prepare(`
+      INSERT INTO archive_revisions (item_id, revision, task_id, output_path, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(item.id, revision, taskItem.task_id, outputPath, taskItem.updated_at);
+  }
+  database.prepare(
+    'UPDATE archive_items SET current_revision = ?, updated_at = ? WHERE item_id = ?'
+  ).run(revision, taskItem.updated_at, item.id);
 }
 
 export function replaceTaskIndex(taskId: string, authorName: string, items: IndexItemInput[]) {
@@ -575,16 +685,11 @@ export function refreshTaskCounts(taskId: string) {
 export function getAuthorSuccessItems(authorId: string): (Item & { output_path: string })[] {
   const database = getDb();
   const stmt = database.prepare(`
-    SELECT i.*, ranked.output_path
-    FROM (
-      SELECT ti.item_id, ti.output_path, ti.updated_at,
-             ROW_NUMBER() OVER (PARTITION BY ti.item_id ORDER BY ti.updated_at DESC) AS rn
-      FROM task_items ti
-      JOIN items i2 ON i2.id = ti.item_id
-      WHERE i2.author_id = ? AND ti.status = 'success'
-    ) ranked
-    JOIN items i ON ranked.item_id = i.id
-    WHERE ranked.rn = 1
+    SELECT i.*, ar.output_path
+    FROM archive_items ai
+    JOIN items i ON i.id = ai.item_id
+    JOIN archive_revisions ar ON ar.item_id = ai.item_id AND ar.revision = ai.current_revision
+    WHERE ai.author_id = ?
     ORDER BY i.created_time DESC
   `);
   return stmt.all(authorId) as unknown as (Item & { output_path: string })[];
@@ -593,11 +698,9 @@ export function getAuthorSuccessItems(authorId: string): (Item & { output_path: 
 export function getAllSuccessAuthors(): { author_id: string; author_name: string }[] {
   const database = getDb();
   const stmt = database.prepare(`
-    SELECT DISTINCT i.author_id, i.author_name
-    FROM items i
-    JOIN task_items ti ON ti.item_id = i.id
-    WHERE ti.status = 'success' AND i.author_id IS NOT NULL AND i.author_id != ''
-    ORDER BY i.author_name
+    SELECT author_id, author_name
+    FROM archive_authors
+    ORDER BY author_name
   `);
   return stmt.all() as unknown as { author_id: string; author_name: string }[];
 }
