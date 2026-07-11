@@ -410,6 +410,17 @@ fn recover_publish_transactions(
 }
 
 #[tauri::command]
+fn preview_legacy_migration(
+    scope: migration::MigrationScope,
+) -> Result<migration::MigrationPreview, String> {
+    let mut target = storage::StorageLocations::current()?;
+    let settings = settings::load_settings()?;
+    target.library_root = PathBuf::from(&settings.library_root);
+    let legacy = migration::current_legacy_locations(PathBuf::from(settings.library_root))?;
+    migration::preview_for(&legacy, &target, scope)
+}
+
+#[tauri::command]
 fn scan_library() -> Result<library::LibraryScan, String> {
     let value = settings::load_settings()?;
     library::scan_library(Path::new(&value.library_root))
@@ -504,6 +515,7 @@ pub fn run() {
             clear_safe_cache,
             get_publish_recovery_status,
             recover_publish_transactions,
+            preview_legacy_migration,
             scan_library,
             open_book,
             get_book_chapter_path,
