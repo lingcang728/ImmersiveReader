@@ -1,4 +1,4 @@
-use super::{load_from, AppSettings};
+use super::{load_compatible_from, AppSettings};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,7 @@ pub enum SettingsLoadState {
 }
 
 pub(super) fn load_status_from(path: &Path) -> SettingsLoadState {
-    match load_from(path) {
+    match load_compatible_from(path) {
         Ok(settings) => SettingsLoadState::Active(settings),
         Err(error) => SettingsLoadState::Recovery(SettingsRecovery {
             source_path: path.to_path_buf(),

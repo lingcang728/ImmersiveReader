@@ -62,7 +62,7 @@ fn validate(settings: &AppSettings) -> Result<(), String> {
     Ok(())
 }
 
-fn load_from(path: &Path) -> Result<AppSettings, String> {
+pub(crate) fn load_compatible_from(path: &Path) -> Result<AppSettings, String> {
     if !path.exists() {
         return Ok(default_settings());
     }
@@ -88,7 +88,7 @@ fn load_from(path: &Path) -> Result<AppSettings, String> {
     Ok(settings)
 }
 
-fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
+pub(crate) fn save_compatible_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
     validate(settings)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -112,7 +112,7 @@ pub fn load_settings() -> Result<AppSettings, String> {
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
     let locations = crate::storage::StorageLocations::current()?;
     crate::storage::validate_library_root(Path::new(&settings.library_root), &locations)?;
-    save_to(&locations.settings_path, settings)
+    save_compatible_to(&locations.settings_path, settings)
 }
 
 pub fn runtime_root() -> Result<PathBuf, String> {
@@ -135,7 +135,8 @@ pub fn local_runtime_data() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_settings, load_from, load_status_from, save_to, AppChannel, SettingsLoadState,
+        default_settings, load_compatible_from, load_status_from, save_compatible_to, AppChannel,
+        SettingsLoadState,
     };
     use std::fs;
     use std::path::Path;
@@ -182,8 +183,8 @@ mod tests {
         let path = root.join("settings.json");
         let settings = default_settings();
         assert_eq!(settings.schema_version, 3);
-        save_to(&path, &settings).expect("settings must save");
-        let loaded = load_from(&path).expect("settings must load");
+        save_compatible_to(&path, &settings).expect("settings must save");
+        let loaded = load_compatible_from(&path).expect("settings must load");
         assert_eq!(loaded.library_root, settings.library_root);
         fs::remove_dir_all(root).expect("temp directory must be removed");
     }
@@ -201,7 +202,7 @@ mod tests {
         )
         .expect("legacy settings must write");
 
-        let loaded = load_from(&path).expect("legacy settings must migrate");
+        let loaded = load_compatible_from(&path).expect("legacy settings must migrate");
 
         assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.library_root, r"C:\Library");
@@ -221,7 +222,7 @@ mod tests {
         let original = r#"{"schemaVersion":2,"libraryRoot":"D:\\My Reading"}"#;
         fs::write(&path, original).expect("schema two settings must write");
 
-        let loaded = load_from(&path).expect("schema two settings must load compatibly");
+        let loaded = load_compatible_from(&path).expect("schema two settings must load compatibly");
 
         assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.library_root, r"D:\My Reading");

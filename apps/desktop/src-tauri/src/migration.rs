@@ -1,3 +1,4 @@
+mod execution;
 mod preview;
 mod reconciliation;
 mod sqlite;
@@ -9,8 +10,11 @@ pub use reconciliation::{reconcile_zhihu_archive, ReconciliationReport};
 pub use sqlite::{migrate_sqlite_verified, MigrationReceipt};
 
 #[cfg(test)]
+mod execution_tests;
+#[cfg(test)]
 mod preview_tests;
 #[cfg(test)]
 mod reconciliation_tests;
 #[cfg(test)]
 mod sqlite_tests;
+pub use execution::{execute_settings_migration, MigrationExecutionResult};

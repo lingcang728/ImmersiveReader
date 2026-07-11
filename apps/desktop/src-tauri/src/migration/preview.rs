@@ -192,6 +192,10 @@ pub fn preview_for(
     let mut hasher = Sha256::new();
     for value in &items {
         hasher.update(serde_json::to_vec(value).map_err(|error| error.to_string())?);
+        let source = Path::new(&value.source_path);
+        if value.exists && source.is_file() {
+            hasher.update(crate::publish::hash_file(source)?.as_bytes());
+        }
     }
     Ok(MigrationPreview {
         preview_id: format!("{:x}", hasher.finalize()),
