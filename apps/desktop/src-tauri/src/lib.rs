@@ -12,6 +12,7 @@ mod contracts;
 mod importer;
 mod library;
 mod progress;
+pub mod publish;
 mod reader_http;
 mod reader_server;
 mod settings;
@@ -368,6 +369,46 @@ fn clear_safe_cache(
 }
 
 #[tauri::command]
+fn get_publish_recovery_status() -> Result<Vec<publish::PublishTransaction>, String> {
+    let value = settings::load_settings()?;
+    publish::list_transactions(Path::new(&value.library_root)).map(|transactions| {
+        transactions
+            .into_iter()
+            .filter(|transaction| {
+                !matches!(
+                    transaction.phase,
+                    publish::PublishPhase::Committed | publish::PublishPhase::RolledBack
+                )
+            })
+            .collect()
+    })
+}
+
+#[tauri::command]
+fn recover_publish_transactions(
+    transaction_ids: Option<Vec<String>>,
+) -> Result<Vec<publish::PublishTransaction>, String> {
+    let value = settings::load_settings()?;
+    let library_root = Path::new(&value.library_root);
+    let ids = match transaction_ids {
+        Some(ids) => ids,
+        None => publish::list_transactions(library_root)?
+            .into_iter()
+            .filter(|transaction| {
+                !matches!(
+                    transaction.phase,
+                    publish::PublishPhase::Committed | publish::PublishPhase::RolledBack
+                )
+            })
+            .map(|transaction| transaction.transaction_id)
+            .collect(),
+    };
+    ids.into_iter()
+        .map(|id| publish::recover_transaction(library_root, &id))
+        .collect()
+}
+
+#[tauri::command]
 fn scan_library() -> Result<library::LibraryScan, String> {
     let value = settings::load_settings()?;
     library::scan_library(Path::new(&value.library_root))
@@ -460,6 +501,8 @@ pub fn run() {
             get_storage_locations,
             update_app_settings,
             clear_safe_cache,
+            get_publish_recovery_status,
+            recover_publish_transactions,
             scan_library,
             open_book,
             get_book_chapter_path,
