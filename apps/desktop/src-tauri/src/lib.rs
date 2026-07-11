@@ -13,6 +13,7 @@ pub mod control;
 mod importer;
 mod library;
 pub mod migration;
+pub mod podcast;
 mod progress;
 pub mod publish;
 mod reader_http;
