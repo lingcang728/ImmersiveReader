@@ -177,20 +177,6 @@ app.post('/api/tasks/force-restart-existing', requireLocalToken, async (req, res
         // 1. 强制重置数据库状态
         resetTaskForce(t.id);
 
-        // 2. 清空该答主目录下的 md 文件
-        const authorPath = path.join(outputDir, folder);
-        if (fs.existsSync(authorPath)) {
-          const files = fs.readdirSync(authorPath);
-          for (const file of files) {
-            if (file.endsWith('.md') && file !== 'index.md') {
-              try {
-                fs.unlinkSync(path.join(authorPath, file));
-              } catch (err) {}
-            }
-          }
-        }
-
-        // 3. 异步唤醒任务
         queueTask(t.id);
 
         restartedCount++;

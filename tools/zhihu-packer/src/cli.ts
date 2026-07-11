@@ -243,32 +243,14 @@ taskCmd
 taskCmd
   .command('start <taskId>')
   .description('开始或恢复执行指定的备份任务')
-  .option('-f, --force', '强制重新抓取所有条目（清空已导出的文档并重置任务进度）')
+  .option('-f, --force', '强制重新抓取所有条目（保留最后成功文档并重置任务进度）')
   .action(async (taskId, options) => {
     try {
       if (options.force) {
         logger.info(`正在强制重置任务 ${taskId} 的状态以进行重新爬取...`);
         resetTaskForce(taskId);
 
-        // 清理本地导出的归档 md 文件
-        const task = getTask(taskId);
-        if (task && task.author_name) {
-          const authorDirName = sanitizeFilename(task.author_name, task.author_id).replace(/_[^_]+$/, '');
-          const outputBaseDir = path.resolve(process.cwd(), task.output_dir);
-          const authorPath = path.join(outputBaseDir, authorDirName);
-
-          if (fs.existsSync(authorPath)) {
-            const files = fs.readdirSync(authorPath);
-            for (const file of files) {
-              if (file.endsWith('.md') && file !== 'index.md') {
-                try {
-                  fs.unlinkSync(path.join(authorPath, file));
-                } catch (err) {}
-              }
-            }
-            logger.info(`已成功清理本地已导出的历史 Markdown 归档（已排除 index.md）`);
-          }
-        }
+        logger.info('已保留最后成功的 Markdown；新结果验证成功后再发布为新 revision。');
       }
 
       logger.info(`准备启动任务: ${taskId}`);
