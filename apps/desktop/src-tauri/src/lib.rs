@@ -17,6 +17,7 @@ mod progress;
 pub mod publish;
 mod reader_http;
 mod reader_server;
+mod secrets;
 mod settings;
 mod storage;
 pub mod tasks;
@@ -372,6 +373,21 @@ fn clear_safe_cache(
 }
 
 #[tauri::command]
+fn get_secret_status() -> Result<secrets::SecretStatus, String> {
+    secrets::deepseek_status(&settings::AppChannel::current())
+}
+
+#[tauri::command]
+fn set_deepseek_api_key(api_key: String) -> Result<secrets::SecretStatus, String> {
+    secrets::set_deepseek_api_key(&settings::AppChannel::current(), &api_key)
+}
+
+#[tauri::command]
+fn delete_deepseek_api_key() -> Result<secrets::SecretStatus, String> {
+    secrets::delete_deepseek_api_key(&settings::AppChannel::current())
+}
+
+#[tauri::command]
 fn get_publish_recovery_status() -> Result<Vec<publish::PublishTransaction>, String> {
     let value = settings::load_settings()?;
     publish::list_transactions(Path::new(&value.library_root)).map(|transactions| {
@@ -515,6 +531,9 @@ pub fn run() {
             get_storage_locations,
             update_app_settings,
             clear_safe_cache,
+            get_secret_status,
+            set_deepseek_api_key,
+            delete_deepseek_api_key,
             get_publish_recovery_status,
             recover_publish_transactions,
             preview_legacy_migration,

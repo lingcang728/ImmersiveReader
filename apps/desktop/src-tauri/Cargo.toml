@@ -27,3 +27,6 @@ uuid = { version = "1", features = ["v4"] }
 tiny_http = "0.12"
 percent-encoding = "2"
 rusqlite = { version = "=0.39.0", features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
