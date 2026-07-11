@@ -9,6 +9,7 @@ use tauri::Manager;
 mod atomic_file;
 pub mod cache;
 mod contracts;
+pub mod control;
 mod importer;
 mod library;
 pub mod migration;

@@ -26,3 +26,4 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 tiny_http = "0.12"
 percent-encoding = "2"
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
