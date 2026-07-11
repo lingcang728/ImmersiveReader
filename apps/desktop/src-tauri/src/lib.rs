@@ -13,6 +13,7 @@ mod progress;
 mod reader_http;
 mod reader_server;
 mod settings;
+mod storage;
 mod temporary_content;
 mod tools;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -377,6 +378,13 @@ fn get_app_settings() -> Result<settings::AppSettings, String> {
 }
 
 #[tauri::command]
+fn get_storage_locations() -> Result<storage::StorageLocations, String> {
+    let mut locations = storage::StorageLocations::current()?;
+    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+    Ok(locations)
+}
+
+#[tauri::command]
 fn update_app_settings(value: settings::AppSettings) -> Result<(), String> {
     settings::save_settings(&value)
 }
@@ -471,6 +479,7 @@ pub fn run() {
             delete_reading_state,
             markdown_file_exists,
             get_app_settings,
+            get_storage_locations,
             update_app_settings,
             scan_library,
             open_book,
