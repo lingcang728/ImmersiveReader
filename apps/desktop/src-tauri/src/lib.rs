@@ -11,6 +11,8 @@ pub mod cache;
 mod contracts;
 pub mod control;
 mod importer;
+#[cfg(windows)]
+pub mod job_object;
 mod library;
 pub mod migration;
 pub mod podcast;
