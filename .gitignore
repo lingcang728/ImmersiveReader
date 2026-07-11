@@ -42,6 +42,7 @@ runtime/
 
 # QA artifacts
 artifacts/
+.dev-install/
 playwright-report/
 test-results/
 *.tmp

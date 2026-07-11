@@ -10,8 +10,10 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "tauri": "tauri",
-    "install:latest": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RegisterMarkdownAssociations",
-    "ship:local": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -Build -RegisterMarkdownAssociations"
+    "install:latest": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1",
+    "ship:dev": "powershell -ExecutionPolicy Bypass -File scripts/install-dev-immersive-reader.ps1 -Build",
+    "ship:local": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -Build",
+    "register:markdown": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RegisterMarkdownAssociations"
   },
   "license": "MIT",
   "dependencies": {
