@@ -2,6 +2,9 @@ use crate::settings::AppChannel;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+mod path_guard;
+pub use path_guard::validate_library_root;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageLocations {
@@ -105,7 +108,7 @@ impl StorageLocations {
 
 #[cfg(test)]
 mod tests {
-    use super::StorageLocations;
+    use super::{validate_library_root, StorageLocations};
     use crate::settings::AppChannel;
     use std::path::Path;
 
@@ -200,5 +203,42 @@ mod tests {
             locations.library_root,
             Path::new(r"C:\Users\reader\Documents\Codex\ImmersiveReader-QA\run-20260711\Library")
         );
+    }
+
+    #[test]
+    fn library_path_rejects_managed_roots_and_their_parents() {
+        let locations = StorageLocations::resolve_for(
+            &AppChannel::Development,
+            Path::new(r"C:\Users\reader\AppData\Roaming"),
+            Path::new(r"C:\Users\reader\AppData\Local"),
+            Path::new(r"C:\Users\reader\Documents"),
+            Path::new(r"C:\repo\runtime"),
+        );
+
+        for unsafe_path in [
+            locations.data_root.as_path(),
+            locations.cache_root.as_path(),
+            Path::new(r"C:\Users\reader\AppData\Local\ImmersiveReader-Dev"),
+            Path::new(r"C:\"),
+        ] {
+            assert!(
+                validate_library_root(unsafe_path, &locations).is_err(),
+                "unsafe Library path was accepted: {}",
+                unsafe_path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn library_path_accepts_a_separate_absolute_directory() {
+        let locations = StorageLocations::resolve_for(
+            &AppChannel::Production,
+            Path::new(r"C:\Users\reader\AppData\Roaming"),
+            Path::new(r"C:\Users\reader\AppData\Local"),
+            Path::new(r"C:\Users\reader\Documents"),
+            Path::new(r"C:\Program Files\ImmersiveReader\runtime"),
+        );
+
+        assert!(validate_library_root(Path::new(r"D:\Reading\Library"), &locations).is_ok());
     }
 }

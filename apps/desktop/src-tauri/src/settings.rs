@@ -2,75 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AppChannel {
-    Production,
-    Development,
-    Qa(String),
-}
-
-impl AppChannel {
-    pub fn detect(executable: &Path, qa_run_id: Option<&str>) -> Result<Self, String> {
-        if let Some(run_id) = qa_run_id {
-            if run_id.is_empty()
-                || !run_id
-                    .bytes()
-                    .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'-' | b'_'))
-            {
-                return Err("QA run id must contain only letters, digits, '-' or '_'".to_string());
-            }
-            return Ok(Self::Qa(run_id.to_string()));
-        }
-
-        let stem = executable
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
-        if stem.eq_ignore_ascii_case("immersive-reader-dev") {
-            Ok(Self::Development)
-        } else {
-            Ok(Self::Production)
-        }
-    }
-
-    pub fn current() -> Self {
-        let executable = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(_) => return Self::Production,
-        };
-        match Self::detect(&executable, None) {
-            Ok(channel) => channel,
-            Err(_) => Self::Production,
-        }
-    }
-
-    pub fn settings_directory_name(&self) -> String {
-        match self {
-            Self::Production => "immersive-reader".to_string(),
-            Self::Development => "immersive-reader-dev".to_string(),
-            Self::Qa(run_id) => format!("ImmersiveReader-QA-{run_id}"),
-        }
-    }
-
-    pub fn local_data_directory_name(&self) -> String {
-        match self {
-            Self::Production => "ImmersiveReader".to_string(),
-            Self::Development => "ImmersiveReader-Dev".to_string(),
-            Self::Qa(run_id) => format!(r"ImmersiveReader-QA\{run_id}"),
-        }
-    }
-
-    pub fn default_library(&self, local: &Path, documents: &Path) -> PathBuf {
-        match self {
-            Self::Production => documents.join(r"沉浸阅读\Library"),
-            Self::Development => local.join(r"ImmersiveReader-Dev\Library"),
-            Self::Qa(run_id) => documents
-                .join(r"Codex\ImmersiveReader-QA")
-                .join(run_id)
-                .join("Library"),
-        }
-    }
-}
+mod channel;
+pub use channel::AppChannel;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,18 +19,29 @@ struct LegacySettings {
 }
 
 pub fn app_state_dir() -> PathBuf {
+    if let Ok(locations) = crate::storage::StorageLocations::current() {
+        if let Some(parent) = locations.settings_path.parent() {
+            return parent.to_path_buf();
+        }
+    }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(AppChannel::current().settings_directory_name())
 }
 
 pub fn default_settings() -> AppSettings {
+    if let Ok(locations) = crate::storage::StorageLocations::current() {
+        return AppSettings {
+            schema_version: 3,
+            library_root: locations.library_root.to_string_lossy().into_owned(),
+        };
+    }
     let documents = dirs::document_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
         .unwrap_or_else(|| PathBuf::from("."));
     let local = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     AppSettings {
-        schema_version: 2,
+        schema_version: 3,
         library_root: AppChannel::current()
             .default_library(&local, &documents)
             .to_string_lossy()
@@ -106,7 +50,7 @@ pub fn default_settings() -> AppSettings {
 }
 
 fn validate(settings: &AppSettings) -> Result<(), String> {
-    if settings.schema_version != 2 {
+    if settings.schema_version != 3 {
         return Err("Unsupported settings schema version".to_string());
     }
     if !Path::new(&settings.library_root).is_absolute() {
@@ -126,17 +70,15 @@ fn load_from(path: &Path) -> Result<AppSettings, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "Settings schema version is missing".to_string())?;
     let settings = match version {
-        1 => {
+        1 | 2 => {
             let legacy: LegacySettings =
                 serde_json::from_value(value).map_err(|error| error.to_string())?;
-            let migrated = AppSettings {
-                schema_version: 2,
+            AppSettings {
+                schema_version: 3,
                 library_root: legacy.library_root,
-            };
-            save_to(path, &migrated)?;
-            migrated
+            }
         }
-        2 => serde_json::from_value(value).map_err(|error| error.to_string())?,
+        3 => serde_json::from_value(value).map_err(|error| error.to_string())?,
         _ => return Err("Unsupported settings schema version".to_string()),
     };
     validate(&settings)?;
@@ -153,11 +95,13 @@ fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
 }
 
 pub fn load_settings() -> Result<AppSettings, String> {
-    load_from(&app_state_dir().join("settings.json"))
+    load_from(&crate::storage::StorageLocations::current()?.settings_path)
 }
 
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
-    save_to(&app_state_dir().join("settings.json"), settings)
+    let locations = crate::storage::StorageLocations::current()?;
+    crate::storage::validate_library_root(Path::new(&settings.library_root), &locations)?;
+    save_to(&locations.settings_path, settings)
 }
 
 pub fn runtime_root() -> Result<PathBuf, String> {
@@ -224,6 +168,7 @@ mod tests {
         fs::create_dir_all(&root).expect("temp directory must be created");
         let path = root.join("settings.json");
         let settings = default_settings();
+        assert_eq!(settings.schema_version, 3);
         save_to(&path, &settings).expect("settings must save");
         let loaded = load_from(&path).expect("settings must load");
         assert_eq!(loaded.library_root, settings.library_root);
@@ -231,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_schema_one_without_legacy_runtime_paths() {
+    fn reads_schema_one_as_schema_three_without_rewriting_the_source() {
         let root =
             std::env::temp_dir().join(format!("immersive-settings-migrate-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -245,11 +190,32 @@ mod tests {
 
         let loaded = load_from(&path).expect("legacy settings must migrate");
 
-        assert_eq!(loaded.schema_version, 2);
+        assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.library_root, r"C:\Library");
         let saved = fs::read_to_string(&path).expect("migrated settings must persist");
-        assert!(!saved.contains("companionRoot"));
-        assert!(!saved.contains("temporaryRoots"));
+        assert!(saved.contains("companionRoot"));
+        assert!(saved.contains("temporaryRoots"));
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    #[test]
+    fn reads_schema_two_as_schema_three_without_rewriting_custom_library() {
+        let root =
+            std::env::temp_dir().join(format!("immersive-settings-v2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp directory must be created");
+        let path = root.join("settings.json");
+        let original = r#"{"schemaVersion":2,"libraryRoot":"D:\\My Reading"}"#;
+        fs::write(&path, original).expect("schema two settings must write");
+
+        let loaded = load_from(&path).expect("schema two settings must load compatibly");
+
+        assert_eq!(loaded.schema_version, 3);
+        assert_eq!(loaded.library_root, r"D:\My Reading");
+        assert_eq!(
+            fs::read_to_string(&path).expect("source settings must remain readable"),
+            original
+        );
         fs::remove_dir_all(root).expect("temp directory must be removed");
     }
 }

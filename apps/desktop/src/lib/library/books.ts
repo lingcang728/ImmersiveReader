@@ -66,7 +66,7 @@ export interface BookDetail {
 }
 
 export interface AppSettings {
-	schemaVersion: 2;
+	schemaVersion: 3;
 	libraryRoot: string;
 }
 
