@@ -8,9 +8,11 @@ from pathlib import Path
 
 def test_managed_data_and_model_roots_override_source_paths(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
+    cache_root = tmp_path / "cache"
     model_root = tmp_path / "models"
     environment = os.environ.copy()
     environment["IMMERSIVE_PODCAST_DATA_ROOT"] = str(data_root)
+    environment["IMMERSIVE_PODCAST_CACHE_ROOT"] = str(cache_root)
     environment["IMMERSIVE_PODCAST_MODEL_ROOT"] = str(model_root)
     script = (
         "from podcast_transcriber.common import CONFIG_PATH, INBOX, MODELS_DIR, OUTPUT, WORK;"
@@ -28,9 +30,9 @@ def test_managed_data_and_model_roots_override_source_paths(tmp_path: Path) -> N
 
     assert result.stdout.splitlines() == [
         str(data_root / "config.json"),
-        str(data_root / "input"),
-        str(data_root / "output"),
-        str(data_root / "work"),
+        str(cache_root / "input"),
+        str(cache_root / "output"),
+        str(cache_root / "work"),
         str(model_root),
     ]
 

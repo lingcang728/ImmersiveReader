@@ -11,12 +11,13 @@ from typing import Any
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 ROOT = Path(os.environ.get("IMMERSIVE_PODCAST_DATA_ROOT", APP_ROOT)).resolve()
+CACHE_ROOT = Path(os.environ.get("IMMERSIVE_PODCAST_CACHE_ROOT", ROOT)).resolve()
 
 
-INBOX = ROOT / "input"
+INBOX = CACHE_ROOT / "input"
 
 
-OUTPUT = ROOT / "output"
+OUTPUT = CACHE_ROOT / "output"
 
 
 OUT_FINAL = OUTPUT
@@ -25,7 +26,7 @@ OUT_FINAL = OUTPUT
 OUT_FINAL_MARKDOWN = OUTPUT
 
 
-WORK = ROOT / "work"
+WORK = CACHE_ROOT / "work"
 
 
 INTERNAL = WORK / "internal"
@@ -76,10 +77,10 @@ CONFIG_PATH = ROOT / "config.json"
 MANIFEST_PATH = STATE_DIR / "manifest.json"
 
 
-RUN_LOCK_PATH = ROOT / ".podcast_transcriber.lock"
+RUN_LOCK_PATH = CACHE_ROOT / ".podcast_transcriber.lock"
 
 
-LIFECYCLE_LOG_PATH = ROOT / "work" / "logs" / "task_lifecycle.jsonl"
+LIFECYCLE_LOG_PATH = WORK / "logs" / "task_lifecycle.jsonl"
 
 
 CURRENT_RUN_ID = os.environ.get("PODCAST_TRANSCRIBER_RUN_ID", "")
