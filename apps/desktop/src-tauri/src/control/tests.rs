@@ -66,3 +66,43 @@ fn control_database_creates_all_v3_control_tables() {
     drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
+
+#[test]
+fn migration_runs_survive_reopening_and_keep_receipt_location() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-migration-run-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    {
+        let database = ControlDb::open(&path).expect("control database must open");
+        database
+            .begin_migration_run("migration-1", "preview-1", "settings")
+            .expect("migration run must start");
+        database
+            .complete_migration_run(
+                "migration-1",
+                "success",
+                Some(r"Data\Migrations\migration-1\receipt.json"),
+                r#"{"status":"success"}"#,
+            )
+            .expect("migration run must complete");
+    }
+
+    let reopened = ControlDb::open(&path).expect("control database must reopen");
+    let run = reopened
+        .migration_run("migration-1")
+        .expect("migration run must load")
+        .expect("migration run must exist");
+    assert_eq!(run.status, "success");
+    assert_eq!(run.preview_id, "preview-1");
+    assert_eq!(
+        run.receipt_path.as_deref(),
+        Some(r"Data\Migrations\migration-1\receipt.json")
+    );
+    assert_eq!(run.result_json.as_deref(), Some(r#"{"status":"success"}"#));
+    drop(reopened);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}

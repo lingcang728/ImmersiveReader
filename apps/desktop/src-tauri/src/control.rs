@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -18,6 +19,17 @@ pub struct CommandRecord {
 pub enum CommandClaim {
     New,
     Existing(CommandRecord),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationRunRecord {
+    pub migration_id: String,
+    pub preview_id: String,
+    pub scope: String,
+    pub status: String,
+    pub receipt_path: Option<String>,
+    pub result_json: Option<String>,
 }
 
 pub struct ControlDb {
@@ -178,6 +190,75 @@ impl ControlDb {
             return Err("Command request was not claimed".to_string());
         }
         Ok(())
+    }
+
+    pub fn begin_migration_run(
+        &self,
+        migration_id: &str,
+        preview_id: &str,
+        scope: &str,
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT INTO migration_runs(migration_id, preview_id, scope, status, created_at) VALUES (?1, ?2, ?3, 'running', ?4)",
+                params![
+                    migration_id,
+                    preview_id,
+                    scope,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn complete_migration_run(
+        &self,
+        migration_id: &str,
+        status: &str,
+        receipt_path: Option<&str>,
+        result_json: &str,
+    ) -> Result<(), String> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE migration_runs SET status = ?2, receipt_path = ?3, result_json = ?4, completed_at = ?5 WHERE migration_id = ?1",
+                params![
+                    migration_id,
+                    status,
+                    receipt_path,
+                    result_json,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("Migration run was not started".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn migration_run(
+        &self,
+        migration_id: &str,
+    ) -> Result<Option<MigrationRunRecord>, String> {
+        self.connection
+            .query_row(
+                "SELECT migration_id, preview_id, scope, status, receipt_path, result_json FROM migration_runs WHERE migration_id = ?1",
+                [migration_id],
+                |row| {
+                    Ok(MigrationRunRecord {
+                        migration_id: row.get(0)?,
+                        preview_id: row.get(1)?,
+                        scope: row.get(2)?,
+                        status: row.get(3)?,
+                        receipt_path: row.get(4)?,
+                        result_json: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())
     }
 
     pub fn table_names(&self) -> Result<Vec<String>, String> {
