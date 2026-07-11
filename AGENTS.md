@@ -11,18 +11,22 @@
 After any task that changes **desktop app** code, config, UI, Rust backend, install scripts, or anything that affects the running product:
 
 1. **Git commit** (required for rollback). Do not leave a finished task uncommitted unless the user explicitly says not to commit.
-2. **Ship local install** (required so the desktop shortcut and `.md` / `.markdown` double-click use the new build):
+2. **Ship the isolated development install**:
 
 ```powershell
-npm.cmd --prefix .\apps\desktop run ship:local
+npm.cmd --prefix .\apps\desktop run ship:dev
 ```
 
-This builds the NSIS package, silently installs into the monorepo root
-(`C:\Users\15pro\Desktop\MyProject\ImmersiveReader\immersive-reader.exe`),
-refreshes Desktop/Start Menu shortcuts, and re-registers Markdown associations.
+This installs `immersive-reader-dev.exe` into the ignored `.dev-install` directory,
+refreshes only the development shortcuts, and uses development-only AppData and
+Library roots. It must never overwrite the production executable, production data,
+or `.md` / `.markdown` associations.
 
-3. Report the **commit hash**, installed **EXE timestamp**, and **SHA-256** (at least the first 16 chars).
+3. Report the **commit hash**, development **EXE timestamp**, and **SHA-256** (at least the first 16 chars).
 
-Do not stop after `tauri build` alone. An installer that is not installed leaves the user on an old EXE.
+`ship:local` is a production-install authorization gate. Run it only after the user
+has explicitly approved that gate with the current build and QA evidence. Markdown
+association registration is a separate authorization gate and is never implied by
+approval to run `ship:local`.
 
 If only docs/scripts unrelated to the desktop binary changed, still **git commit**; skip ship only when the installed app binary cannot be affected.
