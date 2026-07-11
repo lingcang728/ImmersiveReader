@@ -5,7 +5,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 mod atomic_file;
 pub mod cache;
 mod contracts;
@@ -25,7 +25,7 @@ pub mod tasks;
 mod temporary_content;
 mod tools;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use tauri::{Emitter, RunEvent};
+use tauri::RunEvent;
 
 pub struct StandaloneReader {
     _state: reader_server::ReaderServiceState,
@@ -514,7 +514,19 @@ fn quit_app(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        if let Some(file_path) = initial_markdown_path(&args) {
+            let _ = app.emit("open-file", file_path);
+        }
+    }));
+    let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
