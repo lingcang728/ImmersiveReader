@@ -184,6 +184,16 @@ fn task_snapshot_and_events_survive_reopen() {
         .task_events("podcast-1", 1, 100)
         .expect("event gap must load");
     assert_eq!(events, vec![task_event(2, 2)]);
+    assert_eq!(
+        reopened
+            .task_snapshots(Some(TaskKind::Podcast))
+            .expect("podcast snapshots must load"),
+        vec![snapshot]
+    );
+    assert!(reopened
+        .task_snapshots(Some(TaskKind::Zhihu))
+        .expect("zhihu snapshots must load")
+        .is_empty());
     drop(reopened);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

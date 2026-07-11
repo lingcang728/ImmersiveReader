@@ -442,6 +442,32 @@ fn preview_legacy_migration(
 }
 
 #[tauri::command]
+fn get_acquisition_snapshot(
+    kind: Option<tasks::TaskKind>,
+) -> Result<tasks::AcquisitionSnapshot, String> {
+    let control = control::ControlDb::open_current()?;
+    let tasks = control.task_snapshots(kind)?;
+    Ok(tasks::AcquisitionSnapshot {
+        recoverable_cache_bytes: tasks
+            .iter()
+            .filter(|task| task.recoverable)
+            .map(|task| task.cache_lease_bytes)
+            .sum(),
+        tasks,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+#[tauri::command]
+fn get_task_events(
+    task_id: String,
+    after_sequence: u64,
+    limit: u32,
+) -> Result<Vec<tasks::TaskEvent>, String> {
+    control::ControlDb::open_current()?.task_events(&task_id, after_sequence, limit)
+}
+
+#[tauri::command]
 fn scan_library() -> Result<library::LibraryScan, String> {
     let value = settings::load_settings()?;
     library::scan_library(Path::new(&value.library_root))
@@ -552,6 +578,8 @@ pub fn run() {
             get_publish_recovery_status,
             recover_publish_transactions,
             preview_legacy_migration,
+            get_acquisition_snapshot,
+            get_task_events,
             scan_library,
             open_book,
             get_book_chapter_path,

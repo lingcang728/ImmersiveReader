@@ -345,6 +345,30 @@ impl ControlDb {
             .transpose()
     }
 
+    pub fn task_snapshots(
+        &self,
+        kind: Option<crate::tasks::TaskKind>,
+    ) -> Result<Vec<TaskSnapshot>, String> {
+        let kind = kind.map(|value| match value {
+            crate::tasks::TaskKind::Podcast => "podcast",
+            crate::tasks::TaskKind::Zhihu => "zhihu",
+        });
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT snapshot_json FROM task_snapshots WHERE (?1 IS NULL OR kind = ?1) ORDER BY updated_at DESC, id",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([kind], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            let json = row.map_err(|error| error.to_string())?;
+            serde_json::from_str(&json).map_err(|error| error.to_string())
+        })
+        .collect()
+    }
+
     pub fn task_events(
         &self,
         task_id: &str,

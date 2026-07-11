@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskKind {
     Podcast,
@@ -122,4 +122,12 @@ pub struct TaskEvent {
     pub event_type: String,
     pub snapshot: TaskSnapshot,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcquisitionSnapshot {
+    pub tasks: Vec<TaskSnapshot>,
+    pub recoverable_cache_bytes: u64,
+    pub generated_at: String,
 }
