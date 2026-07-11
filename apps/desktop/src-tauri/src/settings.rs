@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 mod channel;
 pub use channel::AppChannel;
+mod recovery;
+use recovery::load_status_from;
+pub use recovery::{SettingsLoadState, SettingsRecovery};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,7 +98,15 @@ fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
 }
 
 pub fn load_settings() -> Result<AppSettings, String> {
-    load_from(&crate::storage::StorageLocations::current()?.settings_path)
+    let path = crate::storage::StorageLocations::current()?.settings_path;
+    match load_status_from(&path) {
+        SettingsLoadState::Active(settings) => Ok(settings),
+        SettingsLoadState::Recovery(recovery) => Err(format!(
+            "Settings recovery mode: {} ({})",
+            recovery.error,
+            recovery.source_path.display()
+        )),
+    }
 }
 
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
@@ -123,7 +134,9 @@ pub fn local_runtime_data() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_settings, load_from, save_to, AppChannel};
+    use super::{
+        default_settings, load_from, load_status_from, save_to, AppChannel, SettingsLoadState,
+    };
     use std::fs;
     use std::path::Path;
 
@@ -214,6 +227,35 @@ mod tests {
         assert_eq!(loaded.library_root, r"D:\My Reading");
         assert_eq!(
             fs::read_to_string(&path).expect("source settings must remain readable"),
+            original
+        );
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    #[test]
+    fn malformed_settings_enter_recovery_without_overwriting_source() {
+        let root = std::env::temp_dir().join(format!(
+            "immersive-settings-recovery-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp directory must be created");
+        let path = root.join("settings.json");
+        let original = br#"{"schemaVersion":2,"libraryRoot":"C:\\Broken"#;
+        fs::write(&path, original).expect("malformed settings must write");
+
+        let state = load_status_from(&path);
+
+        match state {
+            SettingsLoadState::Recovery(recovery) => {
+                assert!(recovery.read_only);
+                assert_eq!(recovery.source_path, path);
+                assert!(!recovery.error.is_empty());
+            }
+            SettingsLoadState::Active(_) => panic!("malformed settings must not become active"),
+        }
+        assert_eq!(
+            fs::read(&path).expect("source settings must remain readable"),
             original
         );
         fs::remove_dir_all(root).expect("temp directory must be removed");
