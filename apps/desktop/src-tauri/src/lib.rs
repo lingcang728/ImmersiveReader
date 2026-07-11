@@ -11,6 +11,7 @@ pub mod cache;
 mod contracts;
 mod importer;
 mod library;
+pub mod migration;
 mod progress;
 pub mod publish;
 mod reader_http;
