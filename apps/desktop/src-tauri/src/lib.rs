@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
+mod atomic_file;
 mod contracts;
 mod importer;
 mod library;
@@ -199,44 +200,8 @@ fn read_markdown_file(app: tauri::AppHandle, path: String) -> Result<ReadResult,
     Ok(ReadResult { content, encoding })
 }
 
-#[cfg(target_os = "windows")]
-extern "system" {
-    fn MoveFileExW(lpExistingFileName: *const u16, lpNewFileName: *const u16, dwFlags: u32) -> i32;
-}
-
-#[cfg(target_os = "windows")]
-fn wide_path(path: &std::path::Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
-}
-
 fn atomic_write_file(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
-    let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-    if fs::write(&temp_path, data).is_ok() {
-        #[cfg(target_os = "windows")]
-        {
-            const MOVEFILE_REPLACE_EXISTING: u32 = 1;
-            let from = wide_path(&temp_path);
-            let to = wide_path(path);
-            let ok =
-                unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING) != 0 };
-            if ok {
-                return Ok(());
-            }
-            let _ = fs::remove_file(&temp_path);
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            if fs::rename(&temp_path, path).is_ok() {
-                return Ok(());
-            }
-            let _ = fs::remove_file(&temp_path);
-        }
-    } else {
-        let _ = fs::remove_file(&temp_path);
-    }
-    // Atomic replace unavailable (destination locked, cross-volume, etc.) — write directly.
-    fs::write(path, data).map_err(|e| e.to_string())
+    atomic_file::write(path, data)
 }
 
 #[tauri::command]

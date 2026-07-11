@@ -1,0 +1,8 @@
+[package]
+name = "immersive-reader-miri-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+uuid = { version = "=1.22.0", features = ["v4"] }
