@@ -87,6 +87,14 @@ struct StorageUsage {
     runtime_state_bytes: u64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StateBackupResult {
+    backup_path: String,
+    included: Vec<String>,
+    skipped: Vec<String>,
+}
+
 fn state_dir() -> PathBuf {
     let dir = settings::app_state_dir();
     fs::create_dir_all(&dir).ok();
@@ -408,6 +416,67 @@ fn get_storage_usage() -> Result<StorageUsage, String> {
 }
 
 #[tauri::command]
+fn create_state_backup() -> Result<StateBackupResult, String> {
+    let locations = storage::StorageLocations::current()?;
+    fs::create_dir_all(&locations.backups_root).map_err(|error| error.to_string())?;
+    let backup_root = locations
+        .backups_root
+        .join(format!("state-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&backup_root).map_err(|error| error.to_string())?;
+    let mut included = Vec::new();
+    let mut skipped = vec![
+        "library".to_string(),
+        "cache".to_string(),
+        "logs".to_string(),
+        "credentials".to_string(),
+        "browser_profiles".to_string(),
+    ];
+    for (label, source, name) in [
+        ("settings", locations.settings_path, "settings.json"),
+        (
+            "control_db",
+            locations.data_root.join(r"App\control.db"),
+            "control.db",
+        ),
+    ] {
+        if source.is_file() {
+            fs::copy(&source, backup_root.join(name)).map_err(|error| error.to_string())?;
+            included.push(label.to_string());
+        } else {
+            skipped.push(label.to_string());
+        }
+    }
+    skipped.sort();
+    let manifest = serde_json::json!({
+        "schemaVersion": 1,
+        "createdAt": chrono::Utc::now().to_rfc3339(),
+        "channel": locations.channel,
+        "included": included,
+        "skipped": skipped,
+        "sensitiveData": "excluded",
+    });
+    atomic_file::write(
+        &backup_root.join("backup-manifest.json"),
+        &serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+    )?;
+    let included = manifest
+        .get("included")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let skipped = manifest
+        .get("skipped")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    Ok(StateBackupResult {
+        backup_path: backup_root.to_string_lossy().into_owned(),
+        included,
+        skipped,
+    })
+}
+
+#[tauri::command]
 fn reveal_storage_directory(kind: String) -> Result<(), String> {
     let mut locations = storage::StorageLocations::current()?;
     locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
@@ -504,6 +573,11 @@ fn preview_legacy_migration(
     target.library_root = PathBuf::from(&settings.library_root);
     let legacy = migration::current_legacy_locations(PathBuf::from(settings.library_root))?;
     migration::preview_for(&legacy, &target, scope)
+}
+
+#[tauri::command]
+fn get_migration_runs() -> Result<Vec<control::MigrationRunRecord>, String> {
+    control::ControlDb::open_current()?.migration_runs()
 }
 
 #[tauri::command]
@@ -913,6 +987,7 @@ pub fn run() {
             get_storage_locations,
             get_storage_usage,
             reveal_storage_directory,
+            create_state_backup,
             update_app_settings,
             clear_safe_cache,
             get_secret_status,
@@ -921,6 +996,7 @@ pub fn run() {
             get_publish_recovery_status,
             recover_publish_transactions,
             preview_legacy_migration,
+            get_migration_runs,
             get_acquisition_snapshot,
             get_task_events,
             preview_podcast_files,

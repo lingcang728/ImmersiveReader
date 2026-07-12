@@ -285,6 +285,28 @@ impl ControlDb {
             .map_err(|error| error.to_string())
     }
 
+    pub fn migration_runs(&self) -> Result<Vec<MigrationRunRecord>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT migration_id, preview_id, scope, status, receipt_path, result_json FROM migration_runs ORDER BY created_at DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(MigrationRunRecord {
+                    migration_id: row.get(0)?,
+                    preview_id: row.get(1)?,
+                    scope: row.get(2)?,
+                    status: row.get(3)?,
+                    receipt_path: row.get(4)?,
+                    result_json: row.get(5)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
     pub fn persist_task_event(&mut self, event: &TaskEvent) -> Result<(), String> {
         if event.schema_version != 1
             || event.task_id != event.snapshot.id

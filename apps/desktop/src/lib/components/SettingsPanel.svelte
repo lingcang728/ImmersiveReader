@@ -45,12 +45,16 @@
 	};
 	type CacheClearResult = { deletedItems: number; releasedBytes: number; skipped: Array<{ reason: string }> };
 	type PublishTransaction = { transactionId: string; phase: string; bookId: string };
+	type StateBackupResult = { backupPath: string; included: string[]; skipped: string[] };
+	type MigrationRun = { migrationId: string; previewId: string; scope: string; status: string; receiptPath?: string | null };
 
 	let locations: StorageLocations | null = null;
 	let usage: StorageUsage | null = null;
 	let secretStatus: SecretStatus | null = null;
 	let migrationPreview: MigrationPreview | null = null;
 	let publishRecovery: PublishTransaction[] = [];
+	let migrationRuns: MigrationRun[] = [];
+	let backupResult: StateBackupResult | null = null;
 	let panelLoading = false;
 	let actionBusy = false;
 	let panelNotice = "";
@@ -80,11 +84,12 @@
 		panelLoading = true;
 		panelNotice = "";
 		try {
-			[locations, usage, secretStatus, publishRecovery] = await Promise.all([
+			[locations, usage, secretStatus, publishRecovery, migrationRuns] = await Promise.all([
 				invoke<StorageLocations>("get_storage_locations"),
 				invoke<StorageUsage>("get_storage_usage"),
 				invoke<SecretStatus>("get_secret_status"),
-				invoke<PublishTransaction[]>("get_publish_recovery_status")
+				invoke<PublishTransaction[]>("get_publish_recovery_status"),
+				invoke<MigrationRun[]>("get_migration_runs")
 			]);
 		} catch (error) {
 			panelNotice = `设置状态读取失败：${String(error)}`;
@@ -128,6 +133,19 @@
 			panelNotice = `已清理 ${result.deletedItems} 项，释放 ${formatBytes(result.releasedBytes)}${result.skipped.length ? `，跳过 ${result.skipped.length} 项受保护任务` : ""}`;
 		} catch (error) {
 			panelNotice = `缓存清理失败：${String(error)}`;
+		} finally {
+			actionBusy = false;
+		}
+	}
+
+	async function createStateBackup() {
+		if (actionBusy || !window.confirm("创建当前 channel 的状态备份？Library、Cache、Logs、凭据和浏览器 Profile 会被排除。")) return;
+		actionBusy = true;
+		try {
+			backupResult = await invoke<StateBackupResult>("create_state_backup");
+			panelNotice = "状态备份已创建";
+		} catch (error) {
+			panelNotice = `状态备份失败：${String(error)}`;
 		} finally {
 			actionBusy = false;
 		}
@@ -340,11 +358,24 @@
 			<div class="action-grid">
 				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void clearCache()}>安全清理缓存</button>
 				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void previewMigration()}>刷新迁移预览</button>
+				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void createStateBackup()}>创建状态备份</button>
 			</div>
 			{#if migrationPreview}
 				<div class="status-card">
 					<strong>迁移预览（只读）</strong>
 					<span>{migrationPreview.items.length} 项 · {formatBytes(migrationPreview.totalBytes)} · 冲突 {migrationPreview.conflictCount} · 敏感 {migrationPreview.sensitiveItemCount}</span>
+				</div>
+			{/if}
+			{#if migrationRuns.length}
+				<div class="status-card">
+					<strong>迁移恢复记录 {migrationRuns.length}</strong>
+					<span>{migrationRuns.slice(0, 4).map((run) => `${run.scope} · ${run.status}`).join("；")}</span>
+				</div>
+			{/if}
+			{#if backupResult}
+				<div class="status-card">
+					<strong>状态备份已创建</strong>
+					<span>{backupResult.backupPath} · 包含 {backupResult.included.join("、") || "无"} · 排除 {backupResult.skipped.join("、")}</span>
 				</div>
 			{/if}
 			{#if publishRecovery.length}

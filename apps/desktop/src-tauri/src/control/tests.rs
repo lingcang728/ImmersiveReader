@@ -107,6 +107,9 @@ fn migration_runs_survive_reopening_and_keep_receipt_location() {
         Some(r"Data\Migrations\migration-1\receipt.json")
     );
     assert_eq!(run.result_json.as_deref(), Some(r#"{"status":"success"}"#));
+    let runs = reopened.migration_runs().expect("migration runs must list");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].migration_id, "migration-1");
     drop(reopened);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
