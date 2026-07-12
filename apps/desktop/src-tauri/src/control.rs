@@ -616,6 +616,11 @@ impl ControlDb {
             worker_error_code(message).or(Some(TaskErrorCode::Unknown))
         };
         snapshot.error_message = message.map(|value| value.trim().chars().take(500).collect());
+        snapshot.retry_after_seconds = if success {
+            None
+        } else {
+            worker_retry_after_seconds(message)
+        };
         snapshot.engine_stage = if success {
             "completed".to_string()
         } else {
@@ -747,8 +752,20 @@ fn worker_error_code(message: Option<&str>) -> Option<TaskErrorCode> {
         "MODEL_INCOMPATIBLE" => Some(TaskErrorCode::ModelIncompatible),
         "CONFIG_INCOMPATIBLE" => Some(TaskErrorCode::ConfigIncompatible),
         "ENGINE_UNAVAILABLE" => Some(TaskErrorCode::EngineUnavailable),
+        "UPSTREAM_UNAUTHORIZED" => Some(TaskErrorCode::UpstreamUnauthorized),
+        "RATE_LIMITED" => Some(TaskErrorCode::RateLimited),
+        "UPSTREAM_TIMEOUT" => Some(TaskErrorCode::UpstreamTimeout),
+        "UPSTREAM_UNAVAILABLE" => Some(TaskErrorCode::UpstreamUnavailable),
         _ => None,
     }
+}
+
+fn worker_retry_after_seconds(message: Option<&str>) -> Option<u64> {
+    let raw = message?;
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("retryAfterSeconds")
+        .and_then(serde_json::Value::as_u64)
 }
 
 fn is_active_task(state: &LifecycleState) -> bool {

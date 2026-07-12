@@ -41,6 +41,7 @@ export type TaskSnapshot = {
 	readonly progress: TaskProgress;
 	readonly errorCode?: string;
 	readonly errorMessage?: string;
+	readonly retryAfterSeconds?: number | null;
 	readonly engineStage: string;
 	readonly engineStatus: string;
 	readonly recoverable: boolean;

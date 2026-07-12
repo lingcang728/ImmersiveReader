@@ -60,6 +60,7 @@ from deepseek_pricing import (
     DEEPSEEK_DEFAULT_MODEL,
     DEEPSEEK_MODEL_PRICING_PER_MILLION,
     PromptBudgetError,
+    classify_upstream_error,
     deepseek_chat_completions_url,
     is_retryable_http_error,
     normalize_deepseek_model,
@@ -727,17 +728,9 @@ def deepseek_chat_completion(prompt: str, config: dict[str, Any], response_forma
                     body = json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 last_exc = exc
-                if exc.code == 429:
-                    retry_after = exc.headers.get("Retry-After") if hasattr(exc, "headers") else None
-                    delay = 0.0
-                    if retry_after:
-                        try:
-                            delay = max(1.0, min(120.0, float(retry_after)))
-                        except (ValueError, TypeError):
-                            delay = float(2 ** attempt + 1)
-                    else:
-                        delay = float(2 ** attempt + 1)
-                    
+                classified = classify_upstream_error(exc, "DeepSeek API")
+                if classified and classified.code == "RATE_LIMITED":
+                    delay = float(min(120, max(1, classified.retry_after_seconds or (2 ** attempt + 1))))
                     if attempt >= 2:
                         _dynamic_throttle_deepseek_polish(config)
                     
@@ -745,9 +738,11 @@ def deepseek_chat_completion(prompt: str, config: dict[str, Any], response_forma
                         "DeepSeek API rate limit 429 in polish, waiting %.1fs (attempt %s/%s)",
                         delay, attempt + 1, max_retries
                     )
-                    time.sleep(delay)
-                    continue
-                elif is_retryable_http_error(exc):
+                    if attempt < max_retries:
+                        time.sleep(delay)
+                        continue
+                    raise classified from exc
+                if is_retryable_http_error(exc):
                     if attempt < max_retries:
                         delay = 2 ** attempt
                         logging.getLogger(__name__).warning(
@@ -756,6 +751,8 @@ def deepseek_chat_completion(prompt: str, config: dict[str, Any], response_forma
                         )
                         time.sleep(delay)
                         continue
+                if classified:
+                    raise classified from exc
                 detail = exc.read().decode("utf-8", errors="replace")[:500]
                 raise RuntimeError(f"DeepSeek API error {exc.code}: {detail}") from exc
             except urllib.error.URLError as exc:
@@ -769,6 +766,9 @@ def deepseek_chat_completion(prompt: str, config: dict[str, Any], response_forma
                         )
                         time.sleep(delay)
                         continue
+                classified = classify_upstream_error(exc, "DeepSeek API")
+                if classified:
+                    raise classified from exc
                 raise RuntimeError(f"DeepSeek API network error: {exc.reason}") from exc
 
             elapsed = time.perf_counter() - started

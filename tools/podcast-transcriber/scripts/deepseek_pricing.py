@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import urllib.error
+import socket
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import math
 from typing import Any
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -24,6 +28,73 @@ RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 
 class PromptBudgetError(RuntimeError):
     """Raised when a prompt exceeds the estimated token budget."""
+
+
+class PodcastUpstreamError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        retry_after_seconds: int | None = None,
+        status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retry_after_seconds = retry_after_seconds
+        self.status = status
+
+
+def parse_retry_after(value: Any, now: datetime | None = None) -> int | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        return max(0, int(math.ceil(float(raw))))
+    except (TypeError, ValueError):
+        pass
+    try:
+        target = parsedate_to_datetime(raw)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        return max(0, int(math.ceil((target - current).total_seconds())))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def classify_upstream_error(exc: BaseException, service: str = "Upstream") -> PodcastUpstreamError | None:
+    if isinstance(exc, urllib.error.HTTPError):
+        status = int(exc.code)
+        retry_after = parse_retry_after(exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None)
+        if status == 401:
+            code = "UPSTREAM_UNAUTHORIZED"
+        elif status == 429:
+            code = "RATE_LIMITED"
+        elif status >= 500:
+            code = "UPSTREAM_UNAVAILABLE"
+        else:
+            return None
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace").strip()[:500]
+        except (OSError, UnicodeError):
+            detail = ""
+        message = f"{service} HTTP {status}"
+        if detail:
+            message = f"{message}: {detail}"
+        return PodcastUpstreamError(code, message, retry_after, status)
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return PodcastUpstreamError("UPSTREAM_TIMEOUT", f"{service} request timed out: {reason}")
+        return PodcastUpstreamError("UPSTREAM_UNAVAILABLE", f"{service} network error: {reason}")
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return PodcastUpstreamError("UPSTREAM_TIMEOUT", f"{service} request timed out: {exc}")
+    if isinstance(exc, (ConnectionResetError, ConnectionRefusedError, OSError)):
+        return PodcastUpstreamError("UPSTREAM_UNAVAILABLE", f"{service} network error: {exc}")
+    return None
 
 
 def is_retryable_http_error(exc: BaseException) -> bool:

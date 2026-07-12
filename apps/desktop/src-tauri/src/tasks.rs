@@ -57,6 +57,7 @@ pub enum TaskErrorCode {
     EngineUnavailable,
     EngineProtocolMismatch,
     EngineCrashed,
+    UpstreamUnauthorized,
     RateLimited,
     UpstreamTimeout,
     UpstreamUnavailable,
@@ -97,6 +98,8 @@ pub struct TaskSnapshot {
     pub progress: TaskProgress,
     pub error_code: Option<TaskErrorCode>,
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub retry_after_seconds: Option<u64>,
     pub engine_stage: String,
     pub engine_status: String,
     pub recoverable: bool,

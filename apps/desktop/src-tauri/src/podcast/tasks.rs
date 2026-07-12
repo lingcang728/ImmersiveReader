@@ -40,6 +40,7 @@ pub(crate) fn queued_event(
         },
         error_code: None,
         error_message: None,
+        retry_after_seconds: None,
         engine_stage: "queued".to_string(),
         engine_status: "waiting".to_string(),
         recoverable: true,

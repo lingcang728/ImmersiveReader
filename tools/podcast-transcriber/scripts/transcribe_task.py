@@ -132,9 +132,25 @@ def main() -> int:
         return 2
     os.environ["PODCAST_TRANSCRIBER_RUN_ID"] = spec["taskId"]
     import transcribe_podcasts
+    from deepseek_pricing import PodcastUpstreamError, classify_upstream_error
 
     sys.argv = ["transcribe_podcasts.py", "--force", "--no-open-output"]
-    return transcribe_podcasts.main()
+    try:
+        return transcribe_podcasts.main()
+    except Exception as error:
+        classified = error if isinstance(error, PodcastUpstreamError) else classify_upstream_error(error)
+        if classified is not None:
+            payload = {
+                "type": "fatal",
+                "errorCode": classified.code,
+                "message": str(classified),
+            }
+            if classified.retry_after_seconds is not None:
+                payload["retryAfterSeconds"] = classified.retry_after_seconds
+        else:
+            payload = {"type": "fatal", "errorCode": "UNKNOWN", "message": str(error)}
+        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -25,7 +25,9 @@ from typing import Any
 from deepseek_pricing import (
     DEEPSEEK_DEFAULT_MODEL,
     DEEPSEEK_MODEL_PRICING_PER_MILLION,
+    PodcastUpstreamError,
     PromptBudgetError,
+    classify_upstream_error,
     deepseek_chat_completions_url,
     is_retryable_http_error,
     normalize_deepseek_model,
@@ -635,8 +637,14 @@ def ollama_generate(prompt: str, translation_config: dict[str, Any], response_fo
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     timeout = int(translation_config.get("timeout_seconds", 180))
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        body = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        classified = classify_upstream_error(exc, "Ollama")
+        if classified:
+            raise classified from exc
+        raise
     return str(body.get("response", "")).strip()
 
 
@@ -1047,6 +1055,8 @@ def translate_segments_with_llm(
                 raise
             except DeepSeekLengthTruncatedError:
                 raise
+            except PodcastUpstreamError:
+                raise
             except Exception as exc:
                 last_exc = exc
                 if attempt < retries:
@@ -1124,11 +1134,15 @@ def translate_segments_with_llm(
                                 apply_translation_results(single_partial.partial_results)
                             else:
                                 mark_translation_failure(segment, single_partial)
+                        except PodcastUpstreamError:
+                            raise
                         except Exception as single_exc:
                             logger.warning("Single-segment translation failed; marking missing: %s", single_exc)
                             mark_translation_failure(segment, single_exc)
                     continue
                 except Exception as exc:
+                    if isinstance(exc, PodcastUpstreamError):
+                        raise
                     if len(current_batch) > 1:
                         midpoint = len(current_batch) // 2
                         logger.warning("Translation batch failed; splitting %s segments: %s", len(current_batch), exc)
@@ -1139,6 +1153,8 @@ def translate_segments_with_llm(
                     try:
                         results = request_with_retries([segment], max_single_retries)
                         apply_translation_results(results)
+                    except PodcastUpstreamError:
+                        raise
                     except Exception as single_exc:
                         logger.warning("Single-segment translation failed; marking missing: %s", single_exc)
                         mark_translation_failure(segment, single_exc)
@@ -1175,6 +1191,8 @@ def translate_segments_with_llm(
         for future in as_completed(futures):
             try:
                 future.result()
+            except PodcastUpstreamError:
+                raise
             except Exception as exc:
                 logger.error("Batch translation worker encountered an unhandled error: %s", exc)
             
@@ -2681,6 +2699,8 @@ def process_postprocess_stage(
                                      all_segments, runtime, duration, started_at,
                                      detected_language, needs_translation, config, logger, run_logger,
                                      _job_id)
+    except PodcastUpstreamError:
+        raise
     except Exception as exc:
         logger.exception("Unexpected postprocess failure for %s", source.name)
         state["status"] = "failed"
@@ -2726,6 +2746,8 @@ def _run_postprocess_body(
                 all_segments = translate_segments_with_llm(all_segments, config, state, state_path, logger, _job_id=_job_id)
             runtime["translation_model"] = model_label(translation_config)
             translation_status = "partial_success" if int(state.get("translation_failed") or 0) else "success"
+        except PodcastUpstreamError:
+            raise
         except Exception as exc:
             logger.error("Translation failed: %s", exc)
             state["translation_error"] = str(exc)
@@ -3298,6 +3320,8 @@ def main() -> int:
             failures.extend(pp_failures)
             results.append(pp_result)
             run_logger.info("Postprocess finished %s: %s", name, pp_result.get("status", "unknown") if isinstance(pp_result, dict) else "unknown")
+        except PodcastUpstreamError:
+            raise
         except Exception as exc:
             run_logger.exception("Postprocess failed for %s", name)
             results.append({"file": name, "status": "failed", "error": str(exc)})

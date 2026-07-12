@@ -669,6 +669,7 @@ mod tests {
             },
             error_code: Some(TaskErrorCode::PipelineIncompatible),
             error_message: Some("incompatible".to_string()),
+            retry_after_seconds: None,
             engine_stage: "recovery_check".to_string(),
             engine_status: "exited".to_string(),
             recoverable: true,

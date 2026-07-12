@@ -130,6 +130,7 @@ fn task_event(sequence: u64, revision: u64) -> TaskEvent {
         },
         error_code: None,
         error_message: None,
+        retry_after_seconds: None,
         engine_stage: "transcribe".to_string(),
         engine_status: "working".to_string(),
         recoverable: true,
@@ -402,6 +403,22 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
     assert_eq!(done.event_type, "worker_completed");
     assert_eq!(done.snapshot.outcome, TaskOutcome::Success);
     assert_eq!(done.snapshot.progress.percent, Some(100.0));
+    let mut failed_task = task_event(1, 1);
+    failed_task.task_id = "podcast-2".to_string();
+    failed_task.snapshot.id = "podcast-2".to_string();
+    database
+        .persist_task_event(&failed_task)
+        .expect("failed task must persist");
+    let failed = database
+        .finish_worker_task(
+            "podcast-2",
+            false,
+            Some(r#"{"errorCode":"RATE_LIMITED","retryAfterSeconds":9}"#),
+        )
+        .expect("worker failure must map")
+        .expect("failure event must exist");
+    assert_eq!(failed.snapshot.error_code, Some(TaskErrorCode::RateLimited));
+    assert_eq!(failed.snapshot.retry_after_seconds, Some(9));
     drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
