@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 20:57（Asia/Shanghai）
+更新时间：2026-07-12 21:07（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`7c7b19c feat(zhihu): publish staged archive revisions`
+- 当前产品 commit：`32f0f21 feat(zhihu): bind archive metadata to revisions`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 20:56:05`
-- 最新开发 EXE SHA-256：`24E14B03005F9F5325FC013113FF13CABAE5894E6E72162E742AE754D70A37F2`
+- 最新开发 EXE 时间：`2026-07-12 21:05:17`
+- 最新开发 EXE SHA-256：`37CD2417B7286820A61D21E3ADD877659F0D988E543C4037491F2E53CDA0F95E`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -338,6 +338,16 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 20:56:05`，SHA-256 `24E14B03005F9F5325FC013113FF13CABAE5894E6E72162E742AE754D70A37F2`；精确开发 EXE QA PID `28984` 启动路径正确，停止后残留开发进程为 0。
   - 未启动真实知乎抓取、登录、验证码或外部网络任务；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 关联仍为 `ImmersiveReader.Markdown`，open command 未变。
 
+### 29. Zhihu manifest、provenance 与 revision hash 绑定
+
+- [x] 生成并核对 manifest、provenance、archive revision 的 bookId/sourceId/revision/hash。
+  - 实现 commit：`32f0f21 feat(zhihu): bind archive metadata to revisions`。
+  - 发布前在 `.incoming/<taskId>/<author>` 原子写入并解析 `manifest.json` 与 `provenance.json`；journal 同时记录 `bookId=zhihu:<authorId>`、`sourceId`、revision、manifest SHA-256 和 provenance SHA-256，并在旧目录移动前后再次核对身份与哈希。
+  - manifest 章节来自本次成功 task items，包含安全相对路径、标题、日期、点赞数和字数；provenance 记录创建任务、最后成功任务、引擎版本及 manifest hash。
+  - 新增测试核对 metadata 文件、journal 字段和 SHA-256 长度；`scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 警告、Rust 87、知乎 25、Podcast 27、quick validation。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 21:05:17`，SHA-256 `37CD2417B7286820A61D21E3ADD877659F0D988E543C4037491F2E53CDA0F95E`；精确开发 EXE QA PID `12024` 启动路径正确，停止后残留开发进程为 0。
+  - 未启动真实知乎抓取、登录、验证码或外部网络任务；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 关联仍为 `ImmersiveReader.Markdown`，open command 未变。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -347,7 +357,6 @@
 ### B. Podcast 执行、控制与发布
 
 ### C. 知乎执行、登录与发布
-- [ ] 生成并核对 manifest、provenance、archive revision 的 bookId/sourceId/revision/hash。
 - [ ] 指定 QA 答主：`xiao-xue-shi-46-24`。
 - [ ] 在新流程真实 QA 通过前，不删除旧知乎控制台回退入口。
 
@@ -434,4 +443,4 @@
 
 ## 下一项推荐执行
 
-继续“C. 知乎执行、登录与发布”：生成并核对 manifest、provenance、archive revision 的 bookId/sourceId/revision/hash。
+继续“C. 知乎执行、登录与发布”：为指定答主 `xiao-xue-shi-46-24` 准备真实 QA 前的受控短样本与隔离 QA Library。
