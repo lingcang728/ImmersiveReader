@@ -16,6 +16,8 @@
       return { books, issues: [], writable: true };
     }
     if (command === 'list_temporary_content') return [];
+    if (command === 'list_trash') return [];
+    if (command === 'get_acquisition_snapshot') return { tasks: [], recoverableCacheBytes: 0, generatedAt: new Date().toISOString() };
     if (command === 'load_recent_files') return { json: '[]', store_exists: true };
     if (command === 'plugin:event|listen') return nextCallback++;
     return null;

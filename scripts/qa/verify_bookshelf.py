@@ -58,7 +58,7 @@ def main() -> int:
             browser = playwright.chromium.launch(channel="chrome", headless=True)
             page = browser.new_page(viewport={"width": 900, "height": 700}, locale="zh-CN")
             browser_errors: list[str] = []
-            page.on("pageerror", lambda error: browser_errors.append(str(error)))
+            page.on("pageerror", lambda error: browser_errors.append(error.stack or str(error)))
             page.add_init_script(MOCK_SCRIPT)
             page.goto(ORIGIN, wait_until="networkidle")
             page.wait_for_selector(".book-card", timeout=10000)
@@ -81,7 +81,7 @@ def main() -> int:
                 screenshots.append(str(target))
 
             loading_page = browser.new_page(viewport={"width": 900, "height": 700}, locale="zh-CN")
-            loading_page.on("pageerror", lambda error: browser_errors.append(str(error)))
+            loading_page.on("pageerror", lambda error: browser_errors.append(error.stack or str(error)))
             loading_page.add_init_script(MOCK_SCRIPT)
             loading_page.goto(f"{ORIGIN}/?state=loading", wait_until="domcontentloaded")
             loading_page.wait_for_selector(".empty-state")
@@ -91,7 +91,7 @@ def main() -> int:
             loading_page.close()
 
             empty_page = browser.new_page(viewport={"width": 900, "height": 700}, locale="zh-CN")
-            empty_page.on("pageerror", lambda error: browser_errors.append(str(error)))
+            empty_page.on("pageerror", lambda error: browser_errors.append(error.stack or str(error)))
             empty_page.add_init_script(MOCK_SCRIPT)
             empty_page.goto(f"{ORIGIN}/?state=empty", wait_until="networkidle")
             empty_page.wait_for_selector(".empty-state")
@@ -104,7 +104,7 @@ def main() -> int:
             empty_page.close()
 
             error_page = browser.new_page(viewport={"width": 900, "height": 700}, locale="zh-CN")
-            error_page.on("pageerror", lambda error: browser_errors.append(str(error)))
+            error_page.on("pageerror", lambda error: browser_errors.append(error.stack or str(error)))
             error_page.add_init_script(MOCK_SCRIPT)
             error_page.goto(f"{ORIGIN}/?state=error", wait_until="networkidle")
             error_page.wait_for_selector(".state-banner.error")
@@ -117,6 +117,8 @@ def main() -> int:
             error_page.screenshot(path=str(error_target), full_page=False)
             screenshots.append(str(error_target))
             error_page.close()
+            if browser_errors:
+                print(json.dumps(browser_errors, ensure_ascii=False), file=sys.stderr)
             assert browser_errors == []
             browser.close()
     finally:
