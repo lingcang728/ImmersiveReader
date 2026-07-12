@@ -772,7 +772,7 @@
 		if (!rawHref || !/^[a-z][a-z0-9+.-]*:/i.test(rawHref)) return null;
 		try {
 			const url = new URL(rawHref, window.location.href);
-			if (["http:", "https:", "mailto:", "tel:"].includes(url.protocol)) {
+			if (["http:", "https:"].includes(url.protocol)) {
 				return url.href;
 			}
 		} catch {
