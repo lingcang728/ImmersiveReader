@@ -1219,6 +1219,7 @@
 	}
 
 	async function returnToBookshelf() {
+		if (editingParagraph && !(await finishEdit())) return;
 		await flushSaveState();
 		activeBook = null;
 		trashOpen = false;
