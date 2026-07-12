@@ -320,6 +320,7 @@
 	let zhihuWorkflowOpen = false;
 	let taskSyncState: TaskSyncState = snapshotState([]);
 	let acquisitionTasks: readonly TaskSnapshot[] = [];
+	let taskEventLog: TaskEvent[] = [];
 	let taskRefreshNonce = 0;
 	let flowReaderSession: { sessionId: string; url: string } | null = null;
 	let activeBook: BookDetail | null = null;
@@ -352,6 +353,7 @@
 	}
 
 	function receiveTaskEvent(event: TaskEvent): void {
+		taskEventLog = [event, ...taskEventLog.filter((entry) => !(entry.taskId === event.taskId && entry.sequence === event.sequence))].slice(0, 60);
 		const result = applyTaskEvent(taskSyncState, event);
 		if (result.kind === "refresh") {
 			void refreshAcquisitionSnapshot();
@@ -3884,6 +3886,7 @@
 				issues={libraryIssues}
 				{temporaryItems}
 				tasks={acquisitionTasks}
+				events={taskEventLog}
 				trashCount={trashItems.length}
 				loading={libraryLoading}
 				writable={libraryWritable}

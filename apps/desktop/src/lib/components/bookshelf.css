@@ -417,6 +417,45 @@
 	animation: task-breathe 1.4s ease-in-out infinite;
 }
 
+.task-events {
+	border-top: 1px solid var(--line);
+	padding: 8px 2px 10px;
+	font-size: 11px;
+	color: var(--fg-faint);
+}
+
+.task-events summary {
+	cursor: pointer;
+	color: var(--fg-muted);
+}
+
+.task-event-list {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	margin-top: 8px;
+}
+
+.task-event-row {
+	display: grid;
+	grid-template-columns: 70px 110px minmax(0, 1fr);
+	gap: 8px;
+	align-items: baseline;
+	min-width: 0;
+}
+
+.task-event-row time,
+.task-event-row span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.task-event-row strong {
+	font-weight: 600;
+	color: var(--fg);
+}
+
 @keyframes task-breathe {
 	50% {
 		opacity: 0.35;

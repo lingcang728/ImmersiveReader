@@ -1,12 +1,13 @@
 <script lang="ts">
 	import type { BookSummary, LibraryIssue, TemporaryItem } from '$lib/library/books';
-	import type { TaskSnapshot } from '$lib/tasks/sync';
+	import type { TaskEvent, TaskSnapshot } from '$lib/tasks/sync';
 	import './bookshelf.css';
 
 	export let books: BookSummary[] = [];
 	export let issues: LibraryIssue[] = [];
 	export let temporaryItems: TemporaryItem[] = [];
 	export let tasks: readonly TaskSnapshot[] = [];
+	export let events: readonly TaskEvent[] = [];
 	export let trashCount = 0;
 	export let loading = false;
 	export let writable = true;
@@ -94,6 +95,13 @@
 		if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
 		if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 		return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+	}
+
+	function eventTime(value: string): string {
+		const date = new Date(value);
+		return Number.isNaN(date.getTime())
+			? value
+			: date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 	}
 
 	$: recoverableBytes = tasks
@@ -324,6 +332,20 @@
 						</div>
 					{/each}
 				</div>
+				{#if events.length > 0}
+					<details class="task-events">
+						<summary>结构化事件（最近 {events.length} 条）</summary>
+						<div class="task-event-list">
+							{#each events.slice(0, 12) as event (event.taskId + ':' + event.sequence)}
+								<div class="task-event-row">
+									<time>{eventTime(event.createdAt)}</time>
+									<strong>{event.type}</strong>
+									<span>{event.taskId} · {event.snapshot.engineStage}</span>
+								</div>
+							{/each}
+						</div>
+					</details>
+				{/if}
 			</section>
 		{/if}
 
