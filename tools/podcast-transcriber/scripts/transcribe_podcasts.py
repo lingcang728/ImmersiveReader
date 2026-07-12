@@ -1401,6 +1401,17 @@ def probe_duration(path: Path, ffprobe: str | None, logger: logging.Logger) -> f
                 return float(container.duration) / 1_000_000.0
     except Exception as exc:
         logger.warning("PyAV duration check failed: %s", exc)
+
+    if path.suffix.lower() == ".wav":
+        try:
+            import wave
+
+            with wave.open(str(path), "rb") as stream:
+                frame_rate = stream.getframerate()
+                if frame_rate > 0:
+                    return stream.getnframes() / frame_rate
+        except Exception as exc:
+            logger.warning("WAV duration fallback failed: %s", exc)
     return None
 
 
