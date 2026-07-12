@@ -1,6 +1,6 @@
 # ImmersiveReader V3 implementation progress
 
-Updated: 2026-07-11
+Updated: 2026-07-12
 
 This file tracks the implementation against the approved V3 plan. A checked
 item means the behavior exists in the repository and has a focused automated
@@ -43,6 +43,12 @@ test. It does not waive any independent authorization gate in the V3 plan.
   Cache, and Library roots plus sidecar path revalidation.
 - [x] Copy Podcast input through `input.partial`, stream SHA-256 verification,
   source stability checks, atomic promotion, and an active cache lease.
+- [x] Expose authoritative task snapshots and sequence-gap events through Tauri
+  commands, including recoverable cache usage totals.
+- [x] Split Zhihu permanent authors/items/revisions from deletable task history;
+  deleting a task no longer removes author navigation or successful output paths.
+- [x] Make Zhihu force recrawl preserve the last successful Markdown instead of
+  deleting files before the replacement fetch succeeds.
 
 ## In progress
 
@@ -56,8 +62,8 @@ test. It does not waive any independent authorization gate in the V3 plan.
 
 ## Remaining product work
 
-- [ ] Expose the completed task snapshot/event store through the full Tauri
-  command contract and emit persisted events to the frontend.
+- [ ] Emit persisted task events from Rust to the frontend and complete all
+  remaining mutating commands with expectedRevision/requestId.
 - [ ] Add suspended sidecar spawning, ToolManager ownership, authenticated async
   IPC, READY protocol validation, crash mapping, and one unified tray.
 - [ ] Finish Podcast TaskSpec creation, preview/budget estimates, compatibility
@@ -91,6 +97,6 @@ test. It does not waive any independent authorization gate in the V3 plan.
 - `scripts\verify.ps1`: passed on 2026-07-11.
 - Desktop TypeScript tests: 35 passed.
 - Desktop Rust tests: 58 passed.
-- Zhihu tests: 15 passed.
+- Zhihu tests: 17 passed.
 - Podcast tests with the managed runtime Python: 19 passed.
 - Podcast quick validation: passed.
