@@ -505,6 +505,16 @@
 	cursor: pointer;
 }
 
+.source-link {
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--accent);
+	padding: 6px 9px;
+	font-size: 11px;
+	cursor: pointer;
+}
+
 .book-detail-body {
 	display: grid;
 	gap: 16px;

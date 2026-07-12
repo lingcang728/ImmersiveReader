@@ -15,6 +15,7 @@
 	export let libraryRoot = '';
 	export let onOpenBook: (bookId: string) => void;
 	export let onOpenDetails: (bookId: string) => void;
+	export let onOpenSource: (source: string, sourceId?: string | null) => void;
 	export let onCloseDetails: () => void;
 	export let onFlowBook: (bookId: string) => void;
 	export let onRefresh: () => void;
@@ -481,10 +482,13 @@
 			<div class="book-detail-backdrop" role="presentation">
 				<dialog open class="book-detail-dialog" aria-labelledby="book-detail-title">
 					<header class="book-detail-header">
-						<div>
-							<span class="badge">书目详情</span>
-							<h2 id="book-detail-title">{selectedBookDetail.manifest.title}</h2>
-						</div>
+									<div>
+										<span class="badge">书目详情</span>
+										<h2 id="book-detail-title">{selectedBookDetail.manifest.title}</h2>
+									</div>
+									{#if selectedBookDetail.manifest.source === 'zhihu' && selectedBookDetail.manifest.sourceId}
+										<button type="button" class="source-link" on:click={() => onOpenSource(selectedBookDetail.manifest.source, selectedBookDetail.manifest.sourceId)}>打开知乎主页</button>
+									{/if}
 						<button type="button" class="close-detail" aria-label="关闭详情" on:click={onCloseDetails}>×</button>
 					</header>
 					<div class="book-detail-body">

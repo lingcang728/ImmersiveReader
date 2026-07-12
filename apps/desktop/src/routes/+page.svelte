@@ -1133,6 +1133,12 @@
 		}
 	}
 
+	function openBookSource(source: string, sourceId?: string | null) {
+		if (source !== "zhihu" || !sourceId) return;
+		const url = getExternalUrlToOpen(`https://www.zhihu.com/people/${encodeURIComponent(sourceId)}`);
+		if (url) void openUrl(url).catch((error) => showAppNotice(`无法打开来源链接：${String(error)}`));
+	}
+
 	async function openLibraryBook(bookId: string) {
 		if ((await requestNavigationGuard("切换书目")) === "cancel") return;
 		try {
@@ -3905,6 +3911,7 @@
 				libraryRoot={appSettings?.libraryRoot ?? ""}
 				onOpenBook={(bookId) => void openLibraryBook(bookId)}
 				onOpenDetails={(bookId) => void openBookDetails(bookId)}
+				onOpenSource={(source, sourceId) => openBookSource(source, sourceId)}
 				onCloseDetails={() => (selectedBookDetail = null)}
 				onFlowBook={(bookId) => void openBrowserReader(bookId)}
 				onRefresh={() => void refreshLibrary()}
