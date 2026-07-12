@@ -15,6 +15,15 @@
 	import { resolveMarkdownImageSources } from "$lib/render/images";
 	import type { FrontMatterEntry, RenderedMarkdownDocument, TocItem } from "$lib/render/markdown";
 	import {
+		applyTaskEvent,
+		snapshotState,
+		taskList,
+		type AcquisitionSnapshot,
+		type TaskEvent,
+		type TaskSnapshot,
+		type TaskSyncState
+	} from "$lib/tasks/sync";
+	import {
 		currentFilePath,
 		markdownSource,
 		renderedHtml,
@@ -296,6 +305,9 @@
 	let libraryWritable = true;
 	let libraryLoading = true;
 	let appSettings: AppSettings | null = null;
+	let taskSyncState: TaskSyncState = snapshotState([]);
+	let acquisitionTasks: readonly TaskSnapshot[] = [];
+	let taskRefreshNonce = 0;
 	let flowReaderSession: { sessionId: string; url: string } | null = null;
 	let activeBook: BookDetail | null = null;
 	let activeChapterIndex = -1;
@@ -309,6 +321,34 @@
 	} | null = null;
 	let zoomIndicatorText = "";
 	let zoomIndicatorTimer: ReturnType<typeof setTimeout> | null = null;
+
+	$: acquisitionTasks = taskList(taskSyncState);
+
+	async function refreshAcquisitionSnapshot(): Promise<void> {
+		const nonce = ++taskRefreshNonce;
+		try {
+			const snapshot = await invoke<AcquisitionSnapshot>("get_acquisition_snapshot", {
+				kind: null
+			});
+			if (nonce !== taskRefreshNonce) return;
+			taskSyncState = snapshotState(snapshot.tasks);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			showAppNotice(`无法同步任务队列：${message}`);
+		}
+	}
+
+	function receiveTaskEvent(event: TaskEvent): void {
+		const result = applyTaskEvent(taskSyncState, event);
+		if (result.kind === "refresh") {
+			void refreshAcquisitionSnapshot();
+			return;
+		}
+		if (result.kind === "applied") {
+			taskRefreshNonce += 1;
+			taskSyncState = result.state;
+		}
+	}
 
 	function setFontScale(next: number) {
 		const clamped = clampFontScale(next);
@@ -1554,6 +1594,17 @@
 			// openFile will handle canceling any active edit
 			openFile(event.payload);
 		});
+		const unlistenTaskEvents = listen<TaskEvent>("acquisition://task-event", (event) => {
+			receiveTaskEvent(event.payload);
+		});
+		const refreshTasksOnResume = () => {
+			if (document.visibilityState === "visible") {
+				void refreshAcquisitionSnapshot();
+			}
+		};
+		window.addEventListener("focus", refreshTasksOnResume);
+		document.addEventListener("visibilitychange", refreshTasksOnResume);
+		void refreshAcquisitionSnapshot();
 
 		const handleContentMouseOver = (e: MouseEvent) => {
 			const link = getFootnoteLink(e.target);
@@ -1703,7 +1754,10 @@
 			window.clearInterval(fileWatchTimer);
 			unlistenDrop.then(fn => fn());
 			unlistenOpenFile.then(fn => fn());
+			unlistenTaskEvents.then(fn => fn());
 			unlistenClose.then(fn => fn());
+			window.removeEventListener("focus", refreshTasksOnResume);
+			document.removeEventListener("visibilitychange", refreshTasksOnResume);
 			window.removeEventListener("keydown", handleKeydown);
 			window.removeEventListener("keyup", handleKeyup);
 			window.removeEventListener("blur", handleWindowBlur);
@@ -3632,6 +3686,7 @@
 				books={libraryBooks}
 				issues={libraryIssues}
 				{temporaryItems}
+				tasks={acquisitionTasks}
 				loading={libraryLoading}
 				writable={libraryWritable}
 				libraryRoot={appSettings?.libraryRoot ?? ""}

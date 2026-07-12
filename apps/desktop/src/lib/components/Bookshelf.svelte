@@ -1,10 +1,12 @@
 <script lang="ts">
 	import type { BookSummary, LibraryIssue, TemporaryItem } from '$lib/library/books';
+	import type { TaskSnapshot } from '$lib/tasks/sync';
 	import './bookshelf.css';
 
 	export let books: BookSummary[] = [];
 	export let issues: LibraryIssue[] = [];
 	export let temporaryItems: TemporaryItem[] = [];
+	export let tasks: readonly TaskSnapshot[] = [];
 	export let loading = false;
 	export let writable = true;
 	export let libraryRoot = '';
@@ -22,6 +24,7 @@
 	let query = '';
 	let acquireOpen = false;
 	let openCardMenu: string | null = null;
+	let recoverableBytes = 0;
 
 	$: normalizedQuery = query.trim().toLocaleLowerCase();
 	$: filteredBooks = normalizedQuery
@@ -49,6 +52,44 @@
 			minute: '2-digit'
 		}).format(date);
 	}
+
+	function taskKindLabel(kind: TaskSnapshot['kind']): string {
+		return kind === 'podcast' ? '播客转写' : '知乎归档';
+	}
+
+	function taskStateLabel(task: TaskSnapshot): string {
+		if (task.requiredAction === 'login') return '等待登录';
+		if (task.requiredAction === 'captcha') return '等待验证码';
+		if (task.requiredAction === 'configure_secret') return '需要配置密钥';
+		if (task.requiredAction === 'free_disk_space') return '磁盘空间不足';
+		if (task.requiredAction === 'approve_budget') return '等待预算确认';
+		if (task.lifecycleState === 'terminal') {
+			if (task.outcome === 'success') return '已完成';
+			if (task.outcome === 'partial_success') return '部分完成';
+			if (task.outcome === 'cancelled') return '已取消';
+			if (task.outcome === 'interrupted') return '已中断';
+			return '失败';
+		}
+		if (task.lifecycleState === 'paused') return '已暂停';
+		if (task.lifecycleState === 'pausing') return '正在暂停';
+		if (task.lifecycleState === 'queued') return '等待开始';
+		return task.progress.label ?? '正在处理';
+	}
+
+	function taskProgress(task: TaskSnapshot): number | null {
+		if (task.progress.mode !== 'determinate' || task.progress.percent === undefined) return null;
+		return Math.max(0, Math.min(100, task.progress.percent));
+	}
+
+	function formatBytes(bytes: number): string {
+		if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+		if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+		return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+	}
+
+	$: recoverableBytes = tasks
+		.filter((task) => task.recoverable)
+		.reduce((sum, task) => sum + task.cacheLeaseBytes, 0);
 
 	function closeMenus() {
 		acquireOpen = false;
@@ -203,6 +244,39 @@
 					<p><strong>{issue.path}</strong><br />{issue.message}</p>
 				{/each}
 			</details>
+		{/if}
+		{#if tasks.length > 0}
+			<section class="task-rail" aria-label="统一任务队列" aria-live="polite">
+				<header>
+					<div>
+						<strong>任务队列</strong>
+						<span>{tasks.length} 项 · 可恢复材料 {formatBytes(recoverableBytes)}</span>
+					</div>
+					<span class="task-source">由沉浸阅读统一管理</span>
+				</header>
+				<div class="task-list">
+					{#each tasks.slice(0, 4) as task (task.id)}
+						{@const percent = taskProgress(task)}
+						<div class="task-row">
+							<span class:zhihu={task.kind === 'zhihu'} class="task-kind">
+								{taskKindLabel(task.kind)}
+							</span>
+							<div class="task-copy">
+								<strong>{taskStateLabel(task)}</strong>
+								<small>{task.engineStage} · {task.engineStatus}</small>
+							</div>
+							{#if percent !== null}
+								<span class="task-progress" aria-label={`进度 ${Math.round(percent)}%`}>
+									<i style={`transform:scaleX(${percent / 100})`}></i>
+								</span>
+								<output>{Math.round(percent)}%</output>
+							{:else}
+								<span class="task-pulse" aria-hidden="true"></span>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			</section>
 		{/if}
 
 		{#if loading}
