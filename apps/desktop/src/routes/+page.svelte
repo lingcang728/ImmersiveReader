@@ -969,7 +969,7 @@
 
 	async function openBrowserReader(bookId: string) {
 		try {
-			if (editingParagraph && !(await finishEdit())) return;
+			if ((await requestNavigationGuard("进入连读")) === "cancel") return;
 			await flushSaveState();
 			if (flowReaderSession) {
 				await invoke("close_reader_session", { sessionId: flowReaderSession.sessionId });
@@ -1112,6 +1112,7 @@
 	}
 
 	async function closeFlowReader() {
+		if ((await requestNavigationGuard("返回书架")) === "cancel") return;
 		const session = flowReaderSession;
 		flowReaderSession = null;
 		if (!session) return;
