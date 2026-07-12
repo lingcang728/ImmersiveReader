@@ -7,6 +7,7 @@
 	export let issues: LibraryIssue[] = [];
 	export let temporaryItems: TemporaryItem[] = [];
 	export let tasks: readonly TaskSnapshot[] = [];
+	export let trashCount = 0;
 	export let loading = false;
 	export let writable = true;
 	export let libraryRoot = '';
@@ -18,6 +19,7 @@
 	export let onOpenTemporary: (path: string) => void;
 	export let onLaunchTool: (tool: 'zhihu' | 'podcast') => void;
 	export let onChooseLibrary: () => void;
+	export let onOpenTrash: () => void;
 	export let onRemoveBook: (bookId: string, title: string, chapterCount: number) => void;
 	export let onDeleteBook: (bookId: string, title: string, chapterCount: number) => void;
 
@@ -191,6 +193,9 @@
 					aria-hidden="true"
 					><path d="M21 12a9 9 0 1 1-2.6-6.3" /><path d="M21 3v6h-6" /></svg
 				>
+			</button>
+			<button type="button" class="menu-trigger" on:click={onOpenTrash}>
+				回收站{trashCount > 0 ? ` ${trashCount}` : ''}
 			</button>
 			<div class="acquire-wrap">
 				<button

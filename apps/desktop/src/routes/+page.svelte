@@ -45,6 +45,8 @@
 	import TocPanel from "$lib/components/TocPanel.svelte";
 	import SettingsPanel from "$lib/components/SettingsPanel.svelte";
 	import Bookshelf from "$lib/components/Bookshelf.svelte";
+	import TrashPanel from "$lib/components/TrashPanel.svelte";
+	import type { TrashDeleteResult, TrashItem } from "$lib/trash/types";
 	import {
 		chapterTocItems,
 		nextReadingState,
@@ -302,6 +304,9 @@
 	let libraryBooks: BookSummary[] = [];
 	let libraryIssues: LibraryIssue[] = [];
 	let temporaryItems: TemporaryItem[] = [];
+	let trashItems: TrashItem[] = [];
+	let trashOpen = false;
+	let trashLoading = false;
 	let libraryWritable = true;
 	let libraryLoading = true;
 	let appSettings: AppSettings | null = null;
@@ -861,6 +866,11 @@
 			} catch {
 				temporaryItems = [];
 			}
+			try {
+				trashItems = await invoke<TrashItem[]>("list_trash");
+			} catch {
+				trashItems = [];
+			}
 		} catch (error) {
 			libraryBooks = [];
 			libraryIssues = [{ path: appSettings?.libraryRoot ?? "书库", message: String(error) }];
@@ -960,6 +970,57 @@
 			);
 		} catch (error) {
 			showAppNotice(`无法启动连读：${String(error)}`);
+		}
+	}
+
+	async function refreshTrash(): Promise<void> {
+		trashLoading = true;
+		try {
+			trashItems = await invoke<TrashItem[]>("list_trash");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			showAppNotice(`无法读取回收站：${message}`);
+		} finally {
+			trashLoading = false;
+		}
+	}
+
+	function openTrashPanel(): void {
+		trashOpen = true;
+		void refreshTrash();
+	}
+
+	async function restoreTrashItem(item: TrashItem): Promise<void> {
+		try {
+			await invoke("restore_trash_item", {
+				trashId: item.trashId,
+				expectedRevision: item.revision,
+				requestId: crypto.randomUUID()
+			});
+			await Promise.all([refreshTrash(), refreshLibrary()]);
+			showAppNotice(`已恢复《${item.title}》`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			showAppNotice(`恢复失败：${message}`);
+		}
+	}
+
+	async function permanentlyDeleteTrashItem(item: TrashItem): Promise<void> {
+		const confirmed = window.confirm(
+			`永久删除《${item.title}》？\n\n这会删除回收站中的全部正文、资源与阅读状态，无法恢复。`
+		);
+		if (!confirmed || !window.confirm("再次确认：只删除这个受管回收站条目。")) return;
+		try {
+			const result = await invoke<TrashDeleteResult>("permanently_delete_trash_item", {
+				trashId: item.trashId,
+				expectedRevision: item.revision,
+				requestId: crypto.randomUUID()
+			});
+			await refreshTrash();
+			showAppNotice(`已永久删除 ${result.deletedItems} 个项目`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			showAppNotice(`永久删除失败：${message}`);
 		}
 	}
 
@@ -1079,6 +1140,7 @@
 	async function returnToBookshelf() {
 		await flushSaveState();
 		activeBook = null;
+		trashOpen = false;
 		activeChapterIndex = -1;
 		preloadedChapter = null;
 		isTemporaryReading = false;
@@ -3641,6 +3703,15 @@
 					sandbox="allow-same-origin allow-scripts allow-forms"
 				></iframe>
 			</section>
+		{:else if trashOpen}
+			<TrashPanel
+				items={trashItems}
+				loading={trashLoading}
+				onClose={() => (trashOpen = false)}
+				onRefresh={() => void refreshTrash()}
+				onRestore={(item) => void restoreTrashItem(item)}
+				onDelete={(item) => void permanentlyDeleteTrashItem(item)}
+			/>
 		{:else}
 		{#if fileError}
 			<div class="file-error" role="alert">{fileError}</div>
@@ -3687,6 +3758,7 @@
 				issues={libraryIssues}
 				{temporaryItems}
 				tasks={acquisitionTasks}
+				trashCount={trashItems.length}
 				loading={libraryLoading}
 				writable={libraryWritable}
 				libraryRoot={appSettings?.libraryRoot ?? ""}
@@ -3698,6 +3770,7 @@
 				onOpenTemporary={(path) => void openFile(path)}
 				onLaunchTool={(tool) => void launchCompanionTool(tool)}
 				onChooseLibrary={() => void chooseLibraryRoot()}
+				onOpenTrash={openTrashPanel}
 				onRemoveBook={(bookId, title, chapterCount) =>
 					void removeLibraryBook(bookId, title, chapterCount)}
 				onDeleteBook={(bookId, title, chapterCount) =>
