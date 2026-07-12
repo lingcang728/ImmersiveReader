@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 15:04（Asia/Shanghai）
+更新时间：2026-07-12 15:33（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`bf19c60 feat(runtime): suspend sidecars until job assignment`
+- 当前产品 commit：`5913f91 feat(runtime): add sidecar READY handshake`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 15:01:44`
-- 最新开发 EXE SHA-256：`A96D15A97E2872189E96D0F3FCEA4564C9CC6190B34FDB7DF5026418FCDC8C4E`
+- 最新开发 EXE 时间：`2026-07-12 15:31:55`
+- 最新开发 EXE SHA-256：`4D622EC00B4EAD0D977B2141CBEBE285E0C9902AE17C10DD51E3950DA2E8B54A`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 69、知乎 17、Podcast 19；Podcast quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 74、知乎 19、Podcast 21；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -131,13 +131,23 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 15:01:44`，SHA-256 `A96D15A97E2872189E96D0F3FCEA4564C9CC6190B34FDB7DF5026418FCDC8C4E`。
   - 已实际启动精确开发 EXE（QA PID 22688）并仅清理该进程，清理后为 0；正式 EXE 时间/哈希和 Markdown 文件关联均未改动。
 
+### 9. Sidecar READY JSON 握手
+
+- [x] Podcast/知乎 sidecar 通过 stdout 输出 READY JSON；Rust 校验 engine、protocolVersion、PID、动态端口和 15 秒超时。
+  - 实现 commit：`5913f91 feat(runtime): add sidecar READY handshake`。
+  - Zhihu Node sidecar 与 Podcast Python sidecar 均在 loopback 动态端口绑定后首行输出 `engine`、`protocolVersion`、`pid`、`port`；Rust 首行读取后继续排空 stdout，避免日志阻塞。
+  - Rust 校验失败、stdout EOF 或 15 秒超时均关闭 Job、终止并回收 Child；成功握手后 ToolManager 保存动态 port、protocolVersion、health 和内存 token。
+  - `cargo test --lib` 74 项、`cargo check --all-targets`、严格 changed-file hygiene checker、`cargo fmt` 和 `scripts\verify.ps1` 全部通过；Zhihu 19 项、Podcast 21 项和 quick validation 通过。
+  - 源码与安装 runtime 均实际启动两个 sidecar 并请求 `/health`：READY PID/动态端口匹配且返回 `ok`；QA 进程已清理。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 15:31:55`，SHA-256 `4D622EC00B4EAD0D977B2141CBEBE285E0C9902AE17C10DD51E3950DA2E8B54A`；正式 EXE、正式数据和 Markdown 文件关联未改动。
+  - 为完整验证修复未安装 PyAV 时的 WAV 时长 fallback，独立 commit：`4995301 fix(podcast): add stdlib wav duration fallback`。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
 
 ### A. 最高优先级：让 queued 任务真正执行
 
-- [ ] Podcast/知乎 sidecar 通过 stdout 输出 READY JSON；Rust 校验 engine、protocolVersion、PID、动态端口和 15 秒超时。
 - [ ] Rust 使用异步 HTTP 与连接/读取/总超时；除 `/health` 外全部 Bearer token 鉴权。
 - [ ] sidecar token 每次启动随机生成、只存在内存，不写磁盘或备份。
 - [ ] 引擎异常退出时把相关任务持久化为 interrupted，不继续显示 running。
@@ -251,4 +261,4 @@
 
 ## 下一项推荐执行
 
-继续“A. 最高优先级”：实现 Podcast/知乎 sidecar 的 stdout READY JSON 握手，由 Rust 校验 engine、protocolVersion、PID、动态端口和 15 秒超时。暂不自动运行桌面长音频、暂不调用付费 API。完成后立即更新并勾选本文件对应条目。
+继续“A. 最高优先级”：实现 Rust 异步 HTTP 连接/读取/总超时，并让除 `/health` 外的 sidecar API 全部使用 Bearer token 鉴权。暂不自动运行桌面长音频、暂不调用付费 API。完成后立即更新并勾选本文件对应条目。
