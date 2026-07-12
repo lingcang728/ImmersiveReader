@@ -360,6 +360,7 @@
 				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void previewMigration()}>刷新迁移预览</button>
 				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void createStateBackup()}>创建状态备份</button>
 			</div>
+			<div class="settings-title section-title recovery-title">恢复中心</div>
 			{#if migrationPreview}
 				<div class="status-card">
 					<strong>迁移预览（只读）</strong>
@@ -371,6 +372,8 @@
 					<strong>迁移恢复记录 {migrationRuns.length}</strong>
 					<span>{migrationRuns.slice(0, 4).map((run) => `${run.scope} · ${run.status}`).join("；")}</span>
 				</div>
+			{:else}
+				<div class="status-card"><strong>迁移恢复</strong><span>没有已记录的 migration run；真实迁移仍需独立授权。</span></div>
 			{/if}
 			{#if backupResult}
 				<div class="status-card">
@@ -384,6 +387,8 @@
 					<span>{publishRecovery.map((item) => `${item.bookId} · ${item.phase}`).join("；")}</span>
 					<button type="button" class="mini-btn" disabled={actionBusy} on:click={() => void recoverPublish()}>执行恢复检查</button>
 				</div>
+			{:else}
+				<div class="status-card"><strong>发布恢复</strong><span>没有待恢复的发布事务。</span></div>
 			{/if}
 
 			<div class="settings-title section-title">凭据</div>
