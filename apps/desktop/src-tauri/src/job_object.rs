@@ -11,8 +11,101 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenThread, ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+    OpenProcess, OpenThread, ResumeThread, SuspendThread, TerminateProcess, CREATE_NO_WINDOW,
+    CREATE_SUSPENDED, PROCESS_TERMINATE, THREAD_SUSPEND_RESUME,
 };
+
+fn for_each_process_thread(
+    process_id: u32,
+    mut action: impl FnMut(HANDLE) -> Result<(), String>,
+) -> Result<u32, String> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "CreateToolhelp32Snapshot failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+    let mut entry = THREADENTRY32 {
+        dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
+            .map_err(|error| error.to_string())?,
+        ..THREADENTRY32::default()
+    };
+    let mut found = unsafe {
+        Thread32First(
+            snapshot.as_raw_handle() as HANDLE,
+            std::ptr::from_mut(&mut entry),
+        )
+    };
+    let mut count = 0;
+    while found != 0 {
+        if entry.th32OwnerProcessID == process_id {
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if !thread.is_null() {
+                let thread = unsafe { OwnedHandle::from_raw_handle(thread) };
+                action(thread.as_raw_handle() as HANDLE)?;
+                count += 1;
+            }
+        }
+        found = unsafe {
+            Thread32Next(
+                snapshot.as_raw_handle() as HANDLE,
+                std::ptr::from_mut(&mut entry),
+            )
+        };
+    }
+    if count == 0 {
+        return Err("PROCESS_THREADS_NOT_FOUND".to_string());
+    }
+    Ok(count)
+}
+
+pub fn suspend_process(process_id: u32) -> Result<(), String> {
+    for_each_process_thread(process_id, |thread| {
+        let previous = unsafe { SuspendThread(thread) };
+        if previous == u32::MAX {
+            return Err(format!(
+                "SuspendThread failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+pub fn resume_process(process_id: u32) -> Result<(), String> {
+    for_each_process_thread(process_id, |thread| {
+        let previous = unsafe { ResumeThread(thread) };
+        if previous == u32::MAX {
+            return Err(format!(
+                "ResumeThread failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+pub fn terminate_process(process_id: u32) -> Result<(), String> {
+    let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, process_id) };
+    if process.is_null() {
+        return Err(format!(
+            "OpenProcess failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    if unsafe { TerminateProcess(process.as_raw_handle() as HANDLE, 1) } == 0 {
+        return Err(format!(
+            "TerminateProcess failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
 
 fn resume_primary_thread(process_id: u32) -> Result<(), String> {
     // SAFETY: [Category 8 - FFI boundary] TH32CS_SNAPTHREAD ignores the process

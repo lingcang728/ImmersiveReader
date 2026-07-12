@@ -20,6 +20,7 @@
 	export let onLaunchTool: (tool: 'zhihu' | 'podcast') => void;
 	export let onStartTask: (taskId: string) => void;
 	export let onRestartTask: (taskId: string) => void;
+	export let onControlTask: (taskId: string, action: 'pause' | 'resume' | 'cancel' | 'cancel_and_discard', revision: number) => void;
 	export let onChooseLibrary: () => void;
 	export let onOpenTrash: () => void;
 	export let onRemoveBook: (bookId: string, title: string, chapterCount: number) => void;
@@ -284,6 +285,15 @@
 								<button type="button" class="task-start" on:click={() => onStartTask(task.id)}>
 									开始
 								</button>
+							{/if}
+							{#if task.kind === 'podcast' && task.canPause}
+								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'pause', task.revision)}>暂停</button>
+							{/if}
+							{#if task.kind === 'podcast' && task.canResume}
+								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'resume', task.revision)}>恢复</button>
+							{/if}
+							{#if task.kind === 'podcast' && task.canCancel}
+								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'cancel', task.revision)}>取消</button>
 							{/if}
 							{#if task.kind === 'podcast' && task.lifecycleState === 'terminal' && task.outcome === 'failed' && ['INPUT_CHANGED', 'PIPELINE_INCOMPATIBLE', 'MODEL_INCOMPATIBLE', 'CONFIG_INCOMPATIBLE'].includes(task.errorCode ?? '')}
 								<button type="button" class="task-start" on:click={() => onRestartTask(task.id)}>

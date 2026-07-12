@@ -1,5 +1,6 @@
 use encoding_rs::{GB18030, UTF_16BE, UTF_16LE};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -670,6 +671,84 @@ fn restart_podcast_task(
     Ok(snapshot)
 }
 
+#[tauri::command]
+fn control_podcast_task(
+    task_id: String,
+    action: String,
+    expected_revision: u64,
+    request_id: String,
+    app: tauri::AppHandle,
+) -> Result<tasks::TaskSnapshot, String> {
+    if request_id.trim().is_empty() {
+        return Err("INVALID_REQUEST_ID".to_string());
+    }
+    let input = serde_json::json!({
+        "taskId": task_id,
+        "action": action,
+        "expectedRevision": expected_revision,
+    });
+    let input_hash = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&input).map_err(|error| error.to_string())?)
+    );
+    let mut control = control::ControlDb::open_current()?;
+    match control.claim_command(&request_id, "control_podcast_task", &input_hash)? {
+        control::CommandClaim::Existing(record) => {
+            if let Some(error) = record.error_code {
+                return Err(error);
+            }
+            serde_json::from_str(
+                record
+                    .result_json
+                    .as_deref()
+                    .ok_or_else(|| "COMMAND_RESULT_MISSING".to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        }
+        control::CommandClaim::New => {
+            let result = (|| {
+                match action.as_str() {
+                    "pause" => podcast::pause_task(&task_id)?,
+                    "resume" => podcast::resume_task(&task_id)?,
+                    "cancel" | "cancel_and_discard" => {
+                        if let Err(error) = podcast::cancel_task(&task_id) {
+                            if error != "WORKER_NOT_RUNNING" {
+                                return Err(error);
+                            }
+                        }
+                    }
+                    _ => return Err("INVALID_TASK_CONTROL".to_string()),
+                }
+                let event = control.control_task(&task_id, &action, expected_revision)?;
+                if action == "cancel_and_discard" {
+                    let locations = storage::StorageLocations::current()?;
+                    cache::discard_podcast_task_at(&locations, &task_id)?;
+                }
+                app.emit(podcast::TASK_EVENT_NAME, &event)
+                    .map_err(|error| error.to_string())?;
+                Ok(event.snapshot)
+            })();
+            match result {
+                Ok(snapshot) => {
+                    let json =
+                        serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
+                    control.complete_command(
+                        &request_id,
+                        &json,
+                        None,
+                        i64::try_from(snapshot.revision).ok(),
+                    )?;
+                    Ok(snapshot)
+                }
+                Err(error) => {
+                    control.complete_command(&request_id, "{}", Some(&error), None)?;
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -731,6 +810,7 @@ pub fn run() {
             cancel_and_discard,
             start_podcast_task,
             restart_podcast_task,
+            control_podcast_task,
         ])
         .manage(podcast::PodcastPreviewStore::default())
         .manage(reader_server::ReaderServiceState::default())

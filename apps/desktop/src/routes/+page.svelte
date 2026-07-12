@@ -992,6 +992,25 @@
 		}
 	}
 
+	async function controlPodcastTask(
+		taskId: string,
+		action: "pause" | "resume" | "cancel" | "cancel_and_discard",
+		expectedRevision: number
+	) {
+		if (action === "cancel_and_discard" && !window.confirm("取消并丢弃该播客任务及缓存？")) return;
+		try {
+			await invoke("control_podcast_task", {
+				taskId,
+				action,
+				expectedRevision,
+				requestId: crypto.randomUUID()
+			});
+			showAppNotice(action === "pause" ? "任务已暂停" : action === "resume" ? "任务已恢复" : "任务已取消");
+		} catch (error) {
+			showAppNotice(`任务控制失败：${String(error)}`);
+		}
+	}
+
 	async function refreshTrash(): Promise<void> {
 		trashLoading = true;
 		try {
@@ -3792,6 +3811,7 @@
 				onLaunchTool={(tool) => void launchCompanionTool(tool)}
 				onStartTask={(taskId) => void startPodcastTask(taskId)}
 				onRestartTask={(taskId) => void restartPodcastTask(taskId)}
+				onControlTask={(taskId, action, revision) => void controlPodcastTask(taskId, action, revision)}
 				onChooseLibrary={() => void chooseLibraryRoot()}
 				onOpenTrash={openTrashPanel}
 				onRemoveBook={(bookId, title, chapterCount) =>

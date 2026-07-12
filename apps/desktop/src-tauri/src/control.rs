@@ -516,6 +516,23 @@ impl ControlDb {
         Ok(Some(event))
     }
 
+    pub fn control_task(
+        &mut self,
+        task_id: &str,
+        action: &str,
+        expected_revision: u64,
+    ) -> Result<TaskEvent, String> {
+        let snapshot = self
+            .task_snapshot(task_id)?
+            .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
+        if snapshot.revision != expected_revision {
+            return Err("REVISION_CONFLICT".to_string());
+        }
+        let event = controlled_event(snapshot, action)?;
+        self.persist_task_event(&event)?;
+        Ok(event)
+    }
+
     pub fn record_worker_line(
         &mut self,
         task_id: &str,
@@ -812,6 +829,75 @@ fn cancelled_event(mut snapshot: TaskSnapshot) -> Result<TaskEvent, String> {
         sequence: snapshot.last_sequence,
         revision: snapshot.revision,
         event_type: "cancelled_and_discarded".to_string(),
+        snapshot,
+        created_at: now,
+    })
+}
+
+fn controlled_event(mut snapshot: TaskSnapshot, action: &str) -> Result<TaskEvent, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    snapshot.last_sequence = snapshot
+        .last_sequence
+        .checked_add(1)
+        .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+    snapshot.revision = snapshot
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+    let event_type = match action {
+        "pause" if snapshot.lifecycle_state == LifecycleState::Running => {
+            snapshot.lifecycle_state = LifecycleState::Paused;
+            snapshot.engine_stage = "paused".to_string();
+            snapshot.engine_status = "paused".to_string();
+            snapshot.can_pause = false;
+            snapshot.can_resume = true;
+            "paused"
+        }
+        "resume" if snapshot.lifecycle_state == LifecycleState::Paused => {
+            snapshot.lifecycle_state = LifecycleState::Running;
+            snapshot.engine_stage = "resuming".to_string();
+            snapshot.engine_status = "working".to_string();
+            snapshot.can_pause = true;
+            snapshot.can_resume = false;
+            "resumed"
+        }
+        "cancel" if is_active_task(&snapshot.lifecycle_state) => {
+            snapshot.lifecycle_state = LifecycleState::Terminal;
+            snapshot.outcome = TaskOutcome::Cancelled;
+            snapshot.error_code = Some(TaskErrorCode::CancelledByUser);
+            snapshot.error_message = Some("用户取消了任务，缓存 lease 保留以便恢复。".to_string());
+            snapshot.engine_stage = "cancelled".to_string();
+            snapshot.engine_status = "stopped".to_string();
+            snapshot.recoverable = true;
+            snapshot.can_pause = false;
+            snapshot.can_resume = false;
+            snapshot.can_retry = true;
+            snapshot.can_cancel = false;
+            "cancelled"
+        }
+        "cancel_and_discard" if is_active_task(&snapshot.lifecycle_state) => {
+            snapshot.lifecycle_state = LifecycleState::Terminal;
+            snapshot.outcome = TaskOutcome::Cancelled;
+            snapshot.error_code = Some(TaskErrorCode::CancelledByUser);
+            snapshot.error_message = Some("用户取消并丢弃了任务及缓存。".to_string());
+            snapshot.engine_stage = "cancelled".to_string();
+            snapshot.engine_status = "stopped".to_string();
+            snapshot.recoverable = false;
+            snapshot.can_pause = false;
+            snapshot.can_resume = false;
+            snapshot.can_retry = false;
+            snapshot.can_cancel = false;
+            "cancelled_and_discarded"
+        }
+        _ => return Err("INVALID_TASK_CONTROL".to_string()),
+    };
+    snapshot.updated_at = now.clone();
+    Ok(TaskEvent {
+        schema_version: 1,
+        task_id: snapshot.id.clone(),
+        sequence: snapshot.last_sequence,
+        revision: snapshot.revision,
+        event_type: event_type.to_string(),
         snapshot,
         created_at: now,
     })

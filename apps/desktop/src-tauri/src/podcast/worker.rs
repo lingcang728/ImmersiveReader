@@ -19,9 +19,14 @@ type WorkerJob = JobObject;
 type WorkerJob = ();
 
 type ChildHandle = Arc<Mutex<Option<Child>>>;
-static ACTIVE_WORKERS: OnceLock<Mutex<HashMap<String, ChildHandle>>> = OnceLock::new();
+struct WorkerEntry {
+    child: ChildHandle,
+    pid: u32,
+}
 
-fn workers() -> &'static Mutex<HashMap<String, ChildHandle>> {
+static ACTIVE_WORKERS: OnceLock<Mutex<HashMap<String, WorkerEntry>>> = OnceLock::new();
+
+fn workers() -> &'static Mutex<HashMap<String, WorkerEntry>> {
     ACTIVE_WORKERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -194,12 +199,19 @@ pub fn start_task(task_id: String, app: AppHandle) -> Result<(), String> {
             return Err(error);
         }
     };
+    let pid = child.id();
     let child_handle = Arc::new(Mutex::new(Some(child)));
     {
         let mut active = workers()
             .lock()
             .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
-        active.insert(task_id.clone(), Arc::clone(&child_handle));
+        active.insert(
+            task_id.clone(),
+            WorkerEntry {
+                child: Arc::clone(&child_handle),
+                pid,
+            },
+        );
     }
     thread::spawn({
         let task_id = task_id.clone();
@@ -213,14 +225,73 @@ pub fn stop_all() -> Result<(), String> {
     let active = workers()
         .lock()
         .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
-    for child_handle in active.values() {
-        if let Ok(mut slot) = child_handle.lock() {
-            if let Some(child) = slot.as_mut() {
-                let _ = child.kill();
-            }
-        }
+    for entry in active.values() {
+        let _ = terminate_task(entry.pid, &entry.child);
     }
     Ok(())
+}
+
+fn terminate_task(pid: u32, _child: &ChildHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return crate::job_object::terminate_process(pid);
+    }
+    #[cfg(not(windows))]
+    {
+        let mut slot = _child
+            .lock()
+            .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
+        let process = slot
+            .as_mut()
+            .ok_or_else(|| "WORKER_NOT_RUNNING".to_string())?;
+        process.kill().map_err(|error| error.to_string())
+    }
+}
+
+pub fn pause_task(task_id: &str) -> Result<(), String> {
+    let active = workers()
+        .lock()
+        .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
+    let entry = active
+        .get(task_id)
+        .ok_or_else(|| "WORKER_NOT_RUNNING".to_string())?;
+    #[cfg(windows)]
+    {
+        crate::job_object::suspend_process(entry.pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entry;
+        Err("WORKER_PAUSE_UNSUPPORTED".to_string())
+    }
+}
+
+pub fn cancel_task(task_id: &str) -> Result<(), String> {
+    let active = workers()
+        .lock()
+        .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
+    let entry = active
+        .get(task_id)
+        .ok_or_else(|| "WORKER_NOT_RUNNING".to_string())?;
+    terminate_task(entry.pid, &entry.child)
+}
+
+pub fn resume_task(task_id: &str) -> Result<(), String> {
+    let active = workers()
+        .lock()
+        .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
+    let entry = active
+        .get(task_id)
+        .ok_or_else(|| "WORKER_NOT_RUNNING".to_string())?;
+    #[cfg(windows)]
+    {
+        crate::job_object::resume_process(entry.pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entry;
+        Err("WORKER_RESUME_UNSUPPORTED".to_string())
+    }
 }
 
 #[allow(dead_code)]

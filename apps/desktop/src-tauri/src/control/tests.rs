@@ -405,3 +405,41 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
     drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
+
+#[test]
+fn task_controls_enforce_revision_and_transition_pause_resume_cancel() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-task-controls-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    database
+        .persist_task_event(&task_event(1, 1))
+        .expect("running task must persist");
+    let paused = database
+        .control_task("podcast-1", "pause", 1)
+        .expect("pause must persist");
+    assert_eq!(paused.snapshot.lifecycle_state, LifecycleState::Paused);
+    assert_eq!(paused.snapshot.revision, 2);
+    assert_eq!(
+        database
+            .control_task("podcast-1", "resume", 1)
+            .expect_err("stale pause revision must fail"),
+        "REVISION_CONFLICT"
+    );
+    let resumed = database
+        .control_task("podcast-1", "resume", 2)
+        .expect("resume must persist");
+    assert_eq!(resumed.snapshot.lifecycle_state, LifecycleState::Running);
+    let cancelled = database
+        .control_task("podcast-1", "cancel", 3)
+        .expect("cancel must persist");
+    assert_eq!(cancelled.snapshot.outcome, TaskOutcome::Cancelled);
+    assert!(cancelled.snapshot.recoverable);
+    assert!(cancelled.snapshot.can_retry);
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
