@@ -379,6 +379,13 @@
   - 由 `3976b67 feat(reader): embed continuous reading in main window`、`7eabd08 fix: 进/出专注模式的定位漂移——按视口锚点补偿字号重排` 与现有 focus/scroll/segment 测试覆盖。
   - `scripts\verify.ps1` 当前桌面 TypeScript 38 项测试与 Svelte 0 警告通过。
 
+### 35. 统一 Shell Playwright harness
+
+- [x] 使用 Playwright/测试 harness 验证统一 Shell；禁止 Computer Use。
+  - 实现 commit：`10bf3a4 test(qa): keep bookshelf harness aligned with task state`。
+  - `scripts\qa\verify_bookshelf.py` 使用 mock Tauri 数据和 Vite preview 覆盖 ready/loading/empty/error 状态、书架搜索、获取内容入口、视口截图和 page error；已通过，报告时间 `2026-07-12T21:28:25+0800`。
+  - mock 补齐 `get_acquisition_snapshot` 与 `list_trash`，并保留 page error stack 便于后续诊断；未读写正式 Library，未使用 Computer Use。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -439,7 +446,6 @@
 - [ ] Podcast 与知乎各一个活动任务并行测试。
 - [ ] 验证清理任务历史后知乎书目、作者导航和 archive catalog 仍存在。
 - [ ] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
-- [ ] 使用 Playwright/测试 harness 验证统一 Shell；禁止 Computer Use。
 - [ ] 生成两个完整音频的时长、磁盘、文本规模、费用上限与可用空间报告。
 - [ ] 暂停等待“完整长音频/API 费用 QA”独立授权。
 - [ ] 获准后完整执行两个原始音频，并核对前后 SHA-256 不变。
