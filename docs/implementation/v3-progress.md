@@ -63,6 +63,9 @@ test. It does not waive any independent authorization gate in the V3 plan.
 - [x] Subscribe the main window to Rust task events, recover sequence gaps and
   focus/visibility resumes from the authoritative snapshot, and show a compact
   unified task rail with structured state and recoverable cache usage.
+- [x] Add managed `trash-entry.json` metadata, conflict-safe restore,
+  expectedRevision/requestId permanent deletion, physical root protection, and
+  a same-window trash list/restore/delete surface.
 
 ## In progress
 
@@ -108,9 +111,9 @@ test. It does not waive any independent authorization gate in the V3 plan.
 
 ## Latest verification
 
-- `scripts\verify.ps1`: passed on 2026-07-12 after frontend task synchronization.
+- `scripts\verify.ps1`: passed on 2026-07-12 after the trash workspace integration.
 - Desktop TypeScript tests: 38 passed.
-- Desktop Rust tests: 63 passed.
+- Desktop Rust tests: 67 passed.
 - Zhihu tests: 17 passed.
 - Podcast tests with the managed runtime Python: 19 passed.
 - Podcast quick validation: passed.
@@ -120,3 +123,5 @@ test. It does not waive any independent authorization gate in the V3 plan.
   SHA-256 `8CC5B23FA4ECC05DA4B891F264AE01A2726D4E74A3DC327D408AF0B4B7D45B41`.
 - Development EXE from commit `74cece5`: built at `2026-07-12 09:50:55`,
   SHA-256 `77FAA3A57AB9C4ED9BE9B2926D45C722A04D51BB7FE2040B81A356AD5B2EE783`.
+- Development EXE from commit `3a78912`: built at `2026-07-12 10:05:50`,
+  SHA-256 `66D83D7C50C0AE2B43FBB9DCE12B8B3429EC26201D273253C47A91578E76F6FB`.

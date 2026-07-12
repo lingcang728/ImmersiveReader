@@ -8,6 +8,15 @@
 
 ## Mandatory close-out (every agent task)
 
+Before starting V3 implementation work, read the repository-root
+`V3-TODO.md`. Treat it as the current cross-session handoff and execution
+order. After each independently verified logical step:
+
+1. Move the item from `未完成` to `已完成` and mark it `[x]`.
+2. Update its verification/commit/build evidence when applicable.
+3. Commit the checklist update so a new conversation can resume without the
+   previous chat history.
+
 After any task that changes **desktop app** code, config, UI, Rust backend, install scripts, or anything that affects the running product:
 
 1. **Git commit** (required for rollback). Do not leave a finished task uncommitted unless the user explicitly says not to commit.
