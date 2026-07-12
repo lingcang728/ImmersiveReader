@@ -46,6 +46,7 @@
 	import SettingsPanel from "$lib/components/SettingsPanel.svelte";
 	import Bookshelf from "$lib/components/Bookshelf.svelte";
 	import PodcastWorkflow from "$lib/components/PodcastWorkflow.svelte";
+	import ZhihuWorkflow from "$lib/components/ZhihuWorkflow.svelte";
 	import TrashPanel from "$lib/components/TrashPanel.svelte";
 	import type { TrashDeleteResult, TrashItem } from "$lib/trash/types";
 	import {
@@ -312,6 +313,7 @@
 	let libraryLoading = true;
 	let appSettings: AppSettings | null = null;
 	let podcastWorkflowOpen = false;
+	let zhihuWorkflowOpen = false;
 	let taskSyncState: TaskSyncState = snapshotState([]);
 	let acquisitionTasks: readonly TaskSnapshot[] = [];
 	let taskRefreshNonce = 0;
@@ -981,6 +983,36 @@
 			showAppNotice("播客任务已启动");
 		} catch (error) {
 			showAppNotice(`无法启动播客任务：${String(error)}`);
+		}
+	}
+
+	async function startZhihuTask(taskId: string, expectedRevision: number) {
+		try {
+			await invoke("start_zhihu_task", { taskId, expectedRevision });
+			showAppNotice("知乎任务已启动");
+			await refreshAcquisitionSnapshot();
+		} catch (error) {
+			showAppNotice(`无法启动知乎任务：${String(error)}`);
+		}
+	}
+
+	async function controlZhihuTask(
+		taskId: string,
+		action: "pause" | "resume" | "cancel",
+		expectedRevision: number
+	) {
+		if (action === "cancel" && !window.confirm("取消该知乎任务？")) return;
+		try {
+			await invoke("control_zhihu_task", {
+				taskId,
+				action,
+				expectedRevision,
+				requestId: crypto.randomUUID()
+			});
+			showAppNotice(action === "pause" ? "知乎任务已暂停" : action === "resume" ? "知乎任务已恢复" : "知乎任务已取消");
+			await refreshAcquisitionSnapshot();
+		} catch (error) {
+			showAppNotice(`知乎任务控制失败：${String(error)}`);
 		}
 	}
 
@@ -3819,12 +3851,14 @@
 				onImport={() => void importFolderToLibrary()}
 				onOpenFile={() => void openFileDialog()}
 				onOpenTemporary={(path) => void openFile(path)}
-				onLaunchTool={(tool) => void launchCompanionTool(tool)}
+				onOpenZhihuWorkflow={() => (zhihuWorkflowOpen = true)}
 				onOpenPodcastWorkflow={() => (podcastWorkflowOpen = true)}
 				onStartTask={(taskId) => void startPodcastTask(taskId)}
+				onStartZhihuTask={(taskId, revision) => void startZhihuTask(taskId, revision)}
 				onOpenTaskResult={(taskId) => void openPodcastTaskResult(taskId)}
 				onRestartTask={(taskId) => void restartPodcastTask(taskId)}
 				onControlTask={(taskId, action, revision) => void controlPodcastTask(taskId, action, revision)}
+				onControlZhihuTask={(taskId, action, revision) => void controlZhihuTask(taskId, action, revision)}
 				onChooseLibrary={() => void chooseLibraryRoot()}
 				onOpenTrash={openTrashPanel}
 				onRemoveBook={(bookId, title, chapterCount) =>
@@ -3840,6 +3874,16 @@
 					onStartTask={(taskId) => void startPodcastTask(taskId)}
 					onOpenResult={(taskId) => void openPodcastTaskResult(taskId)}
 					onFallback={() => void launchCompanionTool('podcast')}
+				/>
+			{/if}
+			{#if zhihuWorkflowOpen}
+				<ZhihuWorkflow
+					tasks={acquisitionTasks}
+					onClose={() => (zhihuWorkflowOpen = false)}
+					onRefreshTasks={() => void refreshAcquisitionSnapshot()}
+					onStartTask={(taskId, revision) => void startZhihuTask(taskId, revision)}
+					onControlTask={(taskId, action, revision) => void controlZhihuTask(taskId, action, revision)}
+					onFallback={() => void launchCompanionTool('zhihu')}
 				/>
 			{/if}
 		{/if}

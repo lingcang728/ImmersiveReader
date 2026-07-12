@@ -17,12 +17,14 @@
 	export let onImport: () => void;
 	export let onOpenFile: () => void;
 	export let onOpenTemporary: (path: string) => void;
-	export let onLaunchTool: (tool: 'zhihu' | 'podcast') => void;
+	export let onOpenZhihuWorkflow: () => void;
 	export let onOpenPodcastWorkflow: () => void;
 	export let onStartTask: (taskId: string) => void;
+	export let onStartZhihuTask: (taskId: string, revision: number) => void;
 	export let onOpenTaskResult: (taskId: string) => void;
 	export let onRestartTask: (taskId: string) => void;
 	export let onControlTask: (taskId: string, action: 'pause' | 'resume' | 'cancel' | 'cancel_and_discard', revision: number) => void;
+	export let onControlZhihuTask: (taskId: string, action: 'pause' | 'resume' | 'cancel', revision: number) => void;
 	export let onChooseLibrary: () => void;
 	export let onOpenTrash: () => void;
 	export let onRemoveBook: (bookId: string, title: string, chapterCount: number) => void;
@@ -217,7 +219,7 @@
 					<div class="acquire-menu" role="group" aria-label="获取内容">
 						<button
 							type="button"
-							on:click={() => runAcquire(() => onLaunchTool('zhihu'))}
+							on:click={() => runAcquire(onOpenZhihuWorkflow)}
 						>
 							归档知乎
 						</button>
@@ -288,14 +290,26 @@
 									开始
 								</button>
 							{/if}
+							{#if task.kind === 'zhihu' && task.lifecycleState === 'queued'}
+								<button type="button" class="task-start" on:click={() => onStartZhihuTask(task.id, task.revision)}>开始</button>
+							{/if}
 							{#if task.kind === 'podcast' && task.canPause}
 								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'pause', task.revision)}>暂停</button>
+							{/if}
+							{#if task.kind === 'zhihu' && task.canPause}
+								<button type="button" class="task-start" on:click={() => onControlZhihuTask(task.id, 'pause', task.revision)}>暂停</button>
 							{/if}
 							{#if task.kind === 'podcast' && task.canResume}
 								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'resume', task.revision)}>恢复</button>
 							{/if}
+							{#if task.kind === 'zhihu' && task.canResume}
+								<button type="button" class="task-start" on:click={() => onControlZhihuTask(task.id, 'resume', task.revision)}>恢复</button>
+							{/if}
 							{#if task.kind === 'podcast' && task.canCancel}
 								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'cancel', task.revision)}>取消</button>
+							{/if}
+							{#if task.kind === 'zhihu' && task.canCancel}
+								<button type="button" class="task-start" on:click={() => onControlZhihuTask(task.id, 'cancel', task.revision)}>取消</button>
 							{/if}
 							{#if task.kind === 'podcast' && task.lifecycleState === 'terminal' && task.canRetry && task.requiredAction !== 'approve_budget'}
 								<button type="button" class="task-start" on:click={() => onRestartTask(task.id)}>
@@ -339,7 +353,7 @@
 				<p>导入一个 Markdown 文件夹，或从知乎归档内容开始。</p>
 				<div>
 					<button class="btn-resume" on:click={onImport}>导入书库</button>
-					<button class="quiet-action" on:click={() => onLaunchTool('zhihu')}>归档知乎</button>
+					<button class="quiet-action" on:click={onOpenZhihuWorkflow}>归档知乎</button>
 					<button class="quiet-action" on:click={onOpenPodcastWorkflow}>转写播客</button>
 				</div>
 			</div>

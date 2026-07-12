@@ -21,6 +21,12 @@ pub struct CreateZhihuTaskRequest {
     pub sort_by: ZhihuSortBy,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZhihuLoginStatus {
+    pub logged_in: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ZhihuItemTypes {
@@ -155,6 +161,19 @@ pub fn create_task(
     let event = create_event(snapshot.clone());
     ControlDb::open_current()?.persist_task_event(&event)?;
     Ok(snapshot)
+}
+
+pub fn login_status(settings: &AppSettings) -> Result<ZhihuLoginStatus, String> {
+    let response: ApiResponse<ZhihuLoginStatus> =
+        crate::tools::zhihu_get_json(settings, "/api/login-status")?;
+    if !response.success {
+        return Err(response
+            .error
+            .unwrap_or_else(|| "ZHIHU_LOGIN_STATUS_FAILED".to_string()));
+    }
+    response
+        .data
+        .ok_or_else(|| "ZHIHU_LOGIN_STATUS_MISSING".to_string())
 }
 
 pub fn start_task(

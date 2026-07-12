@@ -2,6 +2,7 @@ import express from 'express';
 import { getTasks, saveTask, deleteTask, clearCompletedTasks, resetRunningTasks, getTask, resetTaskForce } from './db.js';
 import { cancelTask, createTask, queueTask, setSchedulerProgressCallback } from './scheduler.js';
 import { logger, sanitizeFilename } from './utils.js';
+import { getLoginStatus } from './browser.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import { exec } from 'child_process';
@@ -23,6 +24,15 @@ app.get('/health', (_req, res) => {
 
 app.get('/api/status', requireLocalToken, (_req, res) => {
   res.json({ engine: 'zhihu', status: 'ready' });
+});
+
+app.get('/api/login-status', requireLocalToken, async (_req, res) => {
+  try {
+    const status = await getLoginStatus();
+    res.json({ success: true, data: status });
+  } catch (e: any) {
+    res.status(503).json({ success: false, error: e.message });
+  }
 });
 
 function parseHost(hostHeader: string | undefined): string {

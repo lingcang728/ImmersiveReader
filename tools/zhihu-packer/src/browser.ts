@@ -375,6 +375,16 @@ export async function getBrowserContext(headless = true): Promise<BrowserContext
   throw new Error(`无法启动 Playwright 浏览器，已尝试系统 Chrome、Edge 及默认 Chromium。错误信息: ${lastError?.message}`);
 }
 
+export async function getLoginStatus(): Promise<{ loggedIn: boolean }> {
+  const wasActive = activeContext !== null;
+  const context = await getBrowserContext(true);
+  const cookies = await context.cookies();
+  if (!wasActive) {
+    await closeBrowserContext();
+  }
+  return { loggedIn: cookies.some(cookie => cookie.name === 'z_c0') };
+}
+
 export async function closeBrowserContext() {
   const backend = currentBackend;
 

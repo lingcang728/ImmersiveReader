@@ -671,6 +671,12 @@ fn create_zhihu_task(
 }
 
 #[tauri::command]
+fn get_zhihu_login_status() -> Result<zhihu::ZhihuLoginStatus, String> {
+    let settings = settings::load_settings()?;
+    zhihu::login_status(&settings)
+}
+
+#[tauri::command]
 fn start_zhihu_task(
     task_id: String,
     expected_revision: u64,
@@ -873,6 +879,7 @@ pub fn run() {
             cancel_and_discard,
             start_podcast_task,
             create_zhihu_task,
+            get_zhihu_login_status,
             start_zhihu_task,
             control_zhihu_task,
             restart_podcast_task,
