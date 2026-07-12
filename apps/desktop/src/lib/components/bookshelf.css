@@ -456,6 +456,119 @@
 	color: var(--fg);
 }
 
+.book-detail-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 30;
+	display: grid;
+	place-items: center;
+	padding: 20px;
+	background: rgba(0, 0, 0, 0.34);
+}
+
+.book-detail-dialog {
+	width: min(660px, 100%);
+	max-height: 88vh;
+	overflow: auto;
+	margin: 0;
+	padding: 0;
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius-md);
+	background: var(--surface-raised);
+	color: var(--fg);
+	box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.book-detail-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 18px 20px;
+	border-bottom: 1px solid var(--line);
+}
+
+.book-detail-header h2 {
+	margin: 9px 0 0;
+	font: 600 20px/1.35 "Noto Serif SC", "SimSun", serif;
+	color: var(--fg-strong);
+}
+
+.close-detail {
+	width: 30px;
+	height: 30px;
+	border: 1px solid var(--line);
+	border-radius: 50%;
+	background: transparent;
+	color: var(--fg-muted);
+	font-size: 20px;
+	cursor: pointer;
+}
+
+.book-detail-body {
+	display: grid;
+	gap: 16px;
+	padding: 18px 20px 22px;
+}
+
+.book-detail-meta {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 10px 18px;
+	margin: 0;
+}
+
+.book-detail-meta div {
+	min-width: 0;
+}
+
+.book-detail-meta dt {
+	font-size: 10px;
+	color: var(--fg-faint);
+}
+
+.book-detail-meta dd {
+	overflow: hidden;
+	margin: 3px 0 0;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12px;
+	color: var(--fg);
+}
+
+.book-detail-note {
+	margin: 0;
+	padding: 9px 10px;
+	border-radius: var(--radius-sm);
+	background: var(--surface-panel);
+	color: var(--fg-muted);
+	font-size: 11px;
+	line-height: 1.55;
+}
+
+.chapter-list {
+	display: grid;
+	gap: 5px;
+	max-height: 280px;
+	margin: 0;
+	padding: 0 0 0 22px;
+	overflow: auto;
+	color: var(--fg-muted);
+	font-size: 12px;
+}
+
+.chapter-list li {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 5px 0;
+	border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.chapter-list small {
+	color: var(--fg-faint);
+}
+
 @keyframes task-breathe {
 	50% {
 		opacity: 0.35;

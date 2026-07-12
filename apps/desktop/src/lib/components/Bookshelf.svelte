@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { BookSummary, LibraryIssue, TemporaryItem } from '$lib/library/books';
+	import type { BookDetail, BookSummary, LibraryIssue, TemporaryItem } from '$lib/library/books';
 	import type { TaskEvent, TaskSnapshot } from '$lib/tasks/sync';
 	import './bookshelf.css';
 
@@ -8,11 +8,14 @@
 	export let temporaryItems: TemporaryItem[] = [];
 	export let tasks: readonly TaskSnapshot[] = [];
 	export let events: readonly TaskEvent[] = [];
+	export let selectedBookDetail: BookDetail | null = null;
 	export let trashCount = 0;
 	export let loading = false;
 	export let writable = true;
 	export let libraryRoot = '';
 	export let onOpenBook: (bookId: string) => void;
+	export let onOpenDetails: (bookId: string) => void;
+	export let onCloseDetails: () => void;
 	export let onFlowBook: (bookId: string) => void;
 	export let onRefresh: () => void;
 	export let onImport: () => void;
@@ -443,6 +446,7 @@
 						<div class="book-actions">
 							<span>{book.currentChapterTitle ?? '尚未开卷'}</span>
 							<div>
+								<button class="act-secondary" on:click={() => onOpenDetails(book.bookId)}>详情</button>
 								<button class="act-primary" on:click={() => onOpenBook(book.bookId)}>精读</button>
 								<button class="act-secondary" on:click={() => onFlowBook(book.bookId)}
 									>连读 ↗</button
@@ -471,6 +475,37 @@
 					</div>
 				{/each}
 			</section>
+		{/if}
+
+		{#if selectedBookDetail}
+			<div class="book-detail-backdrop" role="presentation">
+				<dialog open class="book-detail-dialog" aria-labelledby="book-detail-title">
+					<header class="book-detail-header">
+						<div>
+							<span class="badge">书目详情</span>
+							<h2 id="book-detail-title">{selectedBookDetail.manifest.title}</h2>
+						</div>
+						<button type="button" class="close-detail" aria-label="关闭详情" on:click={onCloseDetails}>×</button>
+					</header>
+					<div class="book-detail-body">
+						<dl class="book-detail-meta">
+							<div><dt>来源</dt><dd>{selectedBookDetail.manifest.source}</dd></div>
+							<div><dt>sourceId</dt><dd>{selectedBookDetail.manifest.sourceId ?? '未提供'}</dd></div>
+							<div><dt>生成时间</dt><dd>{selectedBookDetail.manifest.generatedAt}</dd></div>
+							<div><dt>更新时间</dt><dd>{selectedBookDetail.manifest.updatedAt}</dd></div>
+							<div><dt>章节</dt><dd>{selectedBookDetail.manifest.chapters.length} 篇</dd></div>
+							<div><dt>当前章节</dt><dd>{selectedBookDetail.progress.current || '未开始'}</dd></div>
+							<div><dt>章节位置</dt><dd>{Math.round(selectedBookDetail.progress.position * 100)}%</dd></div>
+						</dl>
+						<p class="book-detail-note">manifest 与阅读状态来自当前 Library；provenance、revision 和任务记录将在对应详情面板接入。</p>
+						<ol class="chapter-list">
+							{#each selectedBookDetail.manifest.chapters.slice(0, 20) as chapter}
+								<li><span>{chapter.title}</span><small>{chapter.date ?? ''}</small></li>
+							{/each}
+						</ol>
+					</div>
+				</dialog>
+			</div>
 		{/if}
 	</div>
 </section>

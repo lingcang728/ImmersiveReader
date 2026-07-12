@@ -324,6 +324,7 @@
 	let taskRefreshNonce = 0;
 	let flowReaderSession: { sessionId: string; url: string } | null = null;
 	let activeBook: BookDetail | null = null;
+	let selectedBookDetail: BookDetail | null = null;
 	let activeChapterIndex = -1;
 	let chapterSwitching = false;
 	let preloadedChapter: {
@@ -1120,6 +1121,15 @@
 			await invoke("close_reader_session", { sessionId: session.sessionId });
 		} catch (error) {
 			showAppNotice(`无法关闭连读会话：${String(error)}`);
+		}
+	}
+
+	async function openBookDetails(bookId: string) {
+		if ((await requestNavigationGuard("打开书目详情")) === "cancel") return;
+		try {
+			selectedBookDetail = await invoke<BookDetail>("open_book", { bookId });
+		} catch (error) {
+			showAppNotice(`无法读取书目详情：${String(error)}`);
 		}
 	}
 
@@ -3888,11 +3898,14 @@
 				{temporaryItems}
 				tasks={acquisitionTasks}
 				events={taskEventLog}
+				selectedBookDetail={selectedBookDetail}
 				trashCount={trashItems.length}
 				loading={libraryLoading}
 				writable={libraryWritable}
 				libraryRoot={appSettings?.libraryRoot ?? ""}
 				onOpenBook={(bookId) => void openLibraryBook(bookId)}
+				onOpenDetails={(bookId) => void openBookDetails(bookId)}
+				onCloseDetails={() => (selectedBookDetail = null)}
 				onFlowBook={(bookId) => void openBrowserReader(bookId)}
 				onRefresh={() => void refreshLibrary()}
 				onImport={() => void importFolderToLibrary()}
