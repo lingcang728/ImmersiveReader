@@ -6,8 +6,7 @@
   "permissions": [
     "core:default",
     "core:window:allow-set-title",
-    "opener:default",
-    "dialog:default",
-    "fs:default"
+    "opener:allow-open-url",
+    "dialog:allow-open"
   ]
 }
