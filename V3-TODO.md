@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 21:54（Asia/Shanghai）
+更新时间：2026-07-12 21:59（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`9186eec fix(reader): add unsaved navigation guard`
+- 当前产品 commit：`b451822 feat(tasks): show structured event log`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 21:52:13`
-- 最新开发 EXE SHA-256：`70354B03744DDBA5A6483F3755C7197912505EFD32805E986C66239841285FD1`
+- 最新开发 EXE 时间：`2026-07-12 21:57:16`
+- 最新开发 EXE SHA-256：`07DA7EDCD1FFF7F6F8B8ADB46383A3193FD1DD685C7A6B4CD6412B8C5FF03FD5`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -430,7 +430,10 @@
 - [ ] NavigationGuard 覆盖工作区切换、书目切换、精读/连读、返回书架、第二实例 Markdown 和退出。
   - 已覆盖书目/章节、精读、返回书架、第二实例 `open-file`、外部 Markdown 和退出；连续阅读返回路径仍需接入与交互 QA。
 - [ ] 实现 Podcast 配置页、知乎配置页和 Markdown 导入页。
-- [ ] 实现完整任务队列、结构化事件/日志面板和控制按钮。
+- [x] 实现完整任务队列、结构化事件/日志面板和控制按钮。
+  - 书架任务 rail 保留 Podcast/知乎开始、暂停、恢复、取消、重试、打开结果和可恢复字节显示；新增最近 60 条结构化事件缓存与最近 12 条展开面板；实现 commit：`b451822 feat(tasks): show structured event log`。
+  - 完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 21:57:16`，EXE SHA-256 前 16 位 `07DA7EDCD1FFF7F6F`，PID `105744` 启动存活并已停止，残留匹配进程 0。
+  - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。
 - [ ] 实现书目详情、provenance、revision、来源链接和任务记录。
 - [ ] 完成设置页：Library/Data/Cache/Logs/Backups 路径、大小、打开目录、安全清理、备份、凭据、迁移和恢复状态。
   - 已接入受管路径展示、路径复制、安全缓存清理、只读迁移 preview、发布恢复检查和 Credential Manager 状态；目录打开、大小、备份与完整恢复状态仍未完成。
