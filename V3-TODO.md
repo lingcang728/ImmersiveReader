@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 17:35（Asia/Shanghai）
+更新时间：2026-07-12 17:45（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`ff8ef97 feat(desktop): open podcast task results`
+- 当前产品 commit：`1965b42 feat(desktop): add podcast workflow panel`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 17:35:02`
-- 最新开发 EXE SHA-256：`3DFCD9622C98365BA0AB1E22DD4554C585DE0E739505374DDC12D49C2B95A4AA`
+- 最新开发 EXE 时间：`2026-07-12 17:45:23`
+- 最新开发 EXE SHA-256：`5F34348CBB759937C7113EF11DBACB635564E5E5623646C5E4C4A63E4744223A`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 85、知乎 20、Podcast 27；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -266,6 +266,17 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 17:35:02`，SHA-256 `3DFCD9622C98365BA0AB1E22DD4554C585DE0E739505374DDC12D49C2B95A4AA`；精确开发 EXE QA PID `94140` 启动路径正确，停止后残留开发进程为 0。
   - 正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 文件关联未改动。
 
+### 22. Podcast 主窗口执行工作台
+
+- [x] 在主窗口实现 Podcast 拖放/文件选择、预检、预算、重复策略、开始、暂停、恢复和结果页。
+  - 实现 commit：`1965b42 feat(desktop): add podcast workflow panel`。
+  - 新增单窗口 Podcast 工作台：接收 Tauri 拖放和多文件选择，限制 MP3/M4A/WAV；调用受控 Rust `preview_podcast_files` 展示时长、缓存、可用空间和 API 费用上限。
+  - 预算超出时要求显式确认；重复来源可选择复用已有书目或创建新 revision；任务通过幂等 requestId 加入统一队列，队列卡片提供开始并复用既有暂停、恢复、取消和打开结果动作。
+  - 结果状态展示任务终态，并可从工作台打开成功发布的书目；旧版 Podcast GUI 回退按钮保留在同一流程页。
+  - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 警告、Rust 85、知乎 20、Podcast 27、quick validation；`cargo check --all-targets` 通过。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 17:45:23`，SHA-256 `5F34348CBB759937C7113EF11DBACB635564E5E5623646C5E4C4A63E4744223A`；精确开发 EXE QA PID `100568` 启动路径正确，停止后残留开发进程为 0。
+  - 未运行真实音频、DeepSeek/Ollama 或付费 API；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 文件关联未改动。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -273,8 +284,6 @@
 ### A. 最高优先级：让 queued 任务真正执行
 
 ### B. Podcast 执行、控制与发布
-- [ ] 在主窗口实现 Podcast 拖放/文件选择、预检、预算、重复策略、开始、暂停、恢复和结果页。
-- [ ] 在上述流程真正可运行前，不删除旧 Podcast GUI 回退入口。
 
 ### C. 知乎执行、登录与发布
 
@@ -371,4 +380,4 @@
 
 ## 下一项推荐执行
 
-继续“B. Podcast 执行、控制与发布”：在主窗口实现 Podcast 拖放/文件选择、预检、预算、重复策略、开始、暂停、恢复和结果页；保留旧 GUI 回退入口。暂不自动运行桌面长音频、暂不调用付费 API。
+继续“C. 知乎执行、登录与发布”：先实现 Rust `create_zhihu_task`、control_task 与 TaskSnapshot/Event 适配器；保留旧知乎控制台回退入口，暂不自动运行真实抓取或登录。
