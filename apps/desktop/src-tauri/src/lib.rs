@@ -76,10 +76,37 @@ struct RecentFilesLoad {
     store_exists: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageUsage {
+    library_bytes: u64,
+    data_bytes: u64,
+    cache_bytes: u64,
+    logs_bytes: u64,
+    backups_bytes: u64,
+    runtime_state_bytes: u64,
+}
+
 fn state_dir() -> PathBuf {
     let dir = settings::app_state_dir();
     fs::create_dir_all(&dir).ok();
     dir
+}
+
+fn directory_size(path: &Path) -> Result<u64, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    fs::read_dir(path)
+        .map_err(|error| error.to_string())?
+        .map(|entry| entry.map_err(|error| error.to_string()))
+        .try_fold(0_u64, |total, entry| {
+            Ok(total.saturating_add(directory_size(&entry?.path())?))
+        })
 }
 
 fn legacy_state_dir() -> PathBuf {
@@ -364,6 +391,36 @@ fn get_storage_locations() -> Result<storage::StorageLocations, String> {
     let mut locations = storage::StorageLocations::current()?;
     locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
     Ok(locations)
+}
+
+#[tauri::command]
+fn get_storage_usage() -> Result<StorageUsage, String> {
+    let mut locations = storage::StorageLocations::current()?;
+    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+    Ok(StorageUsage {
+        library_bytes: directory_size(&locations.library_root)?,
+        data_bytes: directory_size(&locations.data_root)?,
+        cache_bytes: directory_size(&locations.cache_root)?,
+        logs_bytes: directory_size(&locations.logs_root)?,
+        backups_bytes: directory_size(&locations.backups_root)?,
+        runtime_state_bytes: directory_size(&locations.runtime_state_root)?,
+    })
+}
+
+#[tauri::command]
+fn reveal_storage_directory(kind: String) -> Result<(), String> {
+    let mut locations = storage::StorageLocations::current()?;
+    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+    let path = match kind.as_str() {
+        "library" => locations.library_root,
+        "data" => locations.data_root,
+        "cache" => locations.cache_root,
+        "logs" => locations.logs_root,
+        "backups" => locations.backups_root,
+        "runtime_state" => locations.runtime_state_root,
+        _ => return Err("Unknown storage directory".to_string()),
+    };
+    tauri_plugin_opener::reveal_item_in_dir(path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -854,6 +911,8 @@ pub fn run() {
             markdown_file_exists,
             get_app_settings,
             get_storage_locations,
+            get_storage_usage,
+            reveal_storage_directory,
             update_app_settings,
             clear_safe_cache,
             get_secret_status,

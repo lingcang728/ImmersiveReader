@@ -28,6 +28,14 @@
 		libraryRoot: string;
 		runtimeRoot: string;
 	};
+	type StorageUsage = {
+		libraryBytes: number;
+		dataBytes: number;
+		cacheBytes: number;
+		logsBytes: number;
+		backupsBytes: number;
+		runtimeStateBytes: number;
+	};
 	type SecretStatus = { configured: boolean; target: string; lastVerifiedAt?: string | null };
 	type MigrationPreview = {
 		items: Array<{ kind: string; exists: boolean; bytes: number; sensitive: boolean; conflict: boolean }>;
@@ -39,6 +47,7 @@
 	type PublishTransaction = { transactionId: string; phase: string; bookId: string };
 
 	let locations: StorageLocations | null = null;
+	let usage: StorageUsage | null = null;
 	let secretStatus: SecretStatus | null = null;
 	let migrationPreview: MigrationPreview | null = null;
 	let publishRecovery: PublishTransaction[] = [];
@@ -47,6 +56,17 @@
 	let panelNotice = "";
 	let apiKey = "";
 	let stopSubscription: (() => void) | undefined;
+	let storageRows: Array<[string, string, string, number]> = [];
+	$: storageRows = locations
+		? [
+				["library", "Library", locations.libraryRoot, usage?.libraryBytes ?? 0],
+				["data", "Data", locations.dataRoot, usage?.dataBytes ?? 0],
+				["cache", "Cache", locations.cacheRoot, usage?.cacheBytes ?? 0],
+				["logs", "Logs", locations.logsRoot, usage?.logsBytes ?? 0],
+				["backups", "Backups", locations.backupsRoot, usage?.backupsBytes ?? 0],
+				["runtime_state", "RuntimeState", locations.runtimeStateRoot, usage?.runtimeStateBytes ?? 0]
+			]
+		: [];
 
 	onMount(() => {
 		stopSubscription = settingsOpen.subscribe((open) => {
@@ -60,8 +80,9 @@
 		panelLoading = true;
 		panelNotice = "";
 		try {
-			[locations, secretStatus, publishRecovery] = await Promise.all([
+			[locations, usage, secretStatus, publishRecovery] = await Promise.all([
 				invoke<StorageLocations>("get_storage_locations"),
+				invoke<StorageUsage>("get_storage_usage"),
 				invoke<SecretStatus>("get_secret_status"),
 				invoke<PublishTransaction[]>("get_publish_recovery_status")
 			]);
@@ -85,6 +106,14 @@
 			panelNotice = "路径已复制";
 		} catch (error) {
 			panelNotice = `复制失败：${String(error)}`;
+		}
+	}
+
+	async function revealDirectory(kind: string) {
+		try {
+			await invoke("reveal_storage_directory", { kind });
+		} catch (error) {
+			panelNotice = `无法打开目录：${String(error)}`;
 		}
 	}
 
@@ -289,18 +318,17 @@
 			<div class="settings-title section-title">存储路径</div>
 			{#if locations}
 				<div class="path-list">
-					{#each [
-						["Library", locations.libraryRoot],
-						["Data", locations.dataRoot],
-						["Cache", locations.cacheRoot],
-						["Logs", locations.logsRoot],
-						["Backups", locations.backupsRoot],
-						["RuntimeState", locations.runtimeStateRoot]
-					] as row}
+					{#each storageRows as row}
 						<div class="path-row">
-							<span>{row[0]}</span>
-							<code title={row[1]}>{row[1]}</code>
-							<button type="button" class="mini-btn" on:click={() => copyPath(row[1])}>复制</button>
+							<span>{row[1]}</span>
+							<div class="path-value">
+								<code title={row[2]}>{row[2]}</code>
+								<small>{formatBytes(row[3])}</small>
+							</div>
+							<div class="path-actions">
+								<button type="button" class="mini-btn" on:click={() => copyPath(row[2])}>复制</button>
+								<button type="button" class="mini-btn" on:click={() => revealDirectory(row[0])}>打开</button>
+							</div>
 						</div>
 					{/each}
 				</div>
@@ -412,6 +440,21 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		color: var(--text-faded);
+	}
+	.path-value {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+	}
+	.path-value small {
+		flex: none;
+		color: var(--text-faded);
+		font-size: 10px;
+	}
+	.path-actions {
+		display: flex;
+		gap: 4px;
 	}
 	.mini-btn,
 	.action-btn {
