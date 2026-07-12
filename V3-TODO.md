@@ -355,6 +355,12 @@
   - 新增 `scripts\qa\prepare-zhihu-run.ps1`，固定回答+文章合计 Top 5 方案，生成独立 `ImmersiveReader-QA-<runId>` Data/Cache/Profile/BrowserCache/Library 和 qa receipt；`RunId`、People ID 均做安全字符校验。
   - 已执行 `-RunId zhihu-v3-20260712`，QA Local/Library 均存在且与正式 Local/Data/Library 不重叠；非法 `bad/run` 被拒绝。此步骤未启动知乎网络、登录、验证码或外部任务。
 
+### 31. 独立 QA run root
+
+- [x] 建立独立 QA run root，确保 QA 不读写正式 Data/Profile/Library。
+  - 实现与验证 commit：`106991e test(zhihu): add isolated qa run preparation`。
+  - `prepare-zhihu-run.ps1` 为 QA channel 创建独立 Local Data/Cache/Profile/BrowserCache 与 Documents\Codex Library，并写入 run receipt；已验证 QA 路径不等于或嵌套于正式路径。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -412,7 +418,6 @@
 
 ### G. QA、发布与安装
 
-- [ ] 建立独立 QA run root，确保 QA 不读写正式 Data/Profile/Library。
 - [ ] 从两个真实音频制作短片段副本并完成免费/低成本回归。
 - [ ] 在 QA Library 对指定知乎账号执行回答+文章合计 Top 5。
 - [ ] Podcast 与知乎各一个活动任务并行测试。
