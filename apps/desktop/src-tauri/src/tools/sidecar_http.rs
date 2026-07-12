@@ -1,5 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::Serialize;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -21,14 +22,14 @@ pub(super) struct SidecarHealth {
 }
 
 #[derive(Clone)]
-pub(super) struct SidecarHttpClient {
+pub(crate) struct SidecarHttpClient {
     client: reqwest::Client,
     base_url: String,
     token: String,
 }
 
 impl SidecarHttpClient {
-    pub(super) fn new(base_url: &str, token: &str) -> Result<Self, String> {
+    pub(crate) fn new(base_url: &str, token: &str) -> Result<Self, String> {
         Self::with_timeouts(
             base_url,
             token,
@@ -67,12 +68,47 @@ impl SidecarHttpClient {
         })
     }
 
-    pub(super) async fn health(&self) -> Result<SidecarHealth, String> {
+    pub(crate) async fn health(&self) -> Result<SidecarHealth, String> {
         self.request_json("/health", false).await
     }
 
-    pub(super) async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+    pub(crate) async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
         self.request_json(path, true).await
+    }
+
+    pub(crate) async fn post_json<I: Serialize, O: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &I,
+    ) -> Result<O, String> {
+        if !path.starts_with('/') || path.starts_with("//") {
+            return Err("SIDECAR_HTTP_PATH_INVALID".to_string());
+        }
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "SIDECAR_HTTP_TIMEOUT".to_string()
+                } else {
+                    format!("SIDECAR_HTTP_REQUEST:{error}")
+                }
+            })?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "SIDECAR_HTTP_STATUS_{}",
+                response.status().as_u16()
+            ));
+        }
+        response
+            .json::<O>()
+            .await
+            .map_err(|error| format!("SIDECAR_HTTP_JSON:{error}"))
     }
 
     async fn request_json<T: DeserializeOwned>(

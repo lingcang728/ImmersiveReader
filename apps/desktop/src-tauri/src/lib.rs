@@ -30,6 +30,7 @@ pub mod tasks;
 mod temporary_content;
 mod tools;
 mod trash;
+mod zhihu;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use tauri::RunEvent;
 
@@ -653,6 +654,52 @@ fn start_podcast_task(task_id: String, app: tauri::AppHandle) -> Result<(), Stri
 }
 
 #[tauri::command]
+fn create_zhihu_task(
+    request: zhihu::CreateZhihuTaskRequest,
+    app: tauri::AppHandle,
+) -> Result<tasks::TaskSnapshot, String> {
+    let settings = settings::load_settings()?;
+    let snapshot = zhihu::create_task(&settings, &request)?;
+    let event = control::ControlDb::open_current()?
+        .task_events(&snapshot.id, 0, 1)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "TASK_EVENT_MISSING".to_string())?;
+    app.emit("acquisition://task-event", event)
+        .map_err(|error| error.to_string())?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn start_zhihu_task(
+    task_id: String,
+    expected_revision: u64,
+    app: tauri::AppHandle,
+) -> Result<tasks::TaskSnapshot, String> {
+    let settings = settings::load_settings()?;
+    zhihu::start_task(&task_id, expected_revision, &settings, &app)
+}
+
+#[tauri::command]
+fn control_zhihu_task(
+    task_id: String,
+    action: String,
+    expected_revision: u64,
+    request_id: String,
+    app: tauri::AppHandle,
+) -> Result<tasks::TaskSnapshot, String> {
+    let settings = settings::load_settings()?;
+    zhihu::control_task(
+        &task_id,
+        &action,
+        expected_revision,
+        &request_id,
+        &settings,
+        &app,
+    )
+}
+
+#[tauri::command]
 fn restart_podcast_task(
     task_id: String,
     app: tauri::AppHandle,
@@ -825,6 +872,9 @@ pub fn run() {
             quit_app,
             cancel_and_discard,
             start_podcast_task,
+            create_zhihu_task,
+            start_zhihu_task,
+            control_zhihu_task,
             restart_podcast_task,
             open_task_result,
             control_podcast_task,

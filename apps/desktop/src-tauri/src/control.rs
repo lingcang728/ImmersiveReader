@@ -512,7 +512,8 @@ impl ControlDb {
         let Some(mut snapshot) = self.task_snapshot(task_id)? else {
             return Err("TASK_NOT_FOUND".to_string());
         };
-        if snapshot.kind != TaskKind::Podcast || snapshot.lifecycle_state != LifecycleState::Queued
+        if !matches!(snapshot.kind, TaskKind::Podcast | TaskKind::Zhihu)
+            || snapshot.lifecycle_state != LifecycleState::Queued
         {
             return Err("TASK_NOT_QUEUED".to_string());
         }
@@ -603,6 +604,59 @@ impl ControlDb {
             revision: snapshot.revision,
             event_type: format!("worker_{stream}"),
             snapshot,
+            created_at: now,
+        };
+        self.persist_task_event(&event)?;
+        Ok(Some(event))
+    }
+
+    pub fn record_external_snapshot(
+        &mut self,
+        mut next: TaskSnapshot,
+        event_type: &str,
+    ) -> Result<Option<TaskEvent>, String> {
+        let current = self
+            .task_snapshot(&next.id)?
+            .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
+        if current.kind != next.kind {
+            return Err("TASK_KIND_CONFLICT".to_string());
+        }
+        if current.lifecycle_state == LifecycleState::Terminal {
+            return Ok(None);
+        }
+        if current.lifecycle_state == next.lifecycle_state
+            && current.outcome == next.outcome
+            && current.required_action == next.required_action
+            && current.progress == next.progress
+            && current.error_code == next.error_code
+            && current.error_message == next.error_message
+            && current.engine_stage == next.engine_stage
+            && current.engine_status == next.engine_status
+            && current.can_pause == next.can_pause
+            && current.can_resume == next.can_resume
+            && current.can_retry == next.can_retry
+            && current.can_cancel == next.can_cancel
+        {
+            return Ok(None);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        next.last_sequence = current
+            .last_sequence
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        next.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+        next.created_at = current.created_at;
+        next.updated_at = now.clone();
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: next.id.clone(),
+            sequence: next.last_sequence,
+            revision: next.revision,
+            event_type: event_type.to_string(),
+            snapshot: next,
             created_at: now,
         };
         self.persist_task_event(&event)?;

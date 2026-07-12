@@ -43,6 +43,15 @@ export function queueTask(taskId: string): boolean {
   return true;
 }
 
+export function cancelTask(taskId: string): boolean {
+  const task = getTask(taskId);
+  if (!task || task.status === 'success' || task.status === 'partial_success' || task.status === 'failed') {
+    return false;
+  }
+  saveTask({ id: taskId, status: 'paused' });
+  return true;
+}
+
 function emitProgress(taskId: string, status: string, message: string) {
   logger.info(`[Task ${taskId}] Status: ${status} | ${message}`);
   if (progressCallback) {

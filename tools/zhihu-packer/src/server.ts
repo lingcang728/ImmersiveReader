@@ -1,6 +1,6 @@
 import express from 'express';
 import { getTasks, saveTask, deleteTask, clearCompletedTasks, resetRunningTasks, getTask, resetTaskForce } from './db.js';
-import { createTask, queueTask, setSchedulerProgressCallback } from './scheduler.js';
+import { cancelTask, createTask, queueTask, setSchedulerProgressCallback } from './scheduler.js';
 import { logger, sanitizeFilename } from './utils.js';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -145,6 +145,12 @@ app.post('/api/tasks', requireLocalToken, async (req, res) => {
   }
 });
 
+app.get('/api/tasks/:id', requireLocalToken, (req, res) => {
+  const task = getTask(String(req.params.id));
+  if (!task) return res.status(404).json({ success: false, error: '任务不存在' });
+  res.json({ success: true, data: task });
+});
+
 // API：启动/恢复任务
 app.post('/api/tasks/:id/start', requireLocalToken, async (req, res) => {
   const taskId = String(req.params.id);
@@ -225,6 +231,17 @@ app.post('/api/tasks/:id/pause', requireLocalToken, async (req, res) => {
   try {
     saveTask({ id: taskId, status: 'paused' });
     res.json({ success: true, message: 'Pause signal sent' });
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/tasks/:id/cancel', requireLocalToken, (req, res) => {
+  const taskId = String(req.params.id);
+  try {
+    const cancelled = cancelTask(taskId);
+    if (!cancelled) return res.status(409).json({ success: false, error: '任务无法取消' });
+    res.json({ success: true, message: 'Cancel signal sent' });
   } catch (e: any) {
     res.status(500).json({ success: false, error: e.message });
   }

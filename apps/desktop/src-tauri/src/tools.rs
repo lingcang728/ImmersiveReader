@@ -1,4 +1,5 @@
 use crate::settings::AppSettings;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 #[cfg(not(windows))]
 use std::collections::HashSet;
@@ -297,6 +298,59 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
         #[cfg(not(windows))]
         url: None,
     })
+}
+
+#[cfg(windows)]
+fn zhihu_client(settings: &AppSettings) -> Result<SidecarHttpClient, String> {
+    let _ = launch("zhihu", settings)?;
+    let mut manager = TOOL_MANAGER
+        .get_or_init(|| Mutex::new(ToolManager::default()))
+        .lock()
+        .map_err(|_| "Tool process state is unavailable".to_string())?;
+    let snapshot = manager
+        .refresh("zhihu")?
+        .ok_or_else(|| "ENGINE_NOT_RUNNING".to_string())?;
+    let port = snapshot
+        .port
+        .ok_or_else(|| "ENGINE_PORT_MISSING".to_string())?;
+    let token = manager
+        .token("zhihu")
+        .ok_or_else(|| "ENGINE_TOKEN_MISSING".to_string())?
+        .to_string();
+    SidecarHttpClient::new(&format!("http://127.0.0.1:{port}"), &token)
+}
+
+pub(crate) fn zhihu_get_json<O: DeserializeOwned>(
+    settings: &AppSettings,
+    path: &str,
+) -> Result<O, String> {
+    #[cfg(windows)]
+    {
+        let client = zhihu_client(settings)?;
+        return tauri::async_runtime::block_on(client.get_json(path));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (settings, path);
+        Err("ZHIHU_ENGINE_UNSUPPORTED".to_string())
+    }
+}
+
+pub(crate) fn zhihu_post_json<I: Serialize, O: DeserializeOwned>(
+    settings: &AppSettings,
+    path: &str,
+    body: &I,
+) -> Result<O, String> {
+    #[cfg(windows)]
+    {
+        let client = zhihu_client(settings)?;
+        return tauri::async_runtime::block_on(client.post_json(path, body));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (settings, path, body);
+        Err("ZHIHU_ENGINE_UNSUPPORTED".to_string())
+    }
 }
 
 #[cfg(test)]
