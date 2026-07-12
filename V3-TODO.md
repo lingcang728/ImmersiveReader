@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 10:05（Asia/Shanghai）
+更新时间：2026-07-12 14:51（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`3a78912 feat(trash-ui): manage recycled books in main window`
+- 当前产品 commit：`8ab50b4 feat(runtime): track managed sidecar processes`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 10:05:50`
-- 最新开发 EXE SHA-256：`66D83D7C50C0AE2B43FBB9DCE12B8B3429EC26201D273253C47A91578E76F6FB`
+- 最新开发 EXE 时间：`2026-07-12 14:49:37`
+- 最新开发 EXE SHA-256：`7058D1C130109D2A71C538DC6D1CCEEDDF8C84CE0A65159D7501B5947F90431C`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 67、知乎 17、Podcast 19；Podcast quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 68、知乎 17、Podcast 19；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -112,13 +112,21 @@
 - [x] 主窗口新增回收站列表、恢复和二次确认永久删除页面。
 - [x] 无 `trash-entry.json` 的 legacy `.trash` 目录保持不可操作，不会被普通清理或永久删除命令触碰。
 
+### 7. ToolManager 受管进程所有权基座
+
+- [x] 实现完整 ToolManager：保存 Child/进程句柄、PID、port、protocolVersion、内存 token、Job handle、startedAt、health 和 exit status。
+  - 实现 commit：`8ab50b4 feat(runtime): track managed sidecar processes`。
+  - 旧 HashSet 启动标记已替换为真实 Child/Job Object 所有权；状态查询会刷新实际退出状态，退出后不再误报 running。
+  - Job Object 改由标准库 `OwnedHandle` 唯一持有；token 使用每次启动生成的 UUID，只保存在进程内存，快照序列化不包含 token。
+  - `cargo test --lib` 68 项、严格 changed-file hygiene checker 和 `scripts\verify.ps1` 全部通过。
+  - `ship:dev` 通过；开发 EXE 已实际启动并确认路径，QA 进程已清理为 0；正式 EXE 和 Markdown 文件关联未改动。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
 
 ### A. 最高优先级：让 queued 任务真正执行
 
-- [ ] 实现完整 ToolManager：保存 Child/进程句柄、PID、port、protocolVersion、token、Job handle、startedAt、health、exit status。
 - [ ] 使用 `CREATE_SUSPENDED | CREATE_NO_WINDOW` 启动 sidecar，先加入 Job Object 再 Resume，防止子进程逃逸。
 - [ ] Podcast/知乎 sidecar 通过 stdout 输出 READY JSON；Rust 校验 engine、protocolVersion、PID、动态端口和 15 秒超时。
 - [ ] Rust 使用异步 HTTP 与连接/读取/总超时；除 `/health` 外全部 Bearer token 鉴权。
@@ -234,4 +242,4 @@
 
 ## 下一项推荐执行
 
-从“A. 最高优先级”开始：先实现 ToolManager 的受管进程记录与 Podcast 单任务 worker 启动，但暂不自动运行桌面长音频、暂不调用付费 API。完成后立即更新并勾选本文件对应条目。
+继续“A. 最高优先级”：使用 `CREATE_SUSPENDED | CREATE_NO_WINDOW` 启动 sidecar，先加入 Job Object 再 Resume；随后实现 READY JSON 握手。暂不自动运行桌面长音频、暂不调用付费 API。完成后立即更新并勾选本文件对应条目。
