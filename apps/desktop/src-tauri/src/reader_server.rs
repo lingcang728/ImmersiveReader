@@ -10,6 +10,13 @@ use std::time::Duration;
 use tiny_http::Server;
 use uuid::Uuid;
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderSessionDescriptor {
+    pub session_id: String,
+    pub url: String,
+}
+
 pub struct ReaderServiceState {
     inner: Mutex<Option<ReaderService>>,
 }
@@ -81,13 +88,25 @@ impl ReaderService {
         })
     }
 
-    fn add_session(&self, session: ReaderSession) -> Result<String, String> {
+    fn add_session(&self, session: ReaderSession) -> Result<ReaderSessionDescriptor, String> {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         self.sessions
             .write()
             .map_err(|_| "Reader session store is unavailable".to_string())?
             .insert(token.clone(), session);
-        Ok(format!("{}/s/{}/reader", self.origin, token))
+        Ok(ReaderSessionDescriptor {
+            session_id: token.clone(),
+            url: format!("{}/s/{}/reader", self.origin, token),
+        })
+    }
+
+    fn close_session(&self, session_id: &str) -> Result<bool, String> {
+        Ok(self
+            .sessions
+            .write()
+            .map_err(|_| "Reader session store is unavailable".to_string())?
+            .remove(session_id)
+            .is_some())
     }
 }
 
@@ -104,7 +123,7 @@ pub fn start_session(
     state: &ReaderServiceState,
     settings: &AppSettings,
     book_id: &str,
-) -> Result<String, String> {
+) -> Result<ReaderSessionDescriptor, String> {
     let (book_root, manifest, _) =
         crate::library::book_context(Path::new(&settings.library_root), book_id)?;
     let mut service = state
@@ -122,6 +141,17 @@ pub fn start_session(
             book_root,
             manifest,
         })
+}
+
+pub fn close_session(state: &ReaderServiceState, session_id: &str) -> Result<bool, String> {
+    let service = state
+        .inner
+        .lock()
+        .map_err(|_| "Reader service state is unavailable".to_string())?;
+    service
+        .as_ref()
+        .ok_or_else(|| "Reader service is not running".to_string())?
+        .close_session(session_id)
 }
 
 #[cfg(test)]
@@ -191,13 +221,13 @@ mod tests {
         .expect("fixture must deserialize");
         let service =
             ReaderService::start("<html></html>".to_string()).expect("reader service must start");
-        let url = service
+        let descriptor = service
             .add_session(ReaderSession {
                 book_root: root.clone(),
                 manifest,
             })
             .expect("session must start");
-        let token = url.split('/').nth_back(1).expect("token must exist");
+        let token = descriptor.session_id;
         assert!(request(&service.origin, "/s/invalid/manifest", "", "").starts_with("HTTP/1.1 403"));
         assert!(request(
             &service.origin,
@@ -221,6 +251,11 @@ mod tests {
             progress
         )
         .starts_with("HTTP/1.1 204"));
+        assert!(service.close_session(&token).expect("session must close"));
+        assert!(
+            request(&service.origin, &format!("/s/{token}/manifest"), "", "")
+                .starts_with("HTTP/1.1 403")
+        );
         assert!(root.join(".reading.json").exists());
         fs::remove_dir_all(root).expect("book root must be removed");
     }

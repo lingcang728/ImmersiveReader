@@ -296,6 +296,7 @@
 	let libraryWritable = true;
 	let libraryLoading = true;
 	let appSettings: AppSettings | null = null;
+	let flowReaderSession: { sessionId: string; url: string } | null = null;
 	let activeBook: BookDetail | null = null;
 	let activeChapterIndex = -1;
 	let chapterSwitching = false;
@@ -908,10 +909,28 @@
 
 	async function openBrowserReader(bookId: string) {
 		try {
-			const url = await invoke<string>("start_reader_session", { bookId });
-			await openUrl(url);
+			if (editingParagraph && !(await finishEdit())) return;
+			await flushSaveState();
+			if (flowReaderSession) {
+				await invoke("close_reader_session", { sessionId: flowReaderSession.sessionId });
+			}
+			flowReaderSession = await invoke<{ sessionId: string; url: string }>(
+				"start_reader_session",
+				{ bookId }
+			);
 		} catch (error) {
 			showAppNotice(`无法启动连读：${String(error)}`);
+		}
+	}
+
+	async function closeFlowReader() {
+		const session = flowReaderSession;
+		flowReaderSession = null;
+		if (!session) return;
+		try {
+			await invoke("close_reader_session", { sessionId: session.sessionId });
+		} catch (error) {
+			showAppNotice(`无法关闭连读会话：${String(error)}`);
 		}
 	}
 
@@ -1610,6 +1629,7 @@
 						flushSaveState(),
 						new Promise<void>((resolve) => setTimeout(resolve, 500)),
 					]);
+					await closeFlowReader();
 				} catch (err) {
 					console.error("Failed to finish edit on close:", err);
 				} finally {
@@ -1734,6 +1754,10 @@
 			markdownWorker?.terminate();
 			markdownWorker = null;
 			rejectPendingMarkdownRenders(new Error("Component destroyed"));
+			const session = flowReaderSession;
+			if (session) {
+				void invoke("close_reader_session", { sessionId: session.sessionId });
+			}
 		};
 	});
 
@@ -3547,7 +3571,23 @@
 	<SettingsPanel />
 
 	<!-- Main content -->
-	<main class="content" bind:this={contentEl}>
+	<main class="content" class:flow-active={!!flowReaderSession} bind:this={contentEl}>
+		{#if flowReaderSession}
+			<section class="flow-reader-workspace" aria-label="连续阅读">
+				<header>
+					<div>
+						<strong>连续阅读</strong>
+						<span>所有章节留在沉浸阅读窗口内</span>
+					</div>
+					<button type="button" on:click={() => void closeFlowReader()}>返回书库</button>
+				</header>
+				<iframe
+					title="连续阅读器"
+					src={flowReaderSession.url}
+					sandbox="allow-same-origin allow-scripts allow-forms"
+				></iframe>
+			</section>
+		{:else}
 		{#if fileError}
 			<div class="file-error" role="alert">{fileError}</div>
 		{/if}
@@ -3608,6 +3648,7 @@
 				onDeleteBook={(bookId, title, chapterCount) =>
 					void deleteLibraryBook(bookId, title, chapterCount)}
 			/>
+		{/if}
 		{/if}
 	</main>
 
@@ -3961,6 +4002,50 @@
 		overflow-y: auto;
 		overflow-x: hidden;
 		scroll-behavior: smooth;
+	}
+	.content.flow-active {
+		overflow: hidden;
+	}
+	.flow-reader-workspace {
+		height: 100%;
+		display: grid;
+		grid-template-rows: 52px minmax(0, 1fr);
+		background: var(--bg);
+	}
+	.flow-reader-workspace > header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0 18px;
+		border-bottom: 1px solid var(--hr);
+		background: color-mix(in srgb, var(--bg) 92%, transparent);
+	}
+	.flow-reader-workspace > header div {
+		display: flex;
+		align-items: baseline;
+		gap: 10px;
+	}
+	.flow-reader-workspace > header strong {
+		font-size: 14px;
+		font-weight: 650;
+	}
+	.flow-reader-workspace > header span {
+		font-size: 11px;
+		color: var(--text-secondary);
+	}
+	.flow-reader-workspace > header button {
+		border: 1px solid var(--hr);
+		border-radius: 8px;
+		background: var(--bg-secondary);
+		color: var(--text);
+		padding: 7px 12px;
+		cursor: pointer;
+	}
+	.flow-reader-workspace iframe {
+		width: 100%;
+		height: 100%;
+		border: 0;
+		background: var(--bg);
 	}
 	.app.focus-key-scroll-active .content {
 		scroll-behavior: auto;

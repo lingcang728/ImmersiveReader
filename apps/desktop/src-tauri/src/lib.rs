@@ -43,8 +43,11 @@ impl StandaloneReader {
 pub fn start_standalone_reader(book_id: &str) -> Result<StandaloneReader, String> {
     let state = reader_server::ReaderServiceState::default();
     let value = settings::load_settings()?;
-    let url = reader_server::start_session(&state, &value, book_id)?;
-    Ok(StandaloneReader { _state: state, url })
+    let descriptor = reader_server::start_session(&state, &value, book_id)?;
+    Ok(StandaloneReader {
+        _state: state,
+        url: descriptor.url,
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -540,9 +543,17 @@ fn get_companion_status(tool: String) -> Result<tools::ToolStatus, String> {
 fn start_reader_session(
     book_id: String,
     state: tauri::State<'_, reader_server::ReaderServiceState>,
-) -> Result<String, String> {
+) -> Result<reader_server::ReaderSessionDescriptor, String> {
     let value = settings::load_settings()?;
     reader_server::start_session(&state, &value, &book_id)
+}
+
+#[tauri::command]
+fn close_reader_session(
+    session_id: String,
+    state: tauri::State<'_, reader_server::ReaderServiceState>,
+) -> Result<bool, String> {
+    reader_server::close_session(&state, &session_id)
 }
 
 #[tauri::command]
@@ -602,6 +613,7 @@ pub fn run() {
             get_companion_status,
             list_temporary_content,
             start_reader_session,
+            close_reader_session,
             quit_app,
         ])
         .manage(reader_server::ReaderServiceState::default())
