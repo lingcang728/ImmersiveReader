@@ -25,6 +25,8 @@ use tool_manager::{EngineHealth, ManagedProcess, ProcessDescriptor, ToolManager}
 
 #[cfg(windows)]
 static TOOL_MANAGER: OnceLock<Mutex<ToolManager>> = OnceLock::new();
+#[cfg(windows)]
+static ENGINE_RECOVERY_DONE: OnceLock<()> = OnceLock::new();
 #[cfg(not(windows))]
 static LAUNCHED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -85,16 +87,53 @@ fn action_for(tool: &str) -> Result<ToolKind, String> {
     ToolKind::parse(tool)
 }
 
+#[cfg(windows)]
+pub(crate) fn recover_stale_engine_instances() -> Result<(), String> {
+    if ENGINE_RECOVERY_DONE.get().is_some() {
+        return Ok(());
+    }
+    let mut control = crate::control::ControlDb::open_current()?;
+    control.recover_stale_engine_instances()?;
+    let _ = ENGINE_RECOVERY_DONE.set(());
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn recover_stale_engine_instances() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn persist_engine_exit(
+    kind: ToolKind,
+    snapshot: &tool_manager::ProcessSnapshot,
+) -> Result<(), String> {
+    let Some(exit_status) = snapshot.exit_status else {
+        return Ok(());
+    };
+    let mut control = crate::control::ControlDb::open_current()?;
+    control.mark_engine_crashed(kind.key(), snapshot.pid, exit_status.code)?;
+    Ok(())
+}
+
 pub fn status(tool: &str) -> Result<ToolStatus, String> {
     let kind = action_for(tool)?;
     let paths = tool_paths(&crate::settings::runtime_root()?, kind);
     let ready = require_runtime(&paths).is_ok();
     #[cfg(windows)]
-    let running = TOOL_MANAGER
-        .get_or_init(|| Mutex::new(ToolManager::default()))
-        .lock()
-        .map_err(|_| "Tool process state is unavailable".to_string())?
-        .is_running(kind.key())?;
+    recover_stale_engine_instances()?;
+    #[cfg(windows)]
+    let running = {
+        let mut manager = TOOL_MANAGER
+            .get_or_init(|| Mutex::new(ToolManager::default()))
+            .lock()
+            .map_err(|_| "Tool process state is unavailable".to_string())?;
+        let snapshot = manager.refresh(kind.key())?;
+        if let Some(snapshot) = &snapshot {
+            persist_engine_exit(kind, snapshot)?;
+        }
+        snapshot.is_some_and(|snapshot| snapshot.exit_status.is_none())
+    };
     #[cfg(not(windows))]
     let running = LAUNCHED
         .get_or_init(|| Mutex::new(HashSet::new()))
@@ -126,6 +165,8 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
     let runtime_root = crate::settings::runtime_root()?;
     let key = kind.key();
     let token = uuid::Uuid::new_v4().simple().to_string();
+    #[cfg(windows)]
+    recover_stale_engine_instances()?;
     #[cfg(windows)]
     let mut manager = TOOL_MANAGER
         .get_or_init(|| Mutex::new(ToolManager::default()))
@@ -183,12 +224,34 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
             let _ = child.wait();
             return Err(error);
         }
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let control = match crate::control::ControlDb::open_current() {
+            Ok(control) => control,
+            Err(error) => {
+                drop(job);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        if let Err(error) = control.record_engine_instance(
+            key,
+            child.id(),
+            Some(ready.port),
+            Some(ready.protocol_version),
+            &started_at,
+        ) {
+            drop(job);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         let descriptor = ProcessDescriptor {
             engine: key.to_string(),
             port: Some(ready.port),
             protocol_version: Some(ready.protocol_version),
             token: token.clone(),
-            started_at: chrono::Utc::now().to_rfc3339(),
+            started_at,
             health: EngineHealth::Ready,
         };
         manager.insert(ManagedProcess::new(child, job, descriptor))?;

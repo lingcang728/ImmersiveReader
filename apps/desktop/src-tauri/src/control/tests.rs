@@ -1,7 +1,7 @@
 use super::{CommandClaim, ControlDb};
 use crate::tasks::{
-    LifecycleState, ProgressMode, RequiredAction, TaskEvent, TaskKind, TaskOutcome, TaskProgress,
-    TaskSnapshot,
+    LifecycleState, ProgressMode, RequiredAction, TaskErrorCode, TaskEvent, TaskKind, TaskOutcome,
+    TaskProgress, TaskSnapshot,
 };
 use std::fs;
 
@@ -225,5 +225,99 @@ fn task_event_rejects_sequence_gaps_and_old_revisions() {
         "REVISION_CONFLICT"
     );
     drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn engine_crash_marks_active_tasks_interrupted_and_is_idempotent() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-engine-crash-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    database
+        .persist_task_event(&task_event(1, 1))
+        .expect("running task must persist");
+    database
+        .record_engine_instance(
+            "podcast",
+            4242,
+            Some(43210),
+            Some(1),
+            "2026-07-12T08:00:00Z",
+        )
+        .expect("engine instance must persist");
+
+    assert!(database
+        .mark_engine_crashed("podcast", 4242, Some(7))
+        .expect("engine crash must persist"));
+    let snapshot = database
+        .task_snapshot("podcast-1")
+        .expect("snapshot must load")
+        .expect("snapshot must exist");
+    assert_eq!(snapshot.lifecycle_state, LifecycleState::Terminal);
+    assert_eq!(snapshot.outcome, TaskOutcome::Interrupted);
+    assert_eq!(snapshot.error_code, Some(TaskErrorCode::EngineCrashed));
+    assert_eq!(snapshot.engine_status, "exited");
+    assert!(snapshot.can_retry);
+    assert!(!snapshot.can_pause);
+    assert!(!database
+        .mark_engine_crashed("podcast", 4242, Some(7))
+        .expect("duplicate engine crash must be idempotent"));
+    assert_eq!(
+        database
+            .task_events("podcast-1", 1, 100)
+            .expect("events must load")
+            .len(),
+        1
+    );
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn stale_running_engine_is_recovered_after_reopen() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-stale-engine-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    {
+        let mut database = ControlDb::open(&path).expect("control database must open");
+        database
+            .persist_task_event(&task_event(1, 1))
+            .expect("running task must persist");
+        database
+            .record_engine_instance(
+                "podcast",
+                4343,
+                Some(43211),
+                Some(1),
+                "2026-07-12T08:05:00Z",
+            )
+            .expect("engine instance must persist");
+    }
+    let mut reopened = ControlDb::open(&path).expect("control database must reopen");
+    assert_eq!(
+        reopened
+            .recover_stale_engine_instances()
+            .expect("stale engine must recover"),
+        1
+    );
+    assert_eq!(
+        reopened
+            .task_snapshot("podcast-1")
+            .expect("snapshot must load")
+            .expect("snapshot must exist")
+            .outcome,
+        TaskOutcome::Interrupted
+    );
+    assert_eq!(reopened.recover_stale_engine_instances().unwrap(), 0);
+    drop(reopened);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

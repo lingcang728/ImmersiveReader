@@ -114,12 +114,6 @@ impl ToolManager {
         Ok(Some(process.snapshot()))
     }
 
-    pub(super) fn is_running(&mut self, engine: &str) -> Result<bool, String> {
-        Ok(self
-            .refresh(engine)?
-            .is_some_and(|snapshot| snapshot.exit_status.is_none()))
-    }
-
     pub(super) fn token(&self, engine: &str) -> Option<&str> {
         self.processes
             .get(engine)
@@ -194,9 +188,12 @@ mod tests {
                 .token,
             "memory-only-secret"
         );
-        assert!(!manager
-            .is_running("podcast")
-            .expect("running state must load"));
+        assert!(manager
+            .refresh("podcast")
+            .expect("running state must load")
+            .expect("process must remain registered")
+            .exit_status
+            .is_some());
         let serialized = serde_json::to_string(&exited).expect("snapshot must serialize");
         assert!(!serialized.contains("token"));
         assert!(!serialized.contains("memory-only-secret"));

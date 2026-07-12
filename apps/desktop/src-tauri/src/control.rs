@@ -1,4 +1,4 @@
-use crate::tasks::{TaskEvent, TaskSnapshot};
+use crate::tasks::{LifecycleState, TaskErrorCode, TaskEvent, TaskKind, TaskOutcome, TaskSnapshot};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -369,6 +369,98 @@ impl ControlDb {
         .collect()
     }
 
+    pub fn record_engine_instance(
+        &self,
+        engine: &str,
+        pid: u32,
+        port: Option<u16>,
+        protocol_version: Option<u32>,
+        started_at: &str,
+    ) -> Result<(), String> {
+        if engine.trim().is_empty() || pid == 0 {
+            return Err("INVALID_ENGINE_INSTANCE".to_string());
+        }
+        self.connection
+            .execute(
+                "INSERT INTO engine_instances(engine, pid, port, protocol_version, status, started_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6) ON CONFLICT(engine) DO UPDATE SET pid=excluded.pid, port=excluded.port, protocol_version=excluded.protocol_version, status='running', started_at=excluded.started_at, updated_at=excluded.updated_at",
+                params![
+                    engine,
+                    i64::from(pid),
+                    port.map(i64::from),
+                    protocol_version.map(i64::from),
+                    started_at,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn mark_engine_crashed(
+        &mut self,
+        engine: &str,
+        pid: u32,
+        exit_code: Option<i32>,
+    ) -> Result<bool, String> {
+        let instance = self
+            .connection
+            .query_row(
+                "SELECT pid, status FROM engine_instances WHERE engine = ?1",
+                [engine],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some((stored_pid, status)) = instance else {
+            return Ok(false);
+        };
+        if status != "running" || stored_pid != Some(i64::from(pid)) {
+            return Ok(false);
+        }
+        let kind = task_kind_for_engine(engine)?;
+        let snapshots = self.task_snapshots(Some(kind))?;
+        for snapshot in snapshots {
+            if is_active_task(&snapshot.lifecycle_state) {
+                self.persist_task_event(&interrupted_event(snapshot, exit_code)?)?;
+            }
+        }
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE engine_instances SET status = 'interrupted', updated_at = ?2 WHERE engine = ?1 AND pid = ?3 AND status = 'running'",
+                params![engine, chrono::Utc::now().to_rfc3339(), i64::from(pid)],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(changed == 1)
+    }
+
+    pub fn recover_stale_engine_instances(&mut self) -> Result<u32, String> {
+        let stale: Vec<(String, u32)> = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT engine, pid FROM engine_instances WHERE status = 'running' AND pid IS NOT NULL")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|error| error.to_string())?;
+            rows.map(|row| {
+                let (engine, pid) = row.map_err(|error| error.to_string())?;
+                let pid = u32::try_from(pid).map_err(|_| "INVALID_ENGINE_INSTANCE".to_string())?;
+                Ok((engine, pid))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+        };
+        let mut recovered = 0;
+        for (engine, pid) in stale {
+            if self.mark_engine_crashed(&engine, pid, None)? {
+                recovered += 1;
+            }
+        }
+        Ok(recovered)
+    }
+
     pub fn task_events(
         &self,
         task_id: &str,
@@ -410,6 +502,64 @@ impl ControlDb {
             .map_err(|error| error.to_string())?;
         Ok(names)
     }
+}
+
+fn task_kind_for_engine(engine: &str) -> Result<TaskKind, String> {
+    match engine {
+        "podcast" => Ok(TaskKind::Podcast),
+        "zhihu" => Ok(TaskKind::Zhihu),
+        _ => Err("UNKNOWN_ENGINE".to_string()),
+    }
+}
+
+fn is_active_task(state: &LifecycleState) -> bool {
+    matches!(
+        state,
+        LifecycleState::Starting
+            | LifecycleState::Running
+            | LifecycleState::Pausing
+            | LifecycleState::Paused
+            | LifecycleState::Stopping
+    )
+}
+
+fn interrupted_event(
+    mut snapshot: TaskSnapshot,
+    exit_code: Option<i32>,
+) -> Result<TaskEvent, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    snapshot.last_sequence = snapshot
+        .last_sequence
+        .checked_add(1)
+        .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+    snapshot.revision = snapshot
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+    snapshot.lifecycle_state = LifecycleState::Terminal;
+    snapshot.outcome = TaskOutcome::Interrupted;
+    snapshot.error_code = Some(TaskErrorCode::EngineCrashed);
+    snapshot.error_message = Some(match exit_code {
+        Some(code) => format!("受管引擎异常退出（exit code {code}）。"),
+        None => "应用重启后发现受管引擎未正常结束。".to_string(),
+    });
+    snapshot.engine_stage = "crashed".to_string();
+    snapshot.engine_status = "exited".to_string();
+    snapshot.recoverable = true;
+    snapshot.can_pause = false;
+    snapshot.can_resume = false;
+    snapshot.can_retry = true;
+    snapshot.can_cancel = false;
+    snapshot.updated_at = now.clone();
+    Ok(TaskEvent {
+        schema_version: 1,
+        task_id: snapshot.id.clone(),
+        sequence: snapshot.last_sequence,
+        revision: snapshot.revision,
+        event_type: "engine_crashed".to_string(),
+        snapshot,
+        created_at: now,
+    })
 }
 
 #[cfg(test)]

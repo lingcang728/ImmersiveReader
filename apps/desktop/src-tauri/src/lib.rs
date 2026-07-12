@@ -449,6 +449,7 @@ fn preview_legacy_migration(
 fn get_acquisition_snapshot(
     kind: Option<tasks::TaskKind>,
 ) -> Result<tasks::AcquisitionSnapshot, String> {
+    tools::recover_stale_engine_instances()?;
     let control = control::ControlDb::open_current()?;
     let tasks = control.task_snapshots(kind)?;
     Ok(tasks::AcquisitionSnapshot {
