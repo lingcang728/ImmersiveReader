@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 16:59（Asia/Shanghai）
+更新时间：2026-07-12 17:14（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`844cba6 feat(podcast): classify upstream errors`
+- 当前产品 commit：`28b0974 feat(podcast): enforce cumulative api budget`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 16:58:28`
-- 最新开发 EXE SHA-256：`B711E29FE6B670E5E5EBC5AAAC939B192A0E8859B88586698048FC5F8668E825`
+- 最新开发 EXE 时间：`2026-07-12 17:13:29`
+- 最新开发 EXE SHA-256：`D0ED2D94D418E56E1A20F0694DB55312E33C56F92B09F6A46385F9F954CD67D5`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 84、知乎 20、Podcast 25；Podcast quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 84、知乎 20、Podcast 26；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -221,6 +221,18 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 16:58:28`，SHA-256 `B711E29FE6B670E5E5EBC5AAAC939B192A0E8859B88586698048FC5F8668E825`；精确开发 EXE QA PID `90392` 启动路径正确，停止后残留开发进程为 0。
   - 正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 文件关联未改动。
 
+### 18. Podcast 累计费用预算
+
+- [x] 实现累计费用预算；超过预算进入 `approve_budget`，重试不得绕过预算。
+  - 实现 commit：`28b0974 feat(podcast): enforce cumulative api budget`。
+  - 批准的 `budgetLimitCny` 写入每个 TaskSpec；Python worker 在受管 Cache 下维护原子 budget ledger，按输入/输出 token 和 CNY/USD 换算记录累计 spend。
+  - 每次请求按内部最大重试次数预留额度，成功按 usage 结算，失败保留预留额度；并发/外层重试读取同一账本，不能绕过累计上限。
+  - TaskSpec 预算低于已验证 preview estimate 时 fail closed；超限输出 `BUDGET_CONFIRMATION_REQUIRED`，Rust 映射 `RequiredAction::ApproveBudget` 且禁止直接 retry。
+  - 新增 TaskSpec 预算下限、Rust `approve_budget` 状态和无网络预算账本测试；未执行真实音频或付费 API。
+  - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 警告、Rust 84、知乎 20、Podcast 26、quick validation；`cargo check --all-targets` 通过。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 17:13:29`，SHA-256 `D0ED2D94D418E56E1A20F0694DB55312E33C56F92B09F6A46385F9F954CD67D5`；精确开发 EXE QA PID `25492` 启动路径正确，停止后残留开发进程为 0。
+  - 正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 文件关联未改动。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -228,7 +240,6 @@
 ### A. 最高优先级：让 queued 任务真正执行
 
 ### B. Podcast 执行、控制与发布
-- [ ] 实现累计费用预算；超过预算进入 `approve_budget`，重试不得绕过预算。
 - [ ] 将 Podcast 结果写入 Library `.incoming`，生成 manifest/provenance，走发布事务并释放 lease。
 - [ ] 重新转写保留旧 revision；bookId/sourceId 不因标题变化。
 - [ ] 实现 `open_task_result`，成功后在主窗口打开书目。
@@ -330,4 +341,4 @@
 
 ## 下一项推荐执行
 
-继续“B. Podcast 执行、控制与发布”：实现累计费用预算与 `approve_budget` 门，确保重试不得绕过预算。暂不自动运行桌面长音频、暂不调用付费 API。
+继续“B. Podcast 执行、控制与发布”：将 Podcast 结果写入 Library `.incoming`，生成 manifest/provenance，走发布事务并释放 lease。暂不自动运行桌面长音频、暂不调用付费 API。
