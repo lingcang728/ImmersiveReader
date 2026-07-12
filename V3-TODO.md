@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 20:55（Asia/Shanghai）
+更新时间：2026-07-12 20:57（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`a10f74b fix(zhihu): guard every api route with bearer auth`
+- 当前产品 commit：`7c7b19c feat(zhihu): publish staged archive revisions`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 20:44:47`
-- 最新开发 EXE SHA-256：`157FAAEECB6F33453E7BEB258772DA7BB1E6F079EC22238BAD0B867EBD3DFF96`
+- 最新开发 EXE 时间：`2026-07-12 20:56:05`
+- 最新开发 EXE SHA-256：`24E14B03005F9F5325FC013113FF13CABAE5894E6E72162E742AE754D70A37F2`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 23、Podcast 27；quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -328,6 +328,16 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 20:44:47`，SHA-256 `157FAAEECB6F33453E7BEB258772DA7BB1E6F079EC22238BAD0B867EBD3DFF96`；精确开发 EXE QA PID `69428` 启动路径正确，停止后残留开发进程为 0。
   - 未启动真实知乎抓取、登录、验证码或外部网络任务；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 关联仍为 `ImmersiveReader.Markdown`，open command 未变。
 
+### 28. Zhihu `.incoming` 与 archive revision 发布事务
+
+- [x] 新抓取内容先进入 `.incoming`，完整成功后发布 archive revision；partial success 保留旧成功版本。
+  - 实现 commit：`7c7b19c feat(zhihu): publish staged archive revisions`。
+  - 正文先写入 `Library/知乎/.incoming/<taskId>/<author>`；只有任务全部成功才通过 prepared/old_moved/new_moved/committed journal 将作者目录移动到当前归档，旧目录保留在 `.revisions/<authorId>/<revision>`；partial success 不更新 archive catalog，暂存结果留在 `.incoming` 供失败条目续跑。
+  - 成功发布后才把 task item 写入 archive catalog 并生成当前导航索引；发布失败转为失败终态并保持旧成功版本。
+  - 新增无网络发布事务测试，覆盖旧版本保留、提交 journal、路径映射和 partial 隔离；`scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 警告、Rust 87、知乎 25、Podcast 27、quick validation。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 20:56:05`，SHA-256 `24E14B03005F9F5325FC013113FF13CABAE5894E6E72162E742AE754D70A37F2`；精确开发 EXE QA PID `28984` 启动路径正确，停止后残留开发进程为 0。
+  - 未启动真实知乎抓取、登录、验证码或外部网络任务；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 关联仍为 `ImmersiveReader.Markdown`，open command 未变。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -337,7 +347,6 @@
 ### B. Podcast 执行、控制与发布
 
 ### C. 知乎执行、登录与发布
-- [ ] 新抓取内容先进入 `.incoming`，成功后再发布 archive revision；partial success 保留旧成功版本。
 - [ ] 生成并核对 manifest、provenance、archive revision 的 bookId/sourceId/revision/hash。
 - [ ] 指定 QA 答主：`xiao-xue-shi-46-24`。
 - [ ] 在新流程真实 QA 通过前，不删除旧知乎控制台回退入口。
@@ -425,4 +434,4 @@
 
 ## 下一项推荐执行
 
-继续“C. 知乎执行、登录与发布”：新抓取内容先进入 `.incoming`，成功后再发布 archive revision；partial success 保留旧成功版本。
+继续“C. 知乎执行、登录与发布”：生成并核对 manifest、provenance、archive revision 的 bookId/sourceId/revision/hash。
