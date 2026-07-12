@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 22:15（Asia/Shanghai）
+更新时间：2026-07-12 22:17（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -439,6 +439,7 @@
   - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。
 - [ ] 实现书目详情、provenance、revision、来源链接和任务记录。
   - 已增加书架“详情”对话框，展示 manifest 的 source/sourceId、生成/更新时间、章节列表和当前阅读状态；provenance、revision、来源链接与任务记录仍待对应数据契约和 UI 接入。
+  - 书架 Playwright harness 于 `2026-07-12T22:14:33+0800` 通过，覆盖 900×700、1280×800、1440×900 与 ready/loading/empty/unwritable 状态；使用 mock Tauri 数据，未接触正式 Library。
 - [ ] 完成设置页：Library/Data/Cache/Logs/Backups 路径、大小、打开目录、安全清理、备份、凭据、迁移和恢复状态。
   - 已接入受管路径展示、路径大小、固定根目录打开、路径复制、安全缓存清理、只读迁移 preview、发布恢复检查和 Credential Manager 状态；备份操作与完整 migration recovery 状态仍未完成。
 - [x] 实现 DeepSeek 配置/删除 UI，永不显示 Key。
