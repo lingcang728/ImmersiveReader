@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 21:07（Asia/Shanghai）
+更新时间：2026-07-12 21:12（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,7 +15,7 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`32f0f21 feat(zhihu): bind archive metadata to revisions`
+- 当前产品 commit：`106991e test(zhihu): add isolated qa run preparation`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
 - 最新开发 EXE 时间：`2026-07-12 21:05:17`
@@ -348,6 +348,13 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 21:05:17`，SHA-256 `37CD2417B7286820A61D21E3ADD877659F0D988E543C4037491F2E53CDA0F95E`；精确开发 EXE QA PID `12024` 启动路径正确，停止后残留开发进程为 0。
   - 未启动真实知乎抓取、登录、验证码或外部网络任务；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 关联仍为 `ImmersiveReader.Markdown`，open command 未变。
 
+### 30. Zhihu 指定答主隔离 QA 准备
+
+- [x] 指定 QA 答主：`xiao-xue-shi-46-24`。
+  - 实现 commit：`106991e test(zhihu): add isolated qa run preparation`。
+  - 新增 `scripts\qa\prepare-zhihu-run.ps1`，固定回答+文章合计 Top 5 方案，生成独立 `ImmersiveReader-QA-<runId>` Data/Cache/Profile/BrowserCache/Library 和 qa receipt；`RunId`、People ID 均做安全字符校验。
+  - 已执行 `-RunId zhihu-v3-20260712`，QA Local/Library 均存在且与正式 Local/Data/Library 不重叠；非法 `bad/run` 被拒绝。此步骤未启动知乎网络、登录、验证码或外部任务。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -357,7 +364,6 @@
 ### B. Podcast 执行、控制与发布
 
 ### C. 知乎执行、登录与发布
-- [ ] 指定 QA 答主：`xiao-xue-shi-46-24`。
 - [ ] 在新流程真实 QA 通过前，不删除旧知乎控制台回退入口。
 
 ### D. 迁移、继承与数据对账
@@ -443,4 +449,4 @@
 
 ## 下一项推荐执行
 
-继续“C. 知乎执行、登录与发布”：为指定答主 `xiao-xue-shi-46-24` 准备真实 QA 前的受控短样本与隔离 QA Library。
+继续“G. QA、发布与安装”：在隔离 QA Library 对 `xiao-xue-shi-46-24` 执行回答+文章合计 Top 5，并记录真实登录/验证码/发布结果。
