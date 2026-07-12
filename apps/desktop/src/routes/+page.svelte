@@ -228,6 +228,10 @@
 	let editUnwrappedSegments = false;
 	let originalText = "";
 	let originalMarkdownBlock = "";
+	type NavigationGuardChoice = "save" | "discard" | "cancel";
+	let navigationGuardOpen = false;
+	let navigationGuardReason = "";
+	let navigationGuardResolve: ((choice: NavigationGuardChoice) => void) | null = null;
 	// A focus unit is one *or more* sibling elements highlighted together —
 	// adjacent low-density lines (short list items, one-line paragraphs, table
 	// rows) merge into one unit so the spotlight doesn't step line by line.
@@ -1117,6 +1121,7 @@
 	}
 
 	async function openLibraryBook(bookId: string) {
+		if ((await requestNavigationGuard("切换书目")) === "cancel") return;
 		try {
 			const detail = await invoke<BookDetail>("open_book", { bookId });
 			const index = resolveChapterIndex(detail.manifest.chapters, detail.progress.current, detail.progress.read);
@@ -1171,6 +1176,7 @@
 	}
 
 	async function openBookChapter(index: number, position = 0, completePrevious = false) {
+		if ((await requestNavigationGuard("切换章节")) === "cancel") return;
 		if (!activeBook || chapterSwitching) return;
 		const chapter = activeBook.manifest.chapters[index];
 		if (!chapter) return;
@@ -1219,7 +1225,7 @@
 	}
 
 	async function returnToBookshelf() {
-		if (editingParagraph && !(await finishEdit())) return;
+		if ((await requestNavigationGuard("返回书架")) === "cancel") return;
 		await flushSaveState();
 		activeBook = null;
 		trashOpen = false;
@@ -1832,17 +1838,20 @@
 				isClosing = false;
 			}
 		};
-		const unlistenExit = listen<{ mode?: string }>("request-app-exit", (event) => {
+		const requestExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
 			if (isClosing) return;
+			if ((await requestNavigationGuard("退出应用")) === "cancel") return;
 			isClosing = true;
-			const mode = event.payload?.mode === "cancel_and_discard" ? "cancel_and_discard" : "preserve";
 			void finishExit(mode);
+		};
+		const unlistenExit = listen<{ mode?: string }>("request-app-exit", (event) => {
+			const mode = event.payload?.mode === "cancel_and_discard" ? "cancel_and_discard" : "preserve";
+			void requestExit(mode);
 		});
 		const unlistenClose = appWindow.onCloseRequested((event) => {
 			if (isClosing) return;
 			event.preventDefault();
-			isClosing = true;
-			void finishExit("hide");
+			void requestExit("hide");
 		});
 
 		void refreshLibrary();
@@ -1984,11 +1993,7 @@
 	};
 
 	async function openFile(path: string, options: OpenFileOptions = {}): Promise<boolean> {
-		// Finish any active edit before switching files (saves changes)
-		if (editingParagraph) {
-			const saved = await finishEdit();
-			if (!saved) return false;
-		}
+		if ((await requestNavigationGuard("打开另一篇 Markdown")) === "cancel") return false;
 
 		if ($currentFilePath && !options.skipFlush) {
 			await flushSaveState();
@@ -2223,6 +2228,29 @@
 		const el = editingParagraph;
 		teardownEdit(el);
 		restoreEditedBlockHtml(el, originalText);
+	}
+
+	function requestNavigationGuard(reason: string): Promise<NavigationGuardChoice> {
+		if (!editingParagraph) return Promise.resolve("save");
+		if (navigationGuardResolve) return Promise.resolve("cancel");
+		navigationGuardReason = reason;
+		navigationGuardOpen = true;
+		return new Promise((resolve) => {
+			navigationGuardResolve = resolve;
+		});
+	}
+
+	async function chooseNavigationGuard(choice: NavigationGuardChoice) {
+		const resolve = navigationGuardResolve;
+		if (!resolve) return;
+		navigationGuardResolve = null;
+		navigationGuardOpen = false;
+		if (choice === "save") {
+			resolve((await finishEdit()) ? "save" : "cancel");
+			return;
+		}
+		if (choice === "discard") cancelEdit();
+		resolve(choice);
 	}
 
 	// Restore a block's pre-edit HTML; if its sentence segmentation was unwrapped
@@ -3313,11 +3341,7 @@
 	}
 
 	async function exitFocusMode(): Promise<boolean> {
-		// Finish any active edit before exiting focus mode (awaits save + re-render)
-		if (editingParagraph) {
-			const saved = await finishEdit();
-			if (!saved) return false; // Block focus mode exit if save failed
-		}
+		if ((await requestNavigationGuard("退出精读模式")) === "cancel") return false;
 		// Capture while the focus-mode layout is still in effect; restored by
 		// toggleFocusMode after the exit reflow.
 		pendingExitAnchor = captureViewportAnchor();
@@ -3769,6 +3793,24 @@
 
 	<!-- Settings overlay -->
 	<SettingsPanel />
+
+	{#if navigationGuardOpen}
+		<div class="navigation-guard-backdrop" role="presentation">
+			<dialog
+				class="navigation-guard"
+				aria-labelledby="navigation-guard-title"
+				open
+			>
+				<h2 id="navigation-guard-title">尚有未保存的编辑</h2>
+				<p>继续{navigationGuardReason}前，选择如何处理当前段落。</p>
+				<div class="navigation-guard-actions">
+					<button type="button" class="primary" on:click={() => void chooseNavigationGuard("save")}>保存并继续</button>
+					<button type="button" on:click={() => void chooseNavigationGuard("discard")}>放弃并继续</button>
+					<button type="button" on:click={() => void chooseNavigationGuard("cancel")}>取消导航</button>
+				</div>
+			</dialog>
+		</div>
+	{/if}
 
 	<!-- Main content -->
 	<main class="content" class:flow-active={!!flowReaderSession} bind:this={contentEl}>
@@ -5070,6 +5112,59 @@
 			opacity: 1;
 			transform: scale(1);
 		}
+	}
+	.navigation-guard-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 60;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 20px;
+		background: rgba(0, 0, 0, 0.28);
+	}
+	.navigation-guard {
+		width: min(440px, 100%);
+		padding: 22px;
+		border: 1px solid var(--hr);
+		border-radius: 14px;
+		background: var(--bg);
+		box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+	}
+	.navigation-guard h2 {
+		margin: 0;
+		color: var(--text);
+		font-size: 16px;
+	}
+	.navigation-guard p {
+		margin: 10px 0 18px;
+		color: var(--text-secondary);
+		font-size: 13px;
+		line-height: 1.6;
+	}
+	.navigation-guard-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+	.navigation-guard-actions button {
+		border: 1px solid var(--hr);
+		border-radius: 8px;
+		background: var(--bg);
+		color: var(--text-secondary);
+		padding: 8px 12px;
+		font-size: 12px;
+		cursor: pointer;
+	}
+	.navigation-guard-actions button:hover {
+		border-color: var(--link);
+		color: var(--text);
+	}
+	.navigation-guard-actions button.primary {
+		border-color: var(--link);
+		background: var(--link);
+		color: var(--bg);
 	}
 </style>
 
