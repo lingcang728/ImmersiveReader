@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 15:53（Asia/Shanghai）
+更新时间：2026-07-12 16:06（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`c1ef6c5 feat(runtime): enforce sidecar bearer HTTP`
+- 当前产品 commit：`30fc0d6 feat(runtime): persist interrupted tasks on engine exit`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 15:50:56`
-- 最新开发 EXE SHA-256：`0842D41B19E16ADFBB5E1282996199276D936D85316D7042F42AE527681993B9`
+- 最新开发 EXE 时间：`2026-07-12 16:05:27`
+- 最新开发 EXE SHA-256：`10D194B39A810934EDB28EBEDDD85347558AB99A00004FC11FCDD6706A88D2B7`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 77、知乎 20、Podcast 22；Podcast quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 79、知乎 20、Podcast 22；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -160,13 +160,22 @@
   - ToolManager snapshot 序列化不包含 token；READY JSON、数据库、日志、备份和静态文件不写 token。Zhihu fragment 在 API 初始化前用 `history.replaceState` 移除，query/旧 header 认证路径拒绝。
   - `git grep` 持久化审计无 token write/append/backup/serialization 路径；源码与安装 runtime Bearer 冒烟、完整 Rust/Node/Python 验证和 `ship:dev` 均通过。
 
+### 12. 引擎异常退出与 interrupted 恢复
+
+- [x] 引擎异常退出时把相关任务持久化为 `interrupted`，不继续显示 `running`。
+  - 实现 commit：`30fc0d6 feat(runtime): persist interrupted tasks on engine exit`。
+  - `engine_instances` 记录受管引擎 PID/端口/协议和运行状态；ToolManager 刷新到退出状态后，将同引擎活动任务一次性写入 `Terminal + Interrupted + ENGINE_CRASHED`，保留可重试标记并禁止继续 pause/resume/cancel。
+  - 应用重新打开时只执行一次 stale engine recovery；仍为 `running` 的旧 PID 同样转为 `interrupted`，重复恢复和重复退出通知均幂等，不产生重复 TaskEvent。
+  - 新增 live crash、reopen stale recovery、idempotence 测试；`cargo fmt --check`、`cargo test --lib` 79 项、`cargo check --all-targets` 和 `scripts\verify.ps1` 全部通过。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 16:05:27`，SHA-256 `10D194B39A810934EDB28EBEDDD85347558AB99A00004FC11FCDD6706A88D2B7`；精确开发 EXE QA PID `84344` 启动路径正确，停止后残留开发进程为 0。
+  - 正式 EXE `immersive-reader.exe` 时间 `2026-07-11 09:49:40`、SHA-256 `47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；Markdown 文件关联未改动。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
 
 ### A. 最高优先级：让 queued 任务真正执行
 
-- [ ] 引擎异常退出时把相关任务持久化为 interrupted，不继续显示 running。
 - [ ] 实现统一托盘与安全退出：保留 lease；`退出并清理` 只允许明确的 cancel_and_discard。
 
 ### B. Podcast 执行、控制与发布
@@ -277,4 +286,4 @@
 
 ## 下一项推荐执行
 
-继续“A. 最高优先级”：处理引擎异常退出，把相关任务持久化为 `interrupted` 并停止显示 `running`。暂不自动运行桌面长音频、暂不调用付费 API。完成后立即更新并勾选本文件对应条目。
+继续“A. 最高优先级”：实现统一托盘与安全退出，保留 lease；`退出并清理` 只允许明确的 `cancel_and_discard`。暂不自动运行桌面长音频、暂不调用付费 API。
