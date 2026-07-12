@@ -386,6 +386,12 @@
   - `scripts\qa\verify_bookshelf.py` 使用 mock Tauri 数据和 Vite preview 覆盖 ready/loading/empty/error 状态、书架搜索、获取内容入口、视口截图和 page error；已通过，报告时间 `2026-07-12T21:28:25+0800`。
   - mock 补齐 `get_acquisition_snapshot` 与 `list_trash`，并保留 page error stack 便于后续诊断；未读写正式 Library，未使用 Computer Use。
 
+### 36. Archive catalog 清理回归
+
+- [x] 验证清理任务历史后知乎书目、作者导航和 archive catalog 仍存在。
+  - 现有 `tools\zhihu-packer\tests\archive-catalog.test.ts` 覆盖删除任务后作者 catalog、成功条目和 revision 仍可查询；`generateAuthorIndex` 使用持久 archive catalog 重建导航。
+  - `npm.cmd --prefix .\tools\zhihu-packer test` 通过（25 项），未接触正式数据库或 Library。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -444,7 +450,6 @@
 - [ ] 从两个真实音频制作短片段副本并完成免费/低成本回归。
 - [ ] 在 QA Library 对指定知乎账号执行回答+文章合计 Top 5。
 - [ ] Podcast 与知乎各一个活动任务并行测试。
-- [ ] 验证清理任务历史后知乎书目、作者导航和 archive catalog 仍存在。
 - [ ] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
 - [ ] 生成两个完整音频的时长、磁盘、文本规模、费用上限与可用空间报告。
 - [ ] 暂停等待“完整长音频/API 费用 QA”独立授权。
