@@ -11,12 +11,19 @@ import {
   getAuthorSuccessItems,
   replaceTaskIndex,
   tryStartTask,
+  recordPublishedTaskItems,
   Task
 } from './db.js';
 import { logger, randomSleep, sleep, sanitizeFilename } from './utils.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import { resolveArchiveOutputDir } from './runtime-paths.js';
+import {
+  publishTaskStage,
+  resetTaskIncoming,
+  resolvePublishedTaskItemPath,
+  taskIncomingRoot,
+} from './publish.js';
 
 // SSE 控制台或日志全局事件总线回调
 let progressCallback: ((taskId: string, status: string, message: string) => void) | null = null;
@@ -198,10 +205,16 @@ async function runTaskInternal(taskId: string) {
   try {
     context = await getBrowserContext(true); // 无头模式
     let page = await context.newPage();
+    const outputBaseDir = path.resolve(process.cwd(), task.output_dir);
 
     // 2. 检查并拉取索引（如果当前没有任何关联的 task_items，表明是首次拉取索引）
     let taskItems = getTaskItems(taskId);
     if (taskItems.length === 0 || task.index_status !== 'complete') {
+      if (taskItems.length === 0) {
+        resetTaskIncoming(outputBaseDir, taskId);
+      } else {
+        fs.mkdirSync(taskIncomingRoot(outputBaseDir, taskId), { recursive: true });
+      }
       emitProgress(taskId, 'running', '正在抓取答主主页内容列表索引...');
       saveTask({ id: taskId, index_status: 'running' });
       
@@ -252,7 +265,7 @@ async function runTaskInternal(taskId: string) {
     emitProgress(taskId, 'running', `待抓取正文条目共: ${pendingItems.length} 个`);
 
     // 4. 消费队列
-    const outputBaseDir = path.resolve(process.cwd(), task.output_dir);
+    const incomingRoot = taskIncomingRoot(outputBaseDir, taskId);
 
     // 全局速率预算：滑动窗口记录最近条目成败，用于自适应冷却与保护性中止
     const recentResults: boolean[] = [];
@@ -307,7 +320,7 @@ async function runTaskInternal(taskId: string) {
             extracted = await scrapeArticle(page, item.url);
           }
 
-          const relativePath = await writeMarkdownFile(extracted, outputBaseDir);
+          const relativePath = await writeMarkdownFile(extracted, incomingRoot);
           
           // 更新数据库 items 属性缓存（例如最新的 voteup_count）
           saveItem({
@@ -337,7 +350,7 @@ async function runTaskInternal(taskId: string) {
             error_message: null,
             created_at: item.created_at,
             updated_at: Date.now()
-          });
+          }, { recordArchive: false });
 
           success = true;
         } catch (e: any) {
@@ -430,19 +443,38 @@ async function runTaskInternal(taskId: string) {
         : (isComplete && finalTask.success_count > 0 ? 'partial_success' : 'failed');
       saveTask({ id: taskId, status });
 
-      try {
-        const successItems = getTaskItems(taskId).filter(ti => ti.status === 'success');
-        const authors = new Map<string, string>();
-        for (const item of successItems) {
-          if (item.author_id && item.author_name) {
-            authors.set(item.author_id, item.author_name);
+      if (status === 'success') {
+        try {
+          publishTaskStage(outputBaseDir, taskId, task.author_id);
+          const publishedItems = getTaskItems(taskId)
+            .filter(ti => ti.status === 'success')
+            .map(item => {
+              const outputPath = resolvePublishedTaskItemPath(outputBaseDir, taskId, item.output_path);
+              if (!outputPath || !fs.existsSync(outputPath)) {
+                throw new Error(`ZHIHU_PUBLISH_FAILED: published file missing for ${item.item_id}`);
+              }
+              return { ...item, output_path: outputPath, updated_at: Date.now() };
+            });
+          recordPublishedTaskItems(publishedItems);
+          const authors = new Map<string, string>();
+          for (const item of publishedItems) {
+            if (item.author_id && item.author_name) {
+              authors.set(item.author_id, item.author_name);
+            }
           }
+          for (const [authId, authName] of authors.entries()) {
+            generateAuthorIndex(
+              authId,
+              authName,
+              outputBaseDir,
+              publishedItems.filter(item => item.author_id === authId),
+            );
+          }
+        } catch (err: any) {
+          saveTask({ id: taskId, status: 'failed' });
+          emitProgress(taskId, 'failed', `发布归档失败，旧成功版本保持不变: ${err.message}`);
+          return;
         }
-        for (const [authId, authName] of authors.entries()) {
-          generateAuthorIndex(authId, authName, outputBaseDir);
-        }
-      } catch (err: any) {
-        logger.error(`生成导航索引失败: ${err.message}`);
       }
 
       emitProgress(taskId, status, `任务执行完毕。总数: ${finalTask.total_count}, 成功: ${finalTask.success_count}, 失败: ${finalTask.failed_count}`);
@@ -468,8 +500,13 @@ function checkIsPaused(taskId: string): boolean {
 /**
  * 为答主目录生成 Obsidian 双链导航索引 index.md
  */
-export function generateAuthorIndex(authorId: string, authorName: string, outputBaseDir: string) {
-  const items = getAuthorSuccessItems(authorId);
+export function generateAuthorIndex(
+  authorId: string,
+  authorName: string,
+  outputBaseDir: string,
+  publishedItems?: readonly (ReturnType<typeof getTaskItems>[number])[],
+) {
+  const items = publishedItems || getAuthorSuccessItems(authorId);
   if (items.length === 0) return;
 
   const authorDirName = sanitizeFilename(authorName, authorId).replace(/_[^_]+$/, '');

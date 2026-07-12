@@ -523,7 +523,10 @@ export function getItem(id: string): Item | null {
   return res.length > 0 ? res[0] : null;
 }
 
-export function saveTaskItem(taskItem: TaskItem) {
+export function saveTaskItem(
+  taskItem: TaskItem,
+  options: { readonly recordArchive?: boolean } = {},
+) {
   runInTransaction(() => {
     const database = getDb();
     const task = getTask(taskItem.task_id);
@@ -550,8 +553,16 @@ export function saveTaskItem(taskItem: TaskItem) {
       taskItem.created_at,
       taskItem.updated_at
     ]));
-    if (taskItem.status === 'success' && outputPath) {
+    if (taskItem.status === 'success' && outputPath && options.recordArchive !== false) {
       archiveSuccessfulTaskItem(database, taskItem, outputPath);
+    }
+  });
+}
+
+export function recordPublishedTaskItems(taskItems: readonly TaskItem[]) {
+  runInTransaction(() => {
+    for (const taskItem of taskItems) {
+      saveTaskItem(taskItem, { recordArchive: true });
     }
   });
 }
