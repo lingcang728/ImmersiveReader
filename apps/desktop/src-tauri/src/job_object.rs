@@ -1,6 +1,6 @@
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::process::Child;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -8,13 +8,13 @@ use windows_sys::Win32::System::JobObjects::{
 };
 
 pub struct JobObject {
-    handle: HANDLE,
+    handle: OwnedHandle,
 }
 
 impl JobObject {
     pub fn kill_on_close() -> Result<Self, String> {
-        // SAFETY: both optional CreateJobObjectW pointers are null, requesting
-        // default security and an unnamed job. The returned handle is owned.
+        // SAFETY: [Category 8 - FFI boundary] both optional pointers are null,
+        // requesting default security and an unnamed Job Object from Windows.
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
             return Err(format!(
@@ -22,13 +22,16 @@ impl JobObject {
                 std::io::Error::last_os_error()
             ));
         }
+        // SAFETY: [Category 12 - invalid free] CreateJobObjectW returned one
+        // non-null owned handle, transferred exactly once into OwnedHandle.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
         let mut information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: handle is a live Job handle, information points to a fully
-        // initialized value, and the byte count is its exact structure size.
+        // SAFETY: [Category 8 - FFI boundary] OwnedHandle keeps the Job handle
+        // live, and information is initialized with its exact byte count.
         let configured = unsafe {
             SetInformationJobObject(
-                handle,
+                handle.as_raw_handle() as HANDLE,
                 JobObjectExtendedLimitInformation,
                 (&information as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -36,8 +39,6 @@ impl JobObject {
         };
         if configured == 0 {
             let error = std::io::Error::last_os_error();
-            // SAFETY: handle is owned by this function and has not been closed.
-            unsafe { CloseHandle(handle) };
             return Err(format!("SetInformationJobObject failed: {error}"));
         }
         Ok(Self { handle })
@@ -45,26 +46,16 @@ impl JobObject {
 
     pub fn assign(&self, child: &Child) -> Result<(), String> {
         let process = child.as_raw_handle() as HANDLE;
-        // SAFETY: self.handle is a live Job handle and Child owns a live process
-        // handle for the duration of this call.
-        if unsafe { AssignProcessToJobObject(self.handle, process) } == 0 {
+        // SAFETY: [Category 8 - FFI boundary] OwnedHandle and Child keep both
+        // handles live for the duration of AssignProcessToJobObject.
+        if unsafe { AssignProcessToJobObject(self.handle.as_raw_handle() as HANDLE, process) } == 0
+        {
             return Err(format!(
                 "AssignProcessToJobObject failed: {}",
                 std::io::Error::last_os_error()
             ));
         }
         Ok(())
-    }
-}
-
-impl Drop for JobObject {
-    fn drop(&mut self) {
-        if !self.handle.is_null() {
-            // SAFETY: this instance uniquely owns the live Job handle and Drop
-            // runs at most once; closing activates KILL_ON_JOB_CLOSE.
-            unsafe { CloseHandle(self.handle) };
-            self.handle = std::ptr::null_mut();
-        }
     }
 }
 
@@ -92,6 +83,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if child.try_wait().expect("child status must load").is_some() {
+                child.wait().expect("terminated child must be reaped");
                 return;
             }
             thread::sleep(Duration::from_millis(25));
