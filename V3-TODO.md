@@ -429,7 +429,9 @@
   - `ship:dev` 时间 `2026-07-12 21:52:13`，EXE SHA-256 前 16 位 `70354B03744DDBA5`，PID `104540` 启动存活并已停止，残留匹配进程 0；正式 EXE 与 Markdown 关联未变。
 - [ ] NavigationGuard 覆盖工作区切换、书目切换、精读/连读、返回书架、第二实例 Markdown 和退出。
   - 已覆盖书目/章节、精读、返回书架、第二实例 `open-file`、外部 Markdown 和退出；连续阅读返回路径仍需接入与交互 QA。
-- [ ] 实现 Podcast 配置页、知乎配置页和 Markdown 导入页。
+- [x] 实现 Podcast 配置页、知乎配置页和 Markdown 导入页。
+  - `PodcastWorkflow.svelte` 提供文件选择/拖放、翻译、预算、重复策略、预检和任务加入；`ZhihuWorkflow.svelte` 提供受管登录态、回答/文章类型、排序、Top N 和任务控制；`Bookshelf.svelte` 提供 Markdown 文件/文件夹导入入口。
+  - 现有 `npm.cmd --prefix .\apps\desktop run check` 与 `scripts\verify.ps1` 已通过；统一 Shell Playwright harness 已覆盖书架获取内容入口，未使用 Computer Use。
 - [x] 实现完整任务队列、结构化事件/日志面板和控制按钮。
   - 书架任务 rail 保留 Podcast/知乎开始、暂停、恢复、取消、重试、打开结果和可恢复字节显示；新增最近 60 条结构化事件缓存与最近 12 条展开面板；实现 commit：`b451822 feat(tasks): show structured event log`。
   - 完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 21:57:16`，EXE SHA-256 前 16 位 `07DA7EDCD1FFF7F6F`，PID `105744` 启动存活并已停止，残留匹配进程 0。
