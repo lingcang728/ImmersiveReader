@@ -80,27 +80,11 @@ fn ensure_book_inside_library(library_root: &Path, book_root: &Path) -> Result<(
     Ok(())
 }
 
-/// Move a book directory into `Library/.trash/<timestamp>-<name>/` so it leaves the shelf
-/// without permanent data loss. Prefer this as the default "remove" action.
 pub fn remove_book(root: &Path, book_id: &str) -> Result<String, String> {
     let (book_root, manifest, _) = find_book(root, book_id)?;
     ensure_book_inside_library(root, &book_root)?;
-    let trash = root.join(".trash");
-    fs::create_dir_all(&trash).map_err(|error| error.to_string())?;
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let folder_name = book_root
-        .file_name()
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "book".to_string());
-    let dest = trash.join(format!("{stamp}-{folder_name}"));
-    if dest.exists() {
-        return Err("A trash destination with the same name already exists".to_string());
-    }
-    fs::rename(&book_root, &dest).map_err(|error| error.to_string())?;
-    Ok(format!(
-        "已移出书架：{}（保存在 .trash，可手动恢复）",
-        manifest.title
-    ))
+    crate::trash::move_book(root, &book_root, &manifest)?;
+    Ok(format!("已移出书架：{}（可在回收站恢复）", manifest.title))
 }
 
 /// Permanently delete a book directory from disk. Irreversible.
@@ -337,7 +321,7 @@ mod tests {
         remove_book(&root, "manual:remove-me").expect("remove");
         let after = scan_library(&root).expect("scan after");
         assert!(after.books.is_empty());
-        assert!(root.join(".trash").exists());
+        assert_eq!(crate::trash::list(&root).expect("trash list").len(), 1);
         let _ = fs::remove_dir_all(&root);
     }
 

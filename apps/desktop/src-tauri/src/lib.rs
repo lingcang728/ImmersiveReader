@@ -26,6 +26,7 @@ mod storage;
 pub mod tasks;
 mod temporary_content;
 mod tools;
+mod trash;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use tauri::RunEvent;
 
@@ -552,6 +553,46 @@ fn delete_book(book_id: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn list_trash() -> Result<Vec<trash::TrashItem>, String> {
+    let value = settings::load_settings()?;
+    trash::list(Path::new(&value.library_root))
+}
+
+#[tauri::command]
+fn restore_trash_item(
+    trash_id: String,
+    expected_revision: u64,
+    request_id: String,
+) -> Result<trash::TrashRestoreResult, String> {
+    let value = settings::load_settings()?;
+    let control = control::ControlDb::open_current()?;
+    trash::restore_idempotent(
+        Path::new(&value.library_root),
+        &control,
+        &trash_id,
+        expected_revision,
+        &request_id,
+    )
+}
+
+#[tauri::command]
+fn permanently_delete_trash_item(
+    trash_id: String,
+    expected_revision: u64,
+    request_id: String,
+) -> Result<trash::TrashDeleteResult, String> {
+    let value = settings::load_settings()?;
+    let control = control::ControlDb::open_current()?;
+    trash::delete_idempotent(
+        Path::new(&value.library_root),
+        &control,
+        &trash_id,
+        expected_revision,
+        &request_id,
+    )
+}
+
+#[tauri::command]
 fn launch_companion_tool(tool: String) -> Result<tools::ToolLaunch, String> {
     let value = settings::load_settings()?;
     tools::launch(&tool, &value)
@@ -638,6 +679,9 @@ pub fn run() {
             import_markdown_folder,
             remove_book,
             delete_book,
+            list_trash,
+            restore_trash_item,
+            permanently_delete_trash_item,
             launch_companion_tool,
             get_companion_status,
             list_temporary_content,
