@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 21:26（Asia/Shanghai）
+更新时间：2026-07-12 21:37（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`3f0a1dc fix(reader): guard bookshelf navigation during edits`
+- 当前产品 commit：`792d1c3 feat(migration): preview legacy recent files`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 21:23:19`
-- 最新开发 EXE SHA-256：`B69E66081B7A2FEE6024F47E48CC0FA539C3ACC52B3DABAAA30559AFB4535B1E`
+- 最新开发 EXE 时间：`2026-07-12 21:35:36`
+- 最新开发 EXE SHA-256：`D3D877E53F25310C6D9A744D1A9EBC3A603EFF5370A9373ABAA1621832D296F7`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -405,7 +405,10 @@
 
 ### D. 迁移、继承与数据对账
 
-- [ ] 将 migration coordinator 扩展到最近打开记录和旧 MMbook recent-files。
+- [x] 将 migration coordinator 扩展到最近打开记录和旧 MMbook recent-files。
+  - `preview_legacy_migration` 现在将旧 `mmbook\recent-files.json` 映射到当前 channel 的 Settings 状态目录，保持只读、敏感性标记和 preview hash 稳定；实现 commit：`792d1c3 feat(migration): preview legacy recent files`。
+  - 定向 `migration::preview` 测试 1 项、完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 21:35:36`，EXE SHA-256 前 16 位 `D3D877E53F25310C`，PID `83716` 启动存活并已停止，残留匹配进程 0。
+  - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。此项只完成 dry-run preview 覆盖，真实迁移仍受本节“完成 dry-run 后暂停”独立授权门约束。
 - [ ] 迁移单 Markdown 阅读状态、Library `.reading.json` 和临时内容记录。
 - [ ] 迁移旧 Podcast 未完成任务、非敏感配置与输出索引。
 - [ ] 旧明文 DeepSeek Key 写入 Credential Manager并读回验证后，清除新旧 JSON 中的 key 字段。
