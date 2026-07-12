@@ -1,5 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
+import { parseManifest } from "../../../packages/contracts/dist/index.js";
+import { buildZhihuManifest, type ArchivedItem } from "./library-manifest.js";
+import type { TaskItem } from "./db.js";
 
 export type ZhihuPublishPhase = "prepared" | "old_moved" | "new_moved" | "committed" | "rolled_back";
 
@@ -8,10 +12,14 @@ export type ZhihuPublishTransaction = {
   readonly transactionId: string;
   readonly taskId: string;
   readonly authorId: string;
+  readonly bookId: string;
+  readonly sourceId: string;
   readonly incomingRelativePath: string;
   readonly finalRelativePath: string;
   readonly rollbackRelativePath: string;
   readonly revision: number;
+  readonly manifestSha256: string;
+  readonly provenanceSha256: string;
   phase: ZhihuPublishPhase;
   createdAt: string;
   updatedAt: string;
@@ -54,6 +62,99 @@ function isSafeDirectoryEntry(entry: fs.Dirent): boolean {
 export function taskIncomingRoot(outputRoot: string, taskId: string): string {
   assertSafeTaskId(taskId);
   return path.join(path.resolve(outputRoot), ".incoming", taskId);
+}
+
+export type ZhihuPublishMetadata = {
+  readonly authorName: string;
+  readonly items: readonly (TaskItem & {
+    readonly author_id: string;
+    readonly author_name: string;
+    readonly title: string;
+    readonly created_time: number;
+    readonly voteup_count: number;
+  })[];
+};
+
+function sha256File(filePath: string): string {
+  return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function writeMetadata(
+  incomingAuthor: string,
+  taskId: string,
+  authorId: string,
+  revision: number,
+  metadata: ZhihuPublishMetadata,
+): { manifestSha256: string; provenanceSha256: string } {
+  const generatedAt = new Date().toISOString();
+  const items: ArchivedItem[] = metadata.items.map(item => {
+    const normalized = item.output_path?.replaceAll("\\", "/") || "";
+    const prefix = `.incoming/${taskId}/`;
+    const relativeWithAuthor = normalized.startsWith(prefix)
+      ? normalized.slice(prefix.length)
+      : path.relative(incomingAuthor, item.output_path || "").replaceAll("\\", "/");
+    const authorPrefix = `${path.basename(incomingAuthor).replaceAll("\\", "/")}/`;
+    const relative = relativeWithAuthor.startsWith(authorPrefix)
+      ? relativeWithAuthor.slice(authorPrefix.length)
+      : relativeWithAuthor;
+    const filePath = path.resolve(incomingAuthor, relative);
+    const insideIncoming = filePath !== incomingAuthor && filePath.startsWith(`${incomingAuthor}${path.sep}`);
+    if (!relative || relative.startsWith("../") || path.isAbsolute(relative) || !insideIncoming || !fs.existsSync(filePath)) {
+      throw new Error(`ZHIHU_PUBLISH_FAILED: staged file missing for ${item.item_id}`);
+    }
+    const chapterPath = path.relative(incomingAuthor, filePath).replaceAll("\\", "/");
+    return {
+      id: item.item_id,
+      authorId: item.author_id,
+      authorName: item.author_name,
+      title: item.title,
+      createdTime: item.created_time,
+      voteCount: item.voteup_count,
+      outputPath: chapterPath,
+      wordCount: fs.readFileSync(filePath, "utf8").replace(/\s+/g, "").length,
+    };
+  });
+  const manifest = parseManifest(buildZhihuManifest({
+    authorId,
+    authorName: metadata.authorName,
+    generatedAt,
+    items,
+    inferredChapters: [],
+  }));
+  const manifestPath = path.join(incomingAuthor, "manifest.json");
+  writeJsonAtomic(manifestPath, manifest);
+  const manifestSha256 = sha256File(manifestPath);
+  const provenancePath = path.join(incomingAuthor, "provenance.json");
+  writeJsonAtomic(provenancePath, {
+    schemaVersion: 1,
+    bookId: `zhihu:${authorId}`,
+    sourceId: authorId,
+    sourceKind: "zhihu",
+    createdByTaskId: taskId,
+    lastSuccessfulTaskId: taskId,
+    revision,
+    manifestSha256,
+    engineVersion: "zhihu-packer@1.0.0",
+    updatedAt: generatedAt,
+  });
+  return { manifestSha256, provenanceSha256: sha256File(provenancePath) };
+}
+
+function validateMetadata(root: string, transaction: ZhihuPublishTransaction, relative: string): void {
+  const bookRoot = path.resolve(root, relative);
+  const manifestPath = path.join(bookRoot, "manifest.json");
+  const provenancePath = path.join(bookRoot, "provenance.json");
+  if (sha256File(manifestPath) !== transaction.manifestSha256 || sha256File(provenancePath) !== transaction.provenanceSha256) {
+    throw new Error("ZHIHU_PUBLISH_FAILED: metadata hash mismatch");
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+  const provenance = JSON.parse(fs.readFileSync(provenancePath, "utf8")) as Record<string, unknown>;
+  if (manifest.bookId !== transaction.bookId || provenance.bookId !== transaction.bookId
+    || manifest.sourceId !== transaction.sourceId || provenance.sourceId !== transaction.sourceId
+    || provenance.revision !== transaction.revision || provenance.manifestSha256 !== transaction.manifestSha256) {
+    throw new Error("ZHIHU_PUBLISH_FAILED: metadata identity mismatch");
+  }
+  parseManifest(manifest);
 }
 
 export function resetTaskIncoming(outputRoot: string, taskId: string): string {
@@ -144,6 +245,7 @@ export function publishTaskStage(
   outputRoot: string,
   taskId: string,
   authorId: string,
+  metadata: ZhihuPublishMetadata,
 ): ZhihuPublishResult {
   const root = path.resolve(outputRoot);
   const incomingRoot = taskIncomingRoot(root, taskId);
@@ -155,16 +257,20 @@ export function publishTaskStage(
   if (fs.existsSync(rollbackRoot)) {
     throw new Error("ZHIHU_PUBLISH_FAILED: revision directory already exists");
   }
+  const metadataHashes = writeMetadata(incomingAuthor, taskId, authorId, revision, metadata);
 
   const transaction: ZhihuPublishTransaction = {
     schemaVersion: 1,
     transactionId: `zhihu-${taskId}`,
     taskId,
     authorId,
+    bookId: `zhihu:${authorId}`,
+    sourceId: authorId,
     incomingRelativePath: path.relative(root, incomingRoot).replaceAll("\\", "/"),
     finalRelativePath: path.relative(root, finalRoot).replaceAll("\\", "/"),
     rollbackRelativePath: path.relative(root, rollbackRoot).replaceAll("\\", "/"),
     revision,
+    ...metadataHashes,
     phase: "prepared",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -172,6 +278,7 @@ export function publishTaskStage(
   saveTransaction(root, transaction);
 
   try {
+    validateMetadata(root, transaction, transaction.incomingRelativePath + "/" + authorDirectory);
     if (fs.existsSync(finalRoot)) {
       ensureDirectory(path.dirname(rollbackRoot));
       fs.renameSync(finalRoot, rollbackRoot);
@@ -180,6 +287,7 @@ export function publishTaskStage(
     ensureDirectory(path.dirname(finalRoot));
     fs.renameSync(incomingAuthor, finalRoot);
     setPhase(root, transaction, "new_moved");
+    validateMetadata(root, transaction, transaction.finalRelativePath);
     setPhase(root, transaction, "committed");
     return { transaction, finalRoot, authorDirectory };
   } catch (error) {

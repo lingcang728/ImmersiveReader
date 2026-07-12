@@ -445,9 +445,15 @@ async function runTaskInternal(taskId: string) {
 
       if (status === 'success') {
         try {
-          publishTaskStage(outputBaseDir, taskId, task.author_id);
-          const publishedItems = getTaskItems(taskId)
-            .filter(ti => ti.status === 'success')
+          const successfulItems = getTaskItems(taskId).filter(ti => ti.status === 'success');
+          const authorName = successfulItems.find(item => item.author_name)?.author_name
+            || task.author_name
+            || task.author_id;
+          publishTaskStage(outputBaseDir, taskId, task.author_id, {
+            authorName,
+            items: successfulItems,
+          });
+          const publishedItems = successfulItems
             .map(item => {
               const outputPath = resolvePublishedTaskItemPath(outputBaseDir, taskId, item.output_path);
               if (!outputPath || !fs.existsSync(outputPath)) {

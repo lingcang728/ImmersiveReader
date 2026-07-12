@@ -22,9 +22,34 @@ test("publishes staged author content and preserves the previous revision", () =
   fs.mkdirSync(final, { recursive: true });
   fs.writeFileSync(path.join(final, "old.md"), "old");
 
-  const result = publishTaskStage(root, taskId, "author-1");
+  const result = publishTaskStage(root, taskId, "author-1", {
+    authorName: "作者",
+    items: [{
+      item_id: "answer:1",
+      output_path: ".incoming/task-1/作者/new.md",
+      author_id: "author-1",
+      author_name: "作者",
+      title: "标题",
+      created_time: 1,
+      voteup_count: 1,
+    } as any],
+  });
   assert.equal(result.transaction.phase, "committed");
+  assert.equal(result.transaction.bookId, "zhihu:author-1");
+  assert.equal(result.transaction.sourceId, "author-1");
+  assert.equal(result.transaction.revision, 1);
+  assert.equal(result.transaction.manifestSha256.length, 64);
+  assert.equal(result.transaction.provenanceSha256.length, 64);
   assert.equal(fs.readFileSync(path.join(final, "new.md"), "utf8"), "new");
+  const manifest = JSON.parse(fs.readFileSync(path.join(final, "manifest.json"), "utf8"));
+  const provenance = JSON.parse(fs.readFileSync(path.join(final, "provenance.json"), "utf8"));
+  assert.equal(manifest.bookId, "zhihu:author-1");
+  assert.equal(manifest.sourceId, "author-1");
+  assert.equal(manifest.chapters[0].path, "new.md");
+  assert.equal(provenance.bookId, "zhihu:author-1");
+  assert.equal(provenance.sourceId, "author-1");
+  assert.equal(provenance.revision, 1);
+  assert.equal(provenance.manifestSha256, result.transaction.manifestSha256);
   assert.equal(fs.readFileSync(path.join(root, ".revisions", "author-1", "1", "old.md"), "utf8"), "old");
   assert.equal(fs.readFileSync(path.join(root, ".transactions", "zhihu-task-1.json"), "utf8").includes('"phase": "committed"'), true);
   assert.equal(resolvePublishedTaskItemPath(root, taskId, ".incoming/task-1/作者/new.md"), path.join(final, "new.md"));
