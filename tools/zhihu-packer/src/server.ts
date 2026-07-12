@@ -19,35 +19,6 @@ const localHosts = new Set(['127.0.0.1', 'localhost', '::1']);
 
 app.use(express.json());
 
-app.get('/health', (_req, res) => {
-  res.json({ engine: 'zhihu', status: 'ok' });
-});
-
-app.get('/api/status', requireLocalToken, (_req, res) => {
-  res.json({ engine: 'zhihu', status: 'ready' });
-});
-
-app.get('/api/login-status', requireLocalToken, async (_req, res) => {
-  try {
-    const status = await getLoginStatus();
-    res.json({ success: true, data: status });
-  } catch (e: any) {
-    res.status(503).json({ success: false, error: e.message });
-  }
-});
-
-let loginPromise: Promise<void> | null = null;
-
-app.post('/api/login/start', requireLocalToken, (_req, res) => {
-  if (loginPromise) {
-    return res.json({ success: true, started: false, message: '登录流程已经在运行。' });
-  }
-  loginPromise = runLogin().finally(() => {
-    loginPromise = null;
-  });
-  res.json({ success: true, started: true });
-});
-
 function parseHost(hostHeader: string | undefined): string {
   return (hostHeader || '').split(':')[0].replace(/^\[|\]$/g, '').toLowerCase();
 }
@@ -84,6 +55,35 @@ function requireLocalToken(req: express.Request, res: express.Response, next: ex
 }
 
 app.use('/api', requireLocalToken);
+
+app.get('/health', (_req, res) => {
+  res.json({ engine: 'zhihu', status: 'ok' });
+});
+
+app.get('/api/status', requireLocalToken, (_req, res) => {
+  res.json({ engine: 'zhihu', status: 'ready' });
+});
+
+app.get('/api/login-status', requireLocalToken, async (_req, res) => {
+  try {
+    const status = await getLoginStatus();
+    res.json({ success: true, data: status });
+  } catch (e: any) {
+    res.status(503).json({ success: false, error: e.message });
+  }
+});
+
+let loginPromise: Promise<void> | null = null;
+
+app.post('/api/login/start', requireLocalToken, (_req, res) => {
+  if (loginPromise) {
+    return res.json({ success: true, started: false, message: '登录流程已经在运行。' });
+  }
+  loginPromise = runLogin().finally(() => {
+    loginPromise = null;
+  });
+  res.json({ success: true, started: true });
+});
 
 // 静态文件托管
 app.use(express.static(path.resolve(process.cwd(), 'public')));
