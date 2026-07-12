@@ -8,6 +8,7 @@ import { exec } from 'child_process';
 import { randomBytes } from 'crypto';
 import { resolveArchiveOutputDir } from './runtime-paths.js';
 import { resolveSidecarPort, writeReady } from './sidecar-protocol.js';
+import { hasBearerToken } from './auth.js';
 
 const app = express();
 const HOST = '127.0.0.1';
@@ -18,6 +19,10 @@ app.use(express.json());
 
 app.get('/health', (_req, res) => {
   res.json({ engine: 'zhihu', status: 'ok' });
+});
+
+app.get('/api/status', requireLocalToken, (_req, res) => {
+  res.json({ engine: 'zhihu', status: 'ready' });
 });
 
 function parseHost(hostHeader: string | undefined): string {
@@ -42,7 +47,7 @@ function isTrustedRequest(req: express.Request): boolean {
 }
 
 function hasValidToken(req: express.Request): boolean {
-  return req.header('x-zhihu-packer-token') === localToken || req.query.token === localToken;
+  return hasBearerToken(req.header('authorization'), localToken);
 }
 
 function requireLocalToken(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -55,20 +60,19 @@ function requireLocalToken(req: express.Request, res: express.Response, next: ex
   next();
 }
 
+app.use('/api', requireLocalToken);
+
 // 静态文件托管
 app.use(express.static(path.resolve(process.cwd(), 'public')));
 
-app.get('/api/config', (req, res) => {
-  if (!isTrustedRequest(req)) {
-    return res.status(403).json({ success: false, error: '拒绝非本机来源请求' });
-  }
+app.get('/api/config', requireLocalToken, (_req, res) => {
   res.json({ success: true, token: localToken });
 });
 
 let clients: any[] = [];
 
 // SSE (Server-Sent Events) 端点
-app.get('/api/events', (req, res) => {
+app.get('/api/events', requireLocalToken, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -105,7 +109,7 @@ setSchedulerProgressCallback((taskId, status, message) => {
 });
 
 // API：获取任务列表
-app.get('/api/tasks', (req, res) => {
+app.get('/api/tasks', requireLocalToken, (req, res) => {
   try {
     const tasks = getTasks();
     res.json({ success: true, data: tasks });

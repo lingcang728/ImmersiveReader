@@ -6,6 +6,10 @@ import os
 READY_PROTOCOL_VERSION = 1
 
 
+def has_bearer_token(header: str | None, expected: str) -> bool:
+    return bool(expected) and header == f"Bearer {expected}"
+
+
 def resolve_sidecar_port(value: str | None = None) -> int:
     raw = os.environ.get("IMMERSIVE_SIDECAR_PORT", "0") if value is None else value
     if not raw.strip().isdigit():

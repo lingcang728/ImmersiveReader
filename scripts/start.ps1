@@ -24,8 +24,9 @@ switch ($Action) {
         $env:IMMERSIVE_ZHIHU_DB = Join-Path $runtime 'zhihu-packer.db'
         $env:IMMERSIVE_ZHIHU_PROFILE = Join-Path $runtime 'browser-profile'
         $env:IMMERSIVE_CHROMIUM_EXECUTABLE = Join-Path $root 'runtime\zhihu\chromium\msedge.exe'
+        $env:ZHIHU_PACKER_TOKEN = [Guid]::NewGuid().ToString('N')
         Start-Process -FilePath $npm -ArgumentList @('run', 'web') -WorkingDirectory $project -WindowStyle Hidden
-        Write-Output '知乎归档控制台正在后台启动：http://127.0.0.1:3000'
+        Write-Output "知乎归档控制台正在后台启动：http://127.0.0.1:3000/#immersiveToken=$env:ZHIHU_PACKER_TOKEN"
     }
     'podcast' {
         $python = Get-PodcastPython

@@ -9,6 +9,8 @@ mod launcher;
 #[cfg(windows)]
 mod ready;
 #[cfg(windows)]
+mod sidecar_http;
+#[cfg(windows)]
 mod tool_manager;
 
 #[cfg(windows)]
@@ -16,6 +18,8 @@ use crate::job_object::JobObject;
 use launcher::{command_for, require_runtime, tool_paths};
 #[cfg(windows)]
 use ready::wait_for_ready;
+#[cfg(windows)]
+use sidecar_http::SidecarHttpClient;
 #[cfg(windows)]
 use tool_manager::{EngineHealth, ManagedProcess, ProcessDescriptor, ToolManager};
 
@@ -64,10 +68,17 @@ impl ToolKind {
     }
 }
 
-fn tool_url(kind: ToolKind, port: Option<u16>) -> Option<String> {
-    port.map(|port| match kind {
-        ToolKind::Zhihu | ToolKind::Podcast => format!("http://127.0.0.1:{port}"),
-    })
+fn tool_url(kind: ToolKind, port: Option<u16>, token: Option<&str>) -> Option<String> {
+    if matches!(kind, ToolKind::Podcast) {
+        return None;
+    }
+    let port = port?;
+    let origin = format!("http://127.0.0.1:{port}");
+    Some(
+        token
+            .map(|token| format!("{origin}#immersiveToken={token}"))
+            .unwrap_or(origin),
+    )
 }
 
 fn action_for(tool: &str) -> Result<ToolKind, String> {
@@ -126,7 +137,7 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
             return Ok(ToolLaunch {
                 tool: key.to_string(),
                 message: "工具已在本次应用会话中启动。".to_string(),
-                url: tool_url(kind, snapshot.port),
+                url: tool_url(kind, snapshot.port, manager.token(key)),
             });
         }
     }
@@ -158,11 +169,25 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
                 return Err(error);
             }
         };
+        let origin = format!("http://127.0.0.1:{}", ready.port);
+        let health = SidecarHttpClient::new(&origin, &token).and_then(|client| {
+            tauri::async_runtime::block_on(async {
+                client.health().await?;
+                let _: serde_json::Value = client.get_json("/api/status").await?;
+                Ok::<(), String>(())
+            })
+        });
+        if let Err(error) = health {
+            drop(job);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         let descriptor = ProcessDescriptor {
             engine: key.to_string(),
             port: Some(ready.port),
             protocol_version: Some(ready.protocol_version),
-            token,
+            token: token.clone(),
             started_at: chrono::Utc::now().to_rfc3339(),
             health: EngineHealth::Ready,
         };
@@ -182,7 +207,7 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
         }
         .to_string(),
         #[cfg(windows)]
-        url: tool_url(kind, Some(ready.port)),
+        url: tool_url(kind, Some(ready.port), Some(&token)),
         #[cfg(not(windows))]
         url: None,
     })

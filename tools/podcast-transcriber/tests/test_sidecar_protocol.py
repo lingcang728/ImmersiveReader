@@ -8,7 +8,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from sidecar_protocol import READY_PROTOCOL_VERSION, format_ready_line, ready_payload, resolve_sidecar_port
+from sidecar_protocol import (
+    READY_PROTOCOL_VERSION,
+    format_ready_line,
+    has_bearer_token,
+    ready_payload,
+    resolve_sidecar_port,
+)
 
 
 def test_builds_versioned_ready_payload_with_dynamic_port() -> None:
@@ -28,3 +34,10 @@ def test_accepts_os_assigned_port_zero_and_rejects_invalid_values() -> None:
     for value in ("-1", "65536", "not-a-port"):
         with pytest.raises(ValueError, match="port"):
             resolve_sidecar_port(value)
+
+
+def test_accepts_only_the_exact_bearer_token() -> None:
+    assert has_bearer_token("Bearer secret-token", "secret-token")
+    assert not has_bearer_token("bearer secret-token", "secret-token")
+    assert not has_bearer_token("Bearer secret-token-extra", "secret-token")
+    assert not has_bearer_token(None, "secret-token")

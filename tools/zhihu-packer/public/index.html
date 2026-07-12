@@ -434,7 +434,15 @@
     const MAX_LOG_LINES = 300;
 
     async function initApiToken() {
-      const res = await fetch('/api/config');
+      const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      apiToken = fragment.get('immersiveToken') || '';
+      if (!apiToken) {
+        throw new Error('缺少本地控制令牌');
+      }
+      history.replaceState(null, document.title, `${window.location.pathname}${window.location.search}`);
+      const res = await fetch('/api/config', {
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
       const json = await res.json();
       if (!json.success || !json.token) {
         throw new Error(json.error || '无法获取本地控制令牌');
@@ -444,7 +452,7 @@
 
     function apiFetch(url, options = {}) {
       const headers = new Headers(options.headers || {});
-      headers.set('X-Zhihu-Packer-Token', apiToken);
+      headers.set('Authorization', `Bearer ${apiToken}`);
       return fetch(url, { ...options, headers });
     }
 
@@ -474,7 +482,7 @@
     // 加载任务列表
     async function loadTasks() {
       try {
-        const res = await fetch('/api/tasks');
+        const res = await apiFetch('/api/tasks');
         const json = await res.json();
         if (json.success) {
           renderTasks(json.data);
@@ -628,36 +636,45 @@
       }
     });
 
-    // 建立 SSE 连接
-    function connectSSE() {
-      const eventSource = new EventSource('/api/events');
-      
-      eventSource.onopen = () => {
+    // 建立带 Bearer token 的 SSE 连接
+    async function connectSSE() {
+      try {
+        const response = await apiFetch('/api/events');
+        if (!response.ok || !response.body) {
+          throw new Error(`SSE HTTP ${response.status}`);
+        }
         connStatus.textContent = 'SSE 已连接';
         connStatus.style.borderColor = 'var(--success)';
         connStatus.style.color = 'var(--success)';
         appendLog('实时事件流 SSE 连接成功！', 'success');
-      };
-
-      eventSource.onerror = (e) => {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split('\n\n');
+          buffer = events.pop() || '';
+          for (const raw of events) {
+            const dataLine = raw.split('\n').find((line) => line.startsWith('data: '));
+            if (!dataLine) continue;
+            const data = JSON.parse(dataLine.slice(6));
+            if (data.type !== 'progress') continue;
+            let level = 'info';
+            if (data.status === 'success') level = 'success';
+            if (data.status === 'failed') level = 'error';
+            if (data.status === 'paused') level = 'warn';
+            appendLog(`[${data.taskId}] [${data.status.toUpperCase()}] ${data.message}`, level);
+            scheduleLoadTasks();
+          }
+        }
+      } catch (error) {
         connStatus.textContent = 'SSE 断开，重连中...';
         connStatus.style.borderColor = 'var(--accent)';
         connStatus.style.color = 'var(--accent)';
-        // 浏览器会自动尝试重连
-      };
-
-      eventSource.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'progress') {
-          let level = 'info';
-          if (data.status === 'success') level = 'success';
-          if (data.status === 'failed') level = 'error';
-          if (data.status === 'paused') level = 'warn';
-
-          appendLog(`[${data.taskId}] [${data.status.toUpperCase()}] ${data.message}`, level);
-          scheduleLoadTasks();
-        }
-      };
+      }
+      setTimeout(connectSSE, 1500);
     }
 
     // 打开输出目录
@@ -677,10 +694,21 @@
     }
 
     // 打包下载 ZIP
-    function downloadZipArchive() {
+    async function downloadZipArchive() {
       appendLog('正在请求打包下载...', 'info');
-      window.location.href = `/api/download?token=${encodeURIComponent(apiToken)}`;
-      appendLog('已触发压缩包生成和浏览器下载', 'success');
+      try {
+        const response = await apiFetch('/api/download');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const blob = await response.blob();
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'zhihu-archive.zip';
+        link.click();
+        URL.revokeObjectURL(link.href);
+        appendLog('已触发压缩包生成和浏览器下载', 'success');
+      } catch (error) {
+        appendLog(`下载请求出错: ${error.message}`, 'error');
+      }
     }
 
     // 强制一键重爬已有作者

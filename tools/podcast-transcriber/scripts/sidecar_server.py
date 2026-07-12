@@ -5,17 +5,27 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from sidecar_protocol import resolve_sidecar_port, write_ready
+from sidecar_protocol import has_bearer_token, resolve_sidecar_port, write_ready
 
 HOST = "127.0.0.1"
 
 
 class SidecarHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if urlsplit(self.path).path != "/health":
+        path = urlsplit(self.path).path
+        if path == "/health":
+            payload = {"engine": "podcast", "status": "ok"}
+        elif path == "/api/status":
+            if not has_bearer_token(self.headers.get("Authorization"), os.environ.get("IMMERSIVE_SIDECAR_TOKEN", "")):
+                self.send_error(401, "Unauthorized")
+                return
+            payload = {"engine": "podcast", "status": "ready"}
+        elif path.startswith("/api/"):
+            self.send_error(401, "Unauthorized")
+            return
+        else:
             self.send_error(404, "Not Found")
             return
-        payload = {"engine": "podcast", "status": "ok"}
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

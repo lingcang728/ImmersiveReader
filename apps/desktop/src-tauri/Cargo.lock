@@ -1791,6 +1791,7 @@ dependencies = [
  "dirs",
  "encoding_rs",
  "percent-encoding",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

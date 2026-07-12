@@ -119,6 +119,12 @@ impl ToolManager {
             .refresh(engine)?
             .is_some_and(|snapshot| snapshot.exit_status.is_none()))
     }
+
+    pub(super) fn token(&self, engine: &str) -> Option<&str> {
+        self.processes
+            .get(engine)
+            .map(|process| process.descriptor.token.as_str())
+    }
 }
 
 #[cfg(test)]
