@@ -672,6 +672,22 @@ fn restart_podcast_task(
 }
 
 #[tauri::command]
+fn open_task_result(task_id: String) -> Result<library::BookDetail, String> {
+    crate::cache::validate_task_id(&task_id)?;
+    let snapshot = control::ControlDb::open_current()?
+        .task_snapshot(&task_id)?
+        .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
+    if !matches!(snapshot.outcome, tasks::TaskOutcome::Success) {
+        return Err("TASK_RESULT_NOT_READY".to_string());
+    }
+    let book_id = snapshot
+        .book_id
+        .ok_or_else(|| "TASK_RESULT_BOOK_MISSING".to_string())?;
+    let settings = settings::load_settings()?;
+    library::open_book(Path::new(&settings.library_root), &book_id)
+}
+
+#[tauri::command]
 fn control_podcast_task(
     task_id: String,
     action: String,
@@ -810,6 +826,7 @@ pub fn run() {
             cancel_and_discard,
             start_podcast_task,
             restart_podcast_task,
+            open_task_result,
             control_podcast_task,
         ])
         .manage(podcast::PodcastPreviewStore::default())

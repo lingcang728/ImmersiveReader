@@ -992,6 +992,15 @@
 		}
 	}
 
+	async function openPodcastTaskResult(taskId: string) {
+		try {
+			const detail = await invoke<BookDetail>("open_task_result", { taskId });
+			await openLibraryBook(detail.manifest.bookId);
+		} catch (error) {
+			showAppNotice(`无法打开播客结果：${String(error)}`);
+		}
+	}
+
 	async function controlPodcastTask(
 		taskId: string,
 		action: "pause" | "resume" | "cancel" | "cancel_and_discard",
@@ -3810,6 +3819,7 @@
 				onOpenTemporary={(path) => void openFile(path)}
 				onLaunchTool={(tool) => void launchCompanionTool(tool)}
 				onStartTask={(taskId) => void startPodcastTask(taskId)}
+				onOpenTaskResult={(taskId) => void openPodcastTaskResult(taskId)}
 				onRestartTask={(taskId) => void restartPodcastTask(taskId)}
 				onControlTask={(taskId, action, revision) => void controlPodcastTask(taskId, action, revision)}
 				onChooseLibrary={() => void chooseLibraryRoot()}

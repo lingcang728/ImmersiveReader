@@ -19,6 +19,7 @@
 	export let onOpenTemporary: (path: string) => void;
 	export let onLaunchTool: (tool: 'zhihu' | 'podcast') => void;
 	export let onStartTask: (taskId: string) => void;
+	export let onOpenTaskResult: (taskId: string) => void;
 	export let onRestartTask: (taskId: string) => void;
 	export let onControlTask: (taskId: string, action: 'pause' | 'resume' | 'cancel' | 'cancel_and_discard', revision: number) => void;
 	export let onChooseLibrary: () => void;
@@ -298,6 +299,11 @@
 							{#if task.kind === 'podcast' && task.lifecycleState === 'terminal' && task.canRetry && task.requiredAction !== 'approve_budget'}
 								<button type="button" class="task-start" on:click={() => onRestartTask(task.id)}>
 									重新转写 revision
+								</button>
+							{/if}
+							{#if task.kind === 'podcast' && task.lifecycleState === 'terminal' && task.outcome === 'success'}
+								<button type="button" class="task-start" on:click={() => onOpenTaskResult(task.id)}>
+									打开结果
 								</button>
 							{/if}
 						</div>
