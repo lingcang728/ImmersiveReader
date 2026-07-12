@@ -2,7 +2,7 @@ use super::task_contract::{write_task_contract, TaskContractRequest};
 use super::task_request::{replay, request_hash, validate_budget, StoredPreview};
 use super::{
     copy_verified_input, AddPodcastFilesRequest, DuplicatePolicy, PodcastAddResult,
-    PodcastPreviewStore,
+    PodcastBudgetApproval, PodcastPreviewStore,
 };
 use crate::cache::set_podcast_recovery_compatibility;
 use crate::control::{CommandClaim, ControlDb};
@@ -70,6 +70,7 @@ fn create_tasks(
     control: &mut ControlDb,
     locations: &StorageLocations,
     duplicate_policy: DuplicatePolicy,
+    budget_approval: Option<&PodcastBudgetApproval>,
     broadcast: &mut impl FnMut(&TaskEvent),
 ) -> Result<PodcastAddResult, String> {
     let mut tasks = Vec::new();
@@ -97,6 +98,7 @@ fn create_tasks(
             options: &stored.options,
             duplicate_policy,
             budget: &stored.preview.budget,
+            budget_approval,
             revision: book_revision,
         };
         let compatibility = write_task_contract(locations, &contract)?;
@@ -135,6 +137,7 @@ pub fn add_podcast_files_at(
             control,
             locations,
             request.duplicate_policy,
+            request.budget_approval,
             &mut broadcast,
         )
     })();

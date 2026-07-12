@@ -19,6 +19,8 @@ from deepseek_pricing import (
     deepseek_chat_completions_url,
     is_retryable_http_error,
     normalize_deepseek_model,
+    reserve_budget,
+    settle_budget,
 )
 
 

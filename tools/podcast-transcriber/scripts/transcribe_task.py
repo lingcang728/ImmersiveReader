@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -115,6 +116,19 @@ def load_task_spec(path: Path, environment: dict[str, str] | None = None) -> dic
     }
     publish = spec.get("publish") or {}
     _under(library_root, _required_string(publish.get("incomingRelativePath"), "publish.incomingRelativePath"))
+    options = spec.get("options") or {}
+    budget = spec.get("budget") or {}
+    budget_limit = options.get("budgetLimitCny", options.get("maxApiCostCny"))
+    if budget_limit is not None:
+        try:
+            budget_limit_value = float(budget_limit)
+            estimated_budget = float(budget.get("estimatedApiCostUpperCny", 0.0))
+        except (TypeError, ValueError):
+            raise TaskSpecError("INVALID_TASK_SPEC", "Budget limit must be finite")
+        if not math.isfinite(budget_limit_value) or budget_limit_value < 0:
+            raise TaskSpecError("INVALID_TASK_SPEC", "Budget limit must be non-negative")
+        if not math.isfinite(estimated_budget) or estimated_budget < 0 or budget_limit_value + 1e-9 < estimated_budget:
+            raise TaskSpecError("BUDGET_CONFIRMATION_REQUIRED", "Budget limit is below the verified estimate")
     _verify_recovery(resolved_spec.parent, compatibility, input_sha256)
     spec["resolvedInputPath"] = str(input_path)
     return spec
@@ -132,21 +146,35 @@ def main() -> int:
         return 2
     os.environ["PODCAST_TRANSCRIBER_RUN_ID"] = spec["taskId"]
     import transcribe_podcasts
-    from deepseek_pricing import PodcastUpstreamError, classify_upstream_error
+    from deepseek_pricing import PodcastBudgetExceededError, PodcastUpstreamError, classify_upstream_error
+
+    options = spec.get("options") or {}
+    budget_limit = options.get("budgetLimitCny", options.get("maxApiCostCny"))
+    try:
+        budget_limit_value = float(budget_limit)
+    except (TypeError, ValueError):
+        budget_limit_value = None
+    if budget_limit_value is not None and budget_limit_value >= 0:
+        os.environ["PODCAST_TRANSCRIBER_BUDGET_LIMIT_CNY"] = str(budget_limit_value)
+        cache_root = Path(os.environ["IMMERSIVE_PODCAST_CACHE_ROOT"]).resolve()
+        os.environ["PODCAST_TRANSCRIBER_BUDGET_STATE_PATH"] = str(
+            cache_root / "work" / "state" / "budget.json"
+        )
 
     sys.argv = ["transcribe_podcasts.py", "--force", "--no-open-output"]
     try:
         return transcribe_podcasts.main()
     except Exception as error:
-        classified = error if isinstance(error, PodcastUpstreamError) else classify_upstream_error(error)
+        classified = error if isinstance(error, (PodcastBudgetExceededError, PodcastUpstreamError)) else classify_upstream_error(error)
         if classified is not None:
             payload = {
                 "type": "fatal",
-                "errorCode": classified.code,
+                "errorCode": getattr(classified, "code", "UNKNOWN"),
                 "message": str(classified),
             }
-            if classified.retry_after_seconds is not None:
-                payload["retryAfterSeconds"] = classified.retry_after_seconds
+            retry_after = getattr(classified, "retry_after_seconds", None)
+            if retry_after is not None:
+                payload["retryAfterSeconds"] = retry_after
         else:
             payload = {"type": "fatal", "errorCode": "UNKNOWN", "message": str(error)}
         print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)

@@ -64,6 +64,8 @@ from deepseek_pricing import (
     deepseek_chat_completions_url,
     is_retryable_http_error,
     normalize_deepseek_model,
+    reserve_budget,
+    settle_budget,
 )
 from podcast_transcriber.common import CONFIG_PATH, OUT_FINAL, OUT_JSON, STATE_DIR, WORK
 
@@ -1268,7 +1270,13 @@ def polish_text_with_llm(text: str, speaker: str, llm_config: dict[str, Any], co
         logger.warning("Skipping LLM polish for %s: prompt estimate %s exceeds limit %s", speaker, estimated, limit)
         return text
     if backend == "deepseek":
-        result, usage, elapsed = deepseek_chat_completion(prompt, llm_config)
+        reservation = reserve_budget(prompt, llm_config)
+        try:
+            result, usage, elapsed = deepseek_chat_completion(prompt, llm_config)
+        except Exception:
+            settle_budget(reservation, None, llm_config)
+            raise
+        settle_budget(reservation, usage, llm_config)
         record_deepseek_polish_usage(str(model), usage, elapsed, llm_config)
         logger.info(
             "DeepSeek polish request completed in %.2fs, tokens=%s, estimated_cost=$%.6f",
@@ -1500,7 +1508,13 @@ def polish_blocks_batch(
     model = llm_config.get("model", DEEPSEEK_DEFAULT_MODEL if backend == "deepseek" else "qwen3.5:9b")
     
     if backend == "deepseek":
-        result_text, usage, elapsed = deepseek_chat_completion(prompt, llm_config, response_format={"type": "json_object"})
+        reservation = reserve_budget(prompt, llm_config)
+        try:
+            result_text, usage, elapsed = deepseek_chat_completion(prompt, llm_config, response_format={"type": "json_object"})
+        except Exception:
+            settle_budget(reservation, None, llm_config)
+            raise
+        settle_budget(reservation, usage, llm_config)
         record_deepseek_polish_usage(str(model), usage, elapsed, llm_config)
         logger.info(
             "DeepSeek batch polish completed in %.2fs, tokens=%s, estimated_cost=$%.6f",

@@ -1,4 +1,6 @@
-use crate::tasks::{LifecycleState, TaskErrorCode, TaskEvent, TaskKind, TaskOutcome, TaskSnapshot};
+use crate::tasks::{
+    LifecycleState, RequiredAction, TaskErrorCode, TaskEvent, TaskKind, TaskOutcome, TaskSnapshot,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -621,6 +623,12 @@ impl ControlDb {
         } else {
             worker_retry_after_seconds(message)
         };
+        snapshot.required_action =
+            if snapshot.error_code == Some(TaskErrorCode::BudgetConfirmationRequired) {
+                RequiredAction::ApproveBudget
+            } else {
+                RequiredAction::None
+            };
         snapshot.engine_stage = if success {
             "completed".to_string()
         } else {
@@ -630,7 +638,7 @@ impl ControlDb {
         snapshot.recoverable = !success;
         snapshot.can_pause = false;
         snapshot.can_resume = false;
-        snapshot.can_retry = !success;
+        snapshot.can_retry = !success && snapshot.required_action != RequiredAction::ApproveBudget;
         snapshot.can_cancel = false;
         if success {
             snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
@@ -752,6 +760,7 @@ fn worker_error_code(message: Option<&str>) -> Option<TaskErrorCode> {
         "MODEL_INCOMPATIBLE" => Some(TaskErrorCode::ModelIncompatible),
         "CONFIG_INCOMPATIBLE" => Some(TaskErrorCode::ConfigIncompatible),
         "ENGINE_UNAVAILABLE" => Some(TaskErrorCode::EngineUnavailable),
+        "BUDGET_CONFIRMATION_REQUIRED" => Some(TaskErrorCode::BudgetConfirmationRequired),
         "UPSTREAM_UNAUTHORIZED" => Some(TaskErrorCode::UpstreamUnauthorized),
         "RATE_LIMITED" => Some(TaskErrorCode::RateLimited),
         "UPSTREAM_TIMEOUT" => Some(TaskErrorCode::UpstreamTimeout),

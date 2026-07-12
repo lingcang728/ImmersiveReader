@@ -34,6 +34,7 @@ struct TaskOptions {
     translate: bool,
     duplicate_policy: DuplicatePolicy,
     max_api_cost_cny: f64,
+    budget_limit_cny: f64,
 }
 
 #[derive(Serialize)]
@@ -92,6 +93,7 @@ pub(super) struct TaskContractRequest<'a> {
     pub options: &'a PodcastPreviewOptions,
     pub duplicate_policy: DuplicatePolicy,
     pub budget: &'a PodcastBudgetPreview,
+    pub budget_approval: Option<&'a super::PodcastBudgetApproval>,
     pub revision: u64,
 }
 
@@ -119,6 +121,10 @@ pub(super) fn write_task_contract(
             translate: request.options.translate,
             duplicate_policy: request.duplicate_policy,
             max_api_cost_cny: request.options.max_api_cost_cny,
+            budget_limit_cny: request
+                .budget_approval
+                .map(|approval| approval.estimated_api_cost_upper_cny)
+                .unwrap_or(request.options.max_api_cost_cny),
         },
         budget: request.budget,
         publish: TaskPublish {

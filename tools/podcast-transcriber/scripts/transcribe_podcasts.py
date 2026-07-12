@@ -117,6 +117,8 @@ from podcast_transcriber.deepseek import (  # noqa: F401
     resolve_api_key,
     estimate_deepseek_cost,
     record_deepseek_usage,
+    reserve_budget,
+    settle_budget,
     DeepSeekLengthTruncatedError,
     _dynamic_throttle_deepseek,
     deepseek_chat_completion,
@@ -834,13 +836,19 @@ def generate_translation_text(
 ) -> str:
     backend = effective_provider_name(translation_config)
     if backend == "deepseek":
+        reservation = reserve_budget(prompt, translation_config)
         with TaskHeartbeat(state_path, state, status="translating", stage="translating", _job_id=_job_id):
-            response, usage, elapsed = deepseek_chat_completion(
-                prompt,
-                translation_config,
-                response_format=response_format,
-                _root_config=_root_config,
-            )
+            try:
+                response, usage, elapsed = deepseek_chat_completion(
+                    prompt,
+                    translation_config,
+                    response_format=response_format,
+                    _root_config=_root_config,
+                )
+            except Exception:
+                settle_budget(reservation, None, translation_config)
+                raise
+            settle_budget(reservation, usage, translation_config)
         if _state_lock is not None:
             with _state_lock:
                 record_deepseek_usage(

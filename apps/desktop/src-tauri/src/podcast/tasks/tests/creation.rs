@@ -50,6 +50,7 @@ fn queued_task_is_persisted_before_broadcast() {
     .expect("task spec must be valid JSON");
     assert_eq!(task_json["schemaVersion"], 1);
     assert_eq!(task_json["taskId"], task_id.as_str());
+    assert_eq!(task_json["options"]["budgetLimitCny"], 0.1);
     assert_eq!(
         task_json["input"]["inputSha256"],
         result.tasks[0]

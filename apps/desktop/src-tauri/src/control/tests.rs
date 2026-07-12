@@ -419,6 +419,25 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
         .expect("failure event must exist");
     assert_eq!(failed.snapshot.error_code, Some(TaskErrorCode::RateLimited));
     assert_eq!(failed.snapshot.retry_after_seconds, Some(9));
+    let mut budget_task = task_event(1, 1);
+    budget_task.task_id = "podcast-3".to_string();
+    budget_task.snapshot.id = "podcast-3".to_string();
+    database
+        .persist_task_event(&budget_task)
+        .expect("budget task must persist");
+    let budget = database
+        .finish_worker_task(
+            "podcast-3",
+            false,
+            Some(r#"{"errorCode":"BUDGET_CONFIRMATION_REQUIRED"}"#),
+        )
+        .expect("budget failure must map")
+        .expect("budget event must exist");
+    assert_eq!(
+        budget.snapshot.required_action,
+        RequiredAction::ApproveBudget
+    );
+    assert!(!budget.snapshot.can_retry);
     drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

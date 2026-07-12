@@ -107,3 +107,18 @@ def test_single_task_spec_rejects_incompatible_recovery(tmp_path: Path) -> None:
         assert error.code == "PIPELINE_INCOMPATIBLE"
     else:
         raise AssertionError("incompatible recovery must be rejected")
+
+
+def test_single_task_spec_rejects_budget_below_verified_estimate(tmp_path: Path) -> None:
+    path, environment = fixture(tmp_path)
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    spec["options"] = {"maxApiCostCny": 0.0, "budgetLimitCny": 0.0}
+    spec["budget"] = {"estimatedApiCostUpperCny": 0.1}
+    path.write_text(json.dumps(spec), encoding="utf-8")
+
+    try:
+        load_task_spec(path, environment)
+    except TaskSpecError as error:
+        assert error.code == "BUDGET_CONFIRMATION_REQUIRED"
+    else:
+        raise AssertionError("budget below verified estimate must be rejected")
