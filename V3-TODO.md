@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 21:37（Asia/Shanghai）
+更新时间：2026-07-12 21:44（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`792d1c3 feat(migration): preview legacy recent files`
+- 当前产品 commit：`7eff974 feat(settings): expose local maintenance controls`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 21:35:36`
-- 最新开发 EXE SHA-256：`D3D877E53F25310C6D9A744D1A9EBC3A603EFF5370A9373ABAA1621832D296F7`
+- 最新开发 EXE 时间：`2026-07-12 21:42:14`
+- 最新开发 EXE SHA-256：`FD5EDB16478B591EEED9CF80EE307433707B73D707E3ED7E836FBBBBB9CA9A21`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -430,7 +430,11 @@
 - [ ] 实现完整任务队列、结构化事件/日志面板和控制按钮。
 - [ ] 实现书目详情、provenance、revision、来源链接和任务记录。
 - [ ] 完成设置页：Library/Data/Cache/Logs/Backups 路径、大小、打开目录、安全清理、备份、凭据、迁移和恢复状态。
-- [ ] 实现 DeepSeek 配置/删除 UI，永不显示 Key。
+  - 已接入受管路径展示、路径复制、安全缓存清理、只读迁移 preview、发布恢复检查和 Credential Manager 状态；目录打开、大小、备份与完整恢复状态仍未完成。
+- [x] 实现 DeepSeek 配置/删除 UI，永不显示 Key。
+  - `SettingsPanel.svelte` 提供密码输入、Credential Manager 写入/删除和仅显示 configured 状态，不显示 Key；实现 commit：`7eff974 feat(settings): expose local maintenance controls`。
+  - 完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 21:42:14`，EXE SHA-256 前 16 位 `FD5EDB16478B591E`，PID `105528` 启动存活并已停止，残留匹配进程 0。
+  - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。
 - [ ] 实现缓存占用与可恢复任务空间 UI。
 - [ ] 实现 publish recovery 与 migration recovery 页面。
 
