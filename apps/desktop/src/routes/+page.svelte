@@ -45,6 +45,7 @@
 	import TocPanel from "$lib/components/TocPanel.svelte";
 	import SettingsPanel from "$lib/components/SettingsPanel.svelte";
 	import Bookshelf from "$lib/components/Bookshelf.svelte";
+	import PodcastWorkflow from "$lib/components/PodcastWorkflow.svelte";
 	import TrashPanel from "$lib/components/TrashPanel.svelte";
 	import type { TrashDeleteResult, TrashItem } from "$lib/trash/types";
 	import {
@@ -310,6 +311,7 @@
 	let libraryWritable = true;
 	let libraryLoading = true;
 	let appSettings: AppSettings | null = null;
+	let podcastWorkflowOpen = false;
 	let taskSyncState: TaskSyncState = snapshotState([]);
 	let acquisitionTasks: readonly TaskSnapshot[] = [];
 	let taskRefreshNonce = 0;
@@ -3818,6 +3820,7 @@
 				onOpenFile={() => void openFileDialog()}
 				onOpenTemporary={(path) => void openFile(path)}
 				onLaunchTool={(tool) => void launchCompanionTool(tool)}
+				onOpenPodcastWorkflow={() => (podcastWorkflowOpen = true)}
 				onStartTask={(taskId) => void startPodcastTask(taskId)}
 				onOpenTaskResult={(taskId) => void openPodcastTaskResult(taskId)}
 				onRestartTask={(taskId) => void restartPodcastTask(taskId)}
@@ -3829,6 +3832,16 @@
 				onDeleteBook={(bookId, title, chapterCount) =>
 					void deleteLibraryBook(bookId, title, chapterCount)}
 			/>
+			{#if podcastWorkflowOpen}
+				<PodcastWorkflow
+					tasks={acquisitionTasks}
+					onClose={() => (podcastWorkflowOpen = false)}
+					onRefreshTasks={() => void refreshAcquisitionSnapshot()}
+					onStartTask={(taskId) => void startPodcastTask(taskId)}
+					onOpenResult={(taskId) => void openPodcastTaskResult(taskId)}
+					onFallback={() => void launchCompanionTool('podcast')}
+				/>
+			{/if}
 		{/if}
 		{/if}
 	</main>

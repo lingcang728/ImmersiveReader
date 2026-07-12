@@ -18,6 +18,7 @@
 	export let onOpenFile: () => void;
 	export let onOpenTemporary: (path: string) => void;
 	export let onLaunchTool: (tool: 'zhihu' | 'podcast') => void;
+	export let onOpenPodcastWorkflow: () => void;
 	export let onStartTask: (taskId: string) => void;
 	export let onOpenTaskResult: (taskId: string) => void;
 	export let onRestartTask: (taskId: string) => void;
@@ -222,7 +223,7 @@
 						</button>
 						<button
 							type="button"
-							on:click={() => runAcquire(() => onLaunchTool('podcast'))}
+							on:click={() => runAcquire(onOpenPodcastWorkflow)}
 						>
 							转写播客
 						</button>
@@ -232,7 +233,7 @@
 						<button type="button" on:click={() => runAcquire(onOpenFile)}>
 							临时打开
 						</button>
-						<div class="menu-hint">生产工具在外部窗口运行；完成后回这里刷新即可看到新书。</div>
+						<div class="menu-hint">播客可在这里预检并排队；旧版工具仍可从流程页回退。</div>
 					</div>
 				{/if}
 			</div>
@@ -339,6 +340,7 @@
 				<div>
 					<button class="btn-resume" on:click={onImport}>导入书库</button>
 					<button class="quiet-action" on:click={() => onLaunchTool('zhihu')}>归档知乎</button>
+					<button class="quiet-action" on:click={onOpenPodcastWorkflow}>转写播客</button>
 				</div>
 			</div>
 		{/if}
