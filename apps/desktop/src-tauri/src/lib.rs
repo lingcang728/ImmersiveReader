@@ -468,6 +468,16 @@ fn get_task_events(
 }
 
 #[tauri::command]
+fn preview_podcast_files(
+    paths: Vec<String>,
+    options: podcast::PodcastPreviewOptions,
+) -> Result<podcast::PodcastFilesPreview, String> {
+    let mut locations = storage::StorageLocations::current()?;
+    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+    podcast::preview_podcast_files_at(&paths, &options, &locations)
+}
+
+#[tauri::command]
 fn scan_library() -> Result<library::LibraryScan, String> {
     let value = settings::load_settings()?;
     library::scan_library(Path::new(&value.library_root))
@@ -580,6 +590,7 @@ pub fn run() {
             preview_legacy_migration,
             get_acquisition_snapshot,
             get_task_events,
+            preview_podcast_files,
             scan_library,
             open_book,
             get_book_chapter_path,

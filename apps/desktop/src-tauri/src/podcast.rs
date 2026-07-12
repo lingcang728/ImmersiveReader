@@ -1,10 +1,54 @@
 use crate::cache::{acquire_podcast_cache_lease, validate_task_id};
 use crate::storage::StorageLocations;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const ESTIMATE_VERSION: &str = "podcast-budget-v1-deepseek-v4-2026-07-12";
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodcastPreviewOptions {
+    pub translate: bool,
+    pub max_api_cost_cny: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodcastFilePreview {
+    pub path: String,
+    pub file_name: String,
+    pub bytes: u64,
+    pub duration_seconds: f64,
+    pub input_sha256: String,
+    pub source_id: String,
+    pub book_id: String,
+    pub duplicate_book_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodcastBudgetPreview {
+    pub estimated_disk_bytes: u64,
+    pub estimated_translation_tokens: u64,
+    pub estimated_api_cost_upper_cny: f64,
+    pub available_disk_bytes: u64,
+    pub estimate_version: String,
+    pub confirmation_required: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodcastFilesPreview {
+    pub preview_id: String,
+    pub files: Vec<PodcastFilePreview>,
+    pub budget: PodcastBudgetPreview,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +72,172 @@ fn task_cache_root(locations: &StorageLocations, task_id: &str) -> PathBuf {
         .join("Podcast")
         .join("Tasks")
         .join(task_id)
+}
+
+fn probe_duration(ffprobe: &Path, source: &Path) -> Result<f64, String> {
+    if !ffprobe.is_file() {
+        return Err("RUNTIME_UNAVAILABLE".to_string());
+    }
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    let mut command = Command::new(ffprobe);
+    command.args([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+    ]);
+    command.arg(source);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let output = command
+        .output()
+        .map_err(|_| "RUNTIME_UNAVAILABLE".to_string())?;
+    if !output.status.success() {
+        return Err("INVALID_ARGUMENT".to_string());
+    }
+    let duration = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "INVALID_ARGUMENT".to_string())?;
+    if !duration.is_finite() || duration <= 0.0 {
+        return Err("INVALID_ARGUMENT".to_string());
+    }
+    Ok(duration)
+}
+
+#[cfg(windows)]
+fn available_space(path: &Path) -> Result<u64, String> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let existing = path
+        .ancestors()
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| "INSUFFICIENT_DISK".to_string())?;
+    let wide = existing
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut available = 0_u64;
+    // SAFETY: wide is a live NUL-terminated path buffer and available is a
+    // valid out-pointer; the two unused optional output pointers are null.
+    let succeeded = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if succeeded == 0 {
+        return Err(format!(
+            "Disk space lookup failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(available)
+}
+
+#[cfg(not(windows))]
+fn available_space(_path: &Path) -> Result<u64, String> {
+    Err("Disk space lookup is unsupported".to_string())
+}
+
+fn estimate_budget(
+    files: &[PodcastFilePreview],
+    translate: bool,
+    max_api_cost_cny: f64,
+    available_disk_bytes: u64,
+) -> PodcastBudgetPreview {
+    let duration = files.iter().map(|file| file.duration_seconds).sum::<f64>();
+    let source_bytes = files.iter().map(|file| file.bytes).sum::<u64>();
+    let normalized_and_chunks = (duration * 32_000.0 * 2.0).ceil() as u64;
+    let estimated_disk_bytes = source_bytes
+        .saturating_add(normalized_and_chunks)
+        .saturating_add(256 * 1024 * 1024);
+    let estimated_translation_tokens = if translate {
+        (duration * 12.0).ceil() as u64
+    } else {
+        0
+    };
+    let estimated_api_cost_upper_cny = if translate {
+        estimated_translation_tokens as f64 * 6.0 / 1_000_000.0
+    } else {
+        0.0
+    };
+    PodcastBudgetPreview {
+        estimated_disk_bytes,
+        estimated_translation_tokens,
+        estimated_api_cost_upper_cny,
+        available_disk_bytes,
+        estimate_version: ESTIMATE_VERSION.to_string(),
+        confirmation_required: estimated_disk_bytes > available_disk_bytes
+            || estimated_api_cost_upper_cny > max_api_cost_cny,
+    }
+}
+
+pub fn preview_podcast_files_at(
+    paths: &[String],
+    options: &PodcastPreviewOptions,
+    locations: &StorageLocations,
+) -> Result<PodcastFilesPreview, String> {
+    if paths.is_empty() || !options.max_api_cost_cny.is_finite() || options.max_api_cost_cny < 0.0 {
+        return Err("INVALID_ARGUMENT".to_string());
+    }
+    let ffprobe = locations.runtime_root.join(r"podcast\ffmpeg\ffprobe.exe");
+    let mut files = Vec::new();
+    for raw in paths {
+        let path = PathBuf::from(raw);
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !matches!(extension.as_str(), "mp3" | "m4a" | "wav") {
+            return Err("INVALID_ARGUMENT".to_string());
+        }
+        let metadata = fs::metadata(&path).map_err(|_| "INPUT_CHANGED".to_string())?;
+        if !metadata.is_file() {
+            return Err("INVALID_ARGUMENT".to_string());
+        }
+        let input_sha256 = crate::publish::hash_file(&path)?;
+        let book_id = format!("podcast:{input_sha256}");
+        let duplicate_book_id =
+            crate::library::find_book_by_source_id(&locations.library_root, &input_sha256)?
+                .map(|manifest| manifest.book_id);
+        files.push(PodcastFilePreview {
+            path: raw.clone(),
+            file_name: path
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .ok_or_else(|| "INVALID_ARGUMENT".to_string())?,
+            bytes: metadata.len(),
+            duration_seconds: probe_duration(&ffprobe, &path)?,
+            source_id: input_sha256.clone(),
+            book_id,
+            input_sha256,
+            duplicate_book_id,
+        });
+    }
+    let budget = estimate_budget(
+        &files,
+        options.translate,
+        options.max_api_cost_cny,
+        available_space(&locations.cache_root)?,
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&files).map_err(|error| error.to_string())?);
+    hasher.update([u8::from(options.translate)]);
+    hasher.update(options.max_api_cost_cny.to_le_bytes());
+    hasher.update(ESTIMATE_VERSION.as_bytes());
+    Ok(PodcastFilesPreview {
+        preview_id: format!("{:x}", hasher.finalize()),
+        files,
+        budget,
+    })
 }
 
 pub fn copy_verified_input(
@@ -107,7 +317,7 @@ pub fn copy_verified_input(
 
 #[cfg(test)]
 mod tests {
-    use super::copy_verified_input;
+    use super::{copy_verified_input, preview_podcast_files_at, PodcastPreviewOptions};
     use crate::cache::read_podcast_recovery;
     use crate::storage::StorageLocations;
     use sha2::{Digest, Sha256};
@@ -130,9 +340,63 @@ mod tests {
             runtime_state_root: root.join("RuntimeState"),
             backups_root: root.join("Backups"),
             library_root: root.join("Library"),
-            runtime_root: root.join("Runtime"),
+            runtime_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(r"..\..\..\runtime"),
         };
         (root, locations)
+    }
+
+    fn write_one_second_wav(path: &std::path::Path) {
+        let data_size = 16_000_u32 * 2;
+        let mut bytes = Vec::with_capacity(44 + data_size as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&32_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        bytes.resize(44 + data_size as usize, 0);
+        fs::write(path, bytes).expect("wav fixture must write");
+    }
+
+    #[test]
+    fn preview_is_read_only_deterministic_and_requires_zero_budget_confirmation() {
+        let (root, locations) = fixture("preview");
+        let source = root.join("sample.wav");
+        write_one_second_wav(&source);
+        let options = PodcastPreviewOptions {
+            translate: true,
+            max_api_cost_cny: 0.0,
+        };
+
+        let first = preview_podcast_files_at(
+            &[source.to_string_lossy().into_owned()],
+            &options,
+            &locations,
+        )
+        .expect("preview must succeed");
+        let second = preview_podcast_files_at(
+            &[source.to_string_lossy().into_owned()],
+            &options,
+            &locations,
+        )
+        .expect("repeated preview must succeed");
+
+        assert_eq!(first.preview_id, second.preview_id);
+        assert!((first.files[0].duration_seconds - 1.0).abs() < 0.01);
+        assert_eq!(first.files[0].source_id, first.files[0].input_sha256);
+        assert!(first.budget.estimated_disk_bytes > first.files[0].bytes);
+        assert!(first.budget.estimated_translation_tokens > 0);
+        assert!(first.budget.estimated_api_cost_upper_cny > 0.0);
+        assert!(first.budget.confirmation_required);
+        assert!(!locations.data_root.exists());
+        assert!(!locations.cache_root.exists());
+        fs::remove_dir_all(root).expect("fixture must be removed");
     }
 
     #[test]

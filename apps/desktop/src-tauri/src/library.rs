@@ -227,6 +227,20 @@ pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
     Ok(BookDetail { manifest, progress })
 }
 
+pub fn find_book_by_source_id(root: &Path, source_id: &str) -> Result<Option<Manifest>, String> {
+    let mut paths = Vec::new();
+    collect_manifests(root, 0, &mut paths)?;
+    for path in paths {
+        let Ok(manifest) = read_manifest(&path) else {
+            continue;
+        };
+        if manifest.source_id.as_deref() == Some(source_id) {
+            return Ok(Some(manifest));
+        }
+    }
+    Ok(None)
+}
+
 pub fn book_context(
     root: &Path,
     book_id: &str,
