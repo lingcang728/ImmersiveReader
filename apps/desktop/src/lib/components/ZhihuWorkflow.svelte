@@ -71,6 +71,16 @@
     }
   }
 
+  async function startLogin() {
+    try {
+      await invoke('start_zhihu_login');
+      noticeText = '已打开受管知乎登录流程；完成后点击刷新。';
+      errorText = '';
+    } catch (error) {
+      errorText = '无法启动登录流程：' + String(error);
+    }
+  }
+
   async function createTask() {
     const normalized = peopleId.trim();
     if (!normalized) {
@@ -128,6 +138,7 @@
         </div>
         <div class="login-actions">
           <button type="button" class="quiet-button" on:click={() => void refreshLoginStatus()}>刷新</button>
+          <button type="button" class="quiet-button" on:click={() => void startLogin()}>开始登录</button>
           <button type="button" class="quiet-button" on:click={onFallback}>打开旧版登录/控制台</button>
         </div>
       </section>

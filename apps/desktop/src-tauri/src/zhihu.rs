@@ -176,6 +176,18 @@ pub fn login_status(settings: &AppSettings) -> Result<ZhihuLoginStatus, String> 
         .ok_or_else(|| "ZHIHU_LOGIN_STATUS_MISSING".to_string())
 }
 
+pub fn start_login(settings: &AppSettings) -> Result<(), String> {
+    let response: ApiResponse<serde_json::Value> =
+        crate::tools::zhihu_post_json(settings, "/api/login/start", &serde_json::json!({}))?;
+    if response.success {
+        Ok(())
+    } else {
+        Err(response
+            .error
+            .unwrap_or_else(|| "ZHIHU_LOGIN_START_FAILED".to_string()))
+    }
+}
+
 pub fn start_task(
     task_id: &str,
     expected_revision: u64,

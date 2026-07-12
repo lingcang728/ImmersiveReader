@@ -3,6 +3,7 @@ import { getTasks, saveTask, deleteTask, clearCompletedTasks, resetRunningTasks,
 import { cancelTask, createTask, queueTask, setSchedulerProgressCallback } from './scheduler.js';
 import { logger, sanitizeFilename } from './utils.js';
 import { getLoginStatus } from './browser.js';
+import { runLogin } from './login.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import { exec } from 'child_process';
@@ -33,6 +34,18 @@ app.get('/api/login-status', requireLocalToken, async (_req, res) => {
   } catch (e: any) {
     res.status(503).json({ success: false, error: e.message });
   }
+});
+
+let loginPromise: Promise<void> | null = null;
+
+app.post('/api/login/start', requireLocalToken, (_req, res) => {
+  if (loginPromise) {
+    return res.json({ success: true, started: false, message: '登录流程已经在运行。' });
+  }
+  loginPromise = runLogin().finally(() => {
+    loginPromise = null;
+  });
+  res.json({ success: true, started: true });
 });
 
 function parseHost(hostHeader: string | undefined): string {

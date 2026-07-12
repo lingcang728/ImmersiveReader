@@ -31,6 +31,10 @@ export function resolveProfileDir(input: RuntimePathInput): string {
   return resolveConfigured(input.cwd, input.environment.IMMERSIVE_ZHIHU_PROFILE, ".browser-profile");
 }
 
+export function resolveBrowserCacheDir(input: RuntimePathInput): string {
+  return resolveConfigured(input.cwd, input.environment.IMMERSIVE_ZHIHU_BROWSER_CACHE, ".browser-cache");
+}
+
 export function resolveBrowserExecutable(
   environment: Readonly<Record<string, string | undefined>>,
 ): string | undefined {

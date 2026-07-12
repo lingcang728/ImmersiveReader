@@ -75,8 +75,13 @@ pub(super) fn command_for(
         .env("IMMERSIVE_SIDECAR_TOKEN", token);
     match kind {
         ToolKind::Zhihu => {
-            let data_root = crate::settings::local_runtime_data().join("zhihu");
+            let locations = crate::storage::StorageLocations::current()?;
+            let data_root = locations.data_root.join("Zhihu");
+            let profile_root = locations.data_root.join("Private").join("ZhihuProfile");
+            let browser_cache = locations.cache_root.join("Zhihu").join("BrowserCache");
             fs::create_dir_all(&data_root).map_err(|error| error.to_string())?;
+            fs::create_dir_all(&profile_root).map_err(|error| error.to_string())?;
+            fs::create_dir_all(&browser_cache).map_err(|error| error.to_string())?;
             command
                 .env("IMMERSIVE_LIBRARY_ROOT", &settings.library_root)
                 .env(
@@ -84,7 +89,8 @@ pub(super) fn command_for(
                     Path::new(&settings.library_root).join("知乎"),
                 )
                 .env("IMMERSIVE_ZHIHU_DB", data_root.join("zhihu-packer.db"))
-                .env("IMMERSIVE_ZHIHU_PROFILE", data_root.join("browser-profile"))
+                .env("IMMERSIVE_ZHIHU_PROFILE", profile_root)
+                .env("IMMERSIVE_ZHIHU_BROWSER_CACHE", browser_cache)
                 .env("ZHIHU_PACKER_TOKEN", token)
                 .env(
                     "IMMERSIVE_CHROMIUM_EXECUTABLE",

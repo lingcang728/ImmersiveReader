@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as net from 'net';
 import { logger } from './utils.js';
-import { resolveBrowserExecutable, resolveProfileDir } from './runtime-paths.js';
+import { resolveBrowserCacheDir, resolveBrowserExecutable, resolveProfileDir } from './runtime-paths.js';
 
 let activeContext: BrowserContext | null = null;
 let activeBrowser: Browser | null = null;
@@ -14,6 +14,7 @@ let currentBackend: 'obscura' | 'playwright' | null = null;
 
 let obscuraPort = process.env.OBSCURA_PORT ? Number(process.env.OBSCURA_PORT) : 0;
 const chromeProfileDir = resolveProfileDir({ cwd: process.cwd(), environment: process.env });
+const browserCacheDir = resolveBrowserCacheDir({ cwd: process.cwd(), environment: process.env });
 const obscuraStorageDir = path.resolve(process.cwd(), '.obscura-profile');
 // 兜底 UA（探测失败时使用）。正常路径下 UA 会与本机浏览器真实版本对齐，见 resolveUserAgent。
 const fallbackUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -331,6 +332,7 @@ export async function getBrowserContext(headless = true): Promise<BrowserContext
           '--disable-blink-features=AutomationControlled',
           '--no-sandbox',
           '--disable-infobars',
+          '--disk-cache-dir=' + browserCacheDir,
         ]
       };
       if (managedExecutable) {
@@ -338,6 +340,7 @@ export async function getBrowserContext(headless = true): Promise<BrowserContext
       } else if (channel) {
         options.channel = channel;
       }
+      fs.mkdirSync(browserCacheDir, { recursive: true });
       activeContext = await chromium.launchPersistentContext(chromeProfileDir, options);
       currentHeadlessMode = headless;
       currentBackend = 'playwright';

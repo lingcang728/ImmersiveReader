@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   resolveArchiveOutputDir,
+  resolveBrowserCacheDir,
   resolveBrowserExecutable,
   resolveDatabasePath,
   resolveProfileDir,
@@ -36,6 +37,18 @@ test("keeps legacy local paths when integration variables are absent", () => {
   assert.equal(resolveArchiveOutputDir({ cwd: "C:/tool", environment: {} }), "C:\\tool\\output");
   assert.equal(resolveDatabasePath({ cwd: "C:/tool", environment: {} }), "C:\\tool\\zhihu-packer.db");
   assert.equal(resolveProfileDir({ cwd: "C:/tool", environment: {} }), "C:\\tool\\.browser-profile");
+  assert.equal(resolveBrowserCacheDir({ cwd: "C:/tool", environment: {} }), "C:\\tool\\.browser-cache");
+});
+
+test("keeps the managed profile and browser cache on their explicit roots", () => {
+  assert.equal(
+    resolveProfileDir({ cwd: "C:/tool", environment: { IMMERSIVE_ZHIHU_PROFILE: "D:/data/Private/ZhihuProfile" } }),
+    "D:\\data\\Private\\ZhihuProfile",
+  );
+  assert.equal(
+    resolveBrowserCacheDir({ cwd: "C:/tool", environment: { IMMERSIVE_ZHIHU_BROWSER_CACHE: "D:/cache/Zhihu/BrowserCache" } }),
+    "D:\\cache\\Zhihu\\BrowserCache",
+  );
 });
 
 test("uses the managed Chromium executable when configured", () => {
