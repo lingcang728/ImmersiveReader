@@ -142,13 +142,7 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
     let mut command = command_for(&runtime_root, settings, kind)?;
     #[cfg(windows)]
     {
-        let job = JobObject::kill_on_close()?;
-        let mut child = command.spawn().map_err(|error| error.to_string())?;
-        if let Err(error) = job.assign(&child) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
+        let (child, job) = JobObject::spawn_suspended(&mut command)?;
         let descriptor = ProcessDescriptor {
             engine: key.to_string(),
             port: None,
