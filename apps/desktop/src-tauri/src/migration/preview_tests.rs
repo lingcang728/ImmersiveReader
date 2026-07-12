@@ -29,6 +29,12 @@ fn preview_is_read_only_deterministic_and_marks_sensitive_profile() {
     .expect("profile fixture must write");
     fs::create_dir_all(&legacy.podcast_root).expect("podcast root must exist");
     fs::write(legacy.podcast_root.join("config.json"), b"{}").expect("podcast fixture must write");
+    fs::create_dir_all(&legacy.mmbook_state).expect("MMbook state must exist");
+    fs::write(
+        legacy.mmbook_state.join("recent-files.json"),
+        br#"[{"path":"C:\\Books\\one.md"}]"#,
+    )
+    .expect("recent-files fixture must write");
     let target = StorageLocations {
         channel: "test".to_string(),
         settings_path: root.join(r"Target\Settings\settings.json"),
@@ -55,5 +61,13 @@ fn preview_is_read_only_deterministic_and_marks_sensitive_profile() {
         .expect("profile must be listed");
     assert!(profile.sensitive);
     assert_eq!(profile.bytes, 7);
+    let recent_files = first
+        .items
+        .iter()
+        .find(|item| item.kind == "mmbook_recent_files")
+        .expect("recent-files must be listed");
+    assert!(recent_files.exists);
+    assert!(!recent_files.sensitive);
+    assert!(recent_files.target_path.ends_with(r"Target\Settings\recent-files.json"));
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

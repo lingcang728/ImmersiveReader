@@ -118,6 +118,13 @@ pub fn preview_for(
     scope: MigrationScope,
 ) -> Result<MigrationPreview, String> {
     let control_db = target.data_root.join(r"App\control.db");
+    let legacy_recent_files = legacy.mmbook_state.join("recent-files.json");
+    let target_state_dir = target
+        .settings_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| target.settings_path.clone());
+    let target_recent_files = target_state_dir.join("recent-files.json");
     let specs = vec![
         ItemSpec {
             scope: MigrationScope::Settings,
@@ -142,6 +149,14 @@ pub fn preview_for(
             target: control_db,
             sensitive: true,
             in_place: false,
+        },
+        ItemSpec {
+            scope: MigrationScope::ReadingState,
+            kind: "mmbook_recent_files",
+            source: legacy_recent_files.clone(),
+            target: target_recent_files.clone(),
+            sensitive: false,
+            in_place: legacy_recent_files == target_recent_files,
         },
         ItemSpec {
             scope: MigrationScope::Podcast,
