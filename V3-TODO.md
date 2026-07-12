@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 17:14（Asia/Shanghai）
+更新时间：2026-07-12 17:25（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`28b0974 feat(podcast): enforce cumulative api budget`
+- 当前产品 commit：`0b23f4c feat(podcast): publish completed results`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 17:13:29`
-- 最新开发 EXE SHA-256：`D0ED2D94D418E56E1A20F0694DB55312E33C56F92B09F6A46385F9F954CD67D5`
+- 最新开发 EXE 时间：`2026-07-12 17:24:20`
+- 最新开发 EXE SHA-256：`74768ABE2384AE29049ECFB19E99F4143311BF11599293B5BCE0ACD81B4E4A0A`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 84、知乎 20、Podcast 26；Podcast quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 85、知乎 20、Podcast 27；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -233,6 +233,18 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 17:13:29`，SHA-256 `D0ED2D94D418E56E1A20F0694DB55312E33C56F92B09F6A46385F9F954CD67D5`；精确开发 EXE QA PID `25492` 启动路径正确，停止后残留开发进程为 0。
   - 正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 文件关联未改动。
 
+### 19. Podcast 结果发布事务与 lease 释放
+
+- [x] 将 Podcast 结果写入 Library `.incoming`，生成 manifest/provenance，走发布事务并释放 lease。
+  - 实现 commit：`0b23f4c feat(podcast): publish completed results`。
+  - worker 成功退出后只读取受管 Cache `output`，拒绝 symlink/不安全路径，复制 Markdown 到 Library `.incoming/<taskId>`，生成 podcast manifest、章节元数据和 provenance。
+  - 发布使用现有 Prepared/OldMoved/NewMoved/Committed/RolledBack 事务链，写入 `publish_transaction_index`；重复调用读取已提交 journal 并幂等释放 lease。
+  - commit 成功后写 `Podcast/<sourceId>`，旧版本按 `.revisions/<sourceId>/<revision>` 回滚材料保留；发布失败以 `PUBLISH_FAILED` 终态保留恢复空间，不报告成功。
+  - 新增无网络发布集成测试：实际复制 Markdown、校验 manifest/provenance、事务 committed、lease 变为 released、重复调用幂等。
+  - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 警告、Rust 85、知乎 20、Podcast 27、quick validation；`cargo check --all-targets` 通过。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 17:24:20`，SHA-256 `74768ABE2384AE29049ECFB19E99F4143311BF11599293B5BCE0ACD81B4E4A0A`；精确开发 EXE QA PID `99144` 启动路径正确，停止后残留开发进程为 0。
+  - 正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 文件关联未改动。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -240,7 +252,6 @@
 ### A. 最高优先级：让 queued 任务真正执行
 
 ### B. Podcast 执行、控制与发布
-- [ ] 将 Podcast 结果写入 Library `.incoming`，生成 manifest/provenance，走发布事务并释放 lease。
 - [ ] 重新转写保留旧 revision；bookId/sourceId 不因标题变化。
 - [ ] 实现 `open_task_result`，成功后在主窗口打开书目。
 - [ ] 在主窗口实现 Podcast 拖放/文件选择、预检、预算、重复策略、开始、暂停、恢复和结果页。
@@ -341,4 +352,4 @@
 
 ## 下一项推荐执行
 
-继续“B. Podcast 执行、控制与发布”：将 Podcast 结果写入 Library `.incoming`，生成 manifest/provenance，走发布事务并释放 lease。暂不自动运行桌面长音频、暂不调用付费 API。
+继续“B. Podcast 执行、控制与发布”：实现重新转写保留旧 revision，确保 bookId/sourceId 不因标题变化。暂不自动运行桌面长音频、暂不调用付费 API。
