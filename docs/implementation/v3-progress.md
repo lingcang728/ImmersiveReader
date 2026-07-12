@@ -49,6 +49,11 @@ test. It does not waive any independent authorization gate in the V3 plan.
   deleting a task no longer removes author navigation or successful output paths.
 - [x] Make Zhihu force recrawl preserve the last successful Markdown instead of
   deleting files before the replacement fetch succeeds.
+- [x] Preview Podcast files without copying them, including SHA-256, duration,
+  duplicate-book detection, disk estimates, translation scale, and a versioned
+  API budget authorization gate.
+- [x] Embed continuous reading in the Tauri main window, revoke closed reader
+  sessions, and stop the daily reading flow from opening the system browser.
 
 ## In progress
 
@@ -66,14 +71,14 @@ test. It does not waive any independent authorization gate in the V3 plan.
   remaining mutating commands with expectedRevision/requestId.
 - [ ] Add suspended sidecar spawning, ToolManager ownership, authenticated async
   IPC, READY protocol validation, crash mapping, and one unified tray.
-- [ ] Finish Podcast TaskSpec creation, preview/budget estimates, compatibility
-  recovery, pause/cancel semantics, deduplication, revisions, and publishing.
-- [ ] Split Zhihu acquisition history from the permanent archive catalog and
-  make recrawls non-destructive.
+- [ ] Finish Podcast TaskSpec creation, compatibility recovery, pause/cancel
+  semantics, deduplication revisions, task launch, and publishing.
+- [ ] Finish Zhihu staging publication, archive revision replacement, login
+  mediation, and the main-window acquisition flow.
 - [ ] Build the unified shell, acquisition pages, task/event panels, settings,
   migration/recovery, trash, provenance, and Library detail surfaces.
-- [ ] Wrap the current reader in `ReaderWorkspace`, add navigation protection,
-  and embed continuous reading in the Tauri window.
+- [ ] Wrap the current reader in `ReaderWorkspace` and add save/discard/cancel
+  navigation protection for every workspace and second-instance transition.
 - [ ] After the explicit removal gate, remove legacy Podcast/Zhihu frontends and
   tighten CSP, capabilities, filesystem access, and external opening.
 - [ ] Run isolated QA, the two short audio samples, the specified Zhihu Top 5,
@@ -94,9 +99,11 @@ test. It does not waive any independent authorization gate in the V3 plan.
 
 ## Latest verification
 
-- `scripts\verify.ps1`: passed on 2026-07-11.
+- `scripts\verify.ps1`: passed on 2026-07-12 after the continuous-reader integration.
 - Desktop TypeScript tests: 35 passed.
-- Desktop Rust tests: 58 passed.
+- Desktop Rust tests: 59 passed.
 - Zhihu tests: 17 passed.
 - Podcast tests with the managed runtime Python: 19 passed.
 - Podcast quick validation: passed.
+- Development EXE from commit `3976b67`: built at `2026-07-12 09:21:01`,
+  SHA-256 `221CEE3FD2AC9285FA039BF2484CB0D695EF79A88DB7383727BDF9FB84874F85`.
