@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from "svelte";
+	import { invoke } from "@tauri-apps/api/core";
 	import {
 		settingsOpen,
 		currentTheme,
@@ -14,6 +16,149 @@
 	import { getThemePairs } from "$lib/theme/themes";
 
 	const themePairs = getThemePairs();
+
+	type StorageLocations = {
+		channel: string;
+		settingsPath: string;
+		dataRoot: string;
+		cacheRoot: string;
+		logsRoot: string;
+		runtimeStateRoot: string;
+		backupsRoot: string;
+		libraryRoot: string;
+		runtimeRoot: string;
+	};
+	type SecretStatus = { configured: boolean; target: string; lastVerifiedAt?: string | null };
+	type MigrationPreview = {
+		items: Array<{ kind: string; exists: boolean; bytes: number; sensitive: boolean; conflict: boolean }>;
+		totalBytes: number;
+		conflictCount: number;
+		sensitiveItemCount: number;
+	};
+	type CacheClearResult = { deletedItems: number; releasedBytes: number; skipped: Array<{ reason: string }> };
+	type PublishTransaction = { transactionId: string; phase: string; bookId: string };
+
+	let locations: StorageLocations | null = null;
+	let secretStatus: SecretStatus | null = null;
+	let migrationPreview: MigrationPreview | null = null;
+	let publishRecovery: PublishTransaction[] = [];
+	let panelLoading = false;
+	let actionBusy = false;
+	let panelNotice = "";
+	let apiKey = "";
+	let stopSubscription: (() => void) | undefined;
+
+	onMount(() => {
+		stopSubscription = settingsOpen.subscribe((open) => {
+			if (open) void loadPanel();
+		});
+		return () => stopSubscription?.();
+	});
+
+	async function loadPanel() {
+		if (panelLoading) return;
+		panelLoading = true;
+		panelNotice = "";
+		try {
+			[locations, secretStatus, publishRecovery] = await Promise.all([
+				invoke<StorageLocations>("get_storage_locations"),
+				invoke<SecretStatus>("get_secret_status"),
+				invoke<PublishTransaction[]>("get_publish_recovery_status")
+			]);
+		} catch (error) {
+			panelNotice = `设置状态读取失败：${String(error)}`;
+		} finally {
+			panelLoading = false;
+		}
+	}
+
+	function formatBytes(bytes: number) {
+		if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+		const units = ["B", "KB", "MB", "GB", "TB"];
+		const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+		return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+	}
+
+	async function copyPath(path: string) {
+		try {
+			await navigator.clipboard.writeText(path);
+			panelNotice = "路径已复制";
+		} catch (error) {
+			panelNotice = `复制失败：${String(error)}`;
+		}
+	}
+
+	async function clearCache() {
+		if (actionBusy || !window.confirm("仅清理不受保护的可重建缓存，不会删除 Library、Data 或 Backups。继续？")) return;
+		actionBusy = true;
+		try {
+			const result = await invoke<CacheClearResult>("clear_safe_cache", {
+				categories: ["podcast_completed", "zhihu_browser_cache", "general_temporary"],
+				taskIds: []
+			});
+			panelNotice = `已清理 ${result.deletedItems} 项，释放 ${formatBytes(result.releasedBytes)}${result.skipped.length ? `，跳过 ${result.skipped.length} 项受保护任务` : ""}`;
+		} catch (error) {
+			panelNotice = `缓存清理失败：${String(error)}`;
+		} finally {
+			actionBusy = false;
+		}
+	}
+
+	async function saveApiKey() {
+		if (actionBusy || !apiKey.trim()) {
+			panelNotice = "请输入 API Key";
+			return;
+		}
+		actionBusy = true;
+		try {
+			secretStatus = await invoke<SecretStatus>("set_deepseek_api_key", { apiKey });
+			apiKey = "";
+			panelNotice = "Key 已写入 Credential Manager；界面不会显示它";
+		} catch (error) {
+			panelNotice = `Key 保存失败：${String(error)}`;
+		} finally {
+			actionBusy = false;
+		}
+	}
+
+	async function deleteApiKey() {
+		if (actionBusy || !window.confirm("删除当前 channel 的 DeepSeek Key？")) return;
+		actionBusy = true;
+		try {
+			secretStatus = await invoke<SecretStatus>("delete_deepseek_api_key");
+			panelNotice = "DeepSeek Key 已删除";
+		} catch (error) {
+			panelNotice = `Key 删除失败：${String(error)}`;
+		} finally {
+			actionBusy = false;
+		}
+	}
+
+	async function previewMigration() {
+		if (actionBusy) return;
+		actionBusy = true;
+		try {
+			migrationPreview = await invoke<MigrationPreview>("preview_legacy_migration", { scope: "all" });
+			panelNotice = "迁移 preview 已刷新；未写入任何数据";
+		} catch (error) {
+			panelNotice = `迁移 preview 失败：${String(error)}`;
+		} finally {
+			actionBusy = false;
+		}
+	}
+
+	async function recoverPublish() {
+		if (actionBusy || !publishRecovery.length || !window.confirm("恢复所有未完成的发布事务？")) return;
+		actionBusy = true;
+		try {
+			publishRecovery = await invoke<PublishTransaction[]>("recover_publish_transactions", { transactionIds: null });
+			panelNotice = "发布恢复检查已完成";
+		} catch (error) {
+			panelNotice = `发布恢复失败：${String(error)}`;
+		} finally {
+			actionBusy = false;
+		}
+	}
 
 	const widthLabels: Record<number, string> = { 680: "窄", 760: "标准", 840: "宽" };
 
@@ -36,6 +181,20 @@
 			on:keydown|stopPropagation
 			role="presentation"
 		>
+			<div class="settings-header">
+				<div>
+					<div class="settings-title">设置</div>
+					<div class="settings-subtitle">{locations?.channel ?? "当前 channel"}</div>
+				</div>
+				<button class="close-btn" type="button" on:click={() => ($settingsOpen = false)} aria-label="关闭设置">×</button>
+			</div>
+			{#if panelLoading}
+				<div class="status-line">正在读取本地状态…</div>
+			{/if}
+			{#if panelNotice}
+				<div class="notice" role="status">{panelNotice}</div>
+			{/if}
+
 			<div class="settings-title">主题</div>
 			<div class="theme-grid">
 				{#each themePairs as pair}
@@ -126,6 +285,57 @@
 					</div>
 				</div>
 			</div>
+
+			<div class="settings-title section-title">存储路径</div>
+			{#if locations}
+				<div class="path-list">
+					{#each [
+						["Library", locations.libraryRoot],
+						["Data", locations.dataRoot],
+						["Cache", locations.cacheRoot],
+						["Logs", locations.logsRoot],
+						["Backups", locations.backupsRoot],
+						["RuntimeState", locations.runtimeStateRoot]
+					] as row}
+						<div class="path-row">
+							<span>{row[0]}</span>
+							<code title={row[1]}>{row[1]}</code>
+							<button type="button" class="mini-btn" on:click={() => copyPath(row[1])}>复制</button>
+						</div>
+					{/each}
+				</div>
+			{:else}
+				<div class="status-line">路径状态不可用</div>
+			{/if}
+
+			<div class="settings-title section-title">维护与恢复</div>
+			<div class="action-grid">
+				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void clearCache()}>安全清理缓存</button>
+				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void previewMigration()}>刷新迁移预览</button>
+			</div>
+			{#if migrationPreview}
+				<div class="status-card">
+					<strong>迁移预览（只读）</strong>
+					<span>{migrationPreview.items.length} 项 · {formatBytes(migrationPreview.totalBytes)} · 冲突 {migrationPreview.conflictCount} · 敏感 {migrationPreview.sensitiveItemCount}</span>
+				</div>
+			{/if}
+			{#if publishRecovery.length}
+				<div class="status-card recovery-card">
+					<strong>待恢复发布事务 {publishRecovery.length}</strong>
+					<span>{publishRecovery.map((item) => `${item.bookId} · ${item.phase}`).join("；")}</span>
+					<button type="button" class="mini-btn" disabled={actionBusy} on:click={() => void recoverPublish()}>执行恢复检查</button>
+				</div>
+			{/if}
+
+			<div class="settings-title section-title">凭据</div>
+			<div class="credential-row">
+				<span>{secretStatus?.configured ? "DeepSeek Key 已配置" : "未配置 DeepSeek Key"}</span>
+				{#if secretStatus?.configured}<button type="button" class="mini-btn danger" disabled={actionBusy} on:click={() => void deleteApiKey()}>删除</button>{/if}
+			</div>
+			<div class="credential-form">
+				<input type="password" bind:value={apiKey} autocomplete="new-password" placeholder="输入 Key（不会显示或写入 JSON）" aria-label="DeepSeek API Key" />
+				<button type="button" class="mini-btn" disabled={actionBusy || !apiKey.trim()} on:click={() => void saveApiKey()}>保存</button>
+			</div>
 		</div>
 	</div>
 {/if}
@@ -146,10 +356,132 @@
 		border: 1px solid var(--hr);
 		border-radius: 12px;
 		padding: 24px;
-		max-width: 400px;
-		width: 90vw;
+		max-width: 760px;
+		width: min(94vw, 760px);
+		max-height: 90vh;
+		overflow-y: auto;
 		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
 		animation: scaleIn 0.2s ease;
+	}
+	.settings-header {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		margin-bottom: 18px;
+	}
+	.settings-subtitle,
+	.status-line {
+		font-size: 11px;
+		color: var(--text-faded);
+	}
+	.close-btn {
+		border: 0;
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: 24px;
+		line-height: 1;
+		cursor: pointer;
+	}
+	.notice {
+		margin-bottom: 14px;
+		padding: 8px 10px;
+		border-radius: 8px;
+		background: var(--bg-secondary);
+		color: var(--text-secondary);
+		font-size: 11px;
+	}
+	.section-title {
+		margin-top: 24px;
+	}
+	.path-list {
+		display: flex;
+		flex-direction: column;
+		gap: 7px;
+	}
+	.path-row {
+		display: grid;
+		grid-template-columns: 78px minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 8px;
+		font-size: 11px;
+		color: var(--text-secondary);
+	}
+	.path-row code {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--text-faded);
+	}
+	.mini-btn,
+	.action-btn {
+		border: 1px solid var(--hr);
+		border-radius: 7px;
+		background: var(--bg);
+		color: var(--text-secondary);
+		font-size: 11px;
+		padding: 5px 9px;
+		cursor: pointer;
+	}
+	.mini-btn:hover,
+	.action-btn:hover:not(:disabled) {
+		border-color: var(--link);
+		color: var(--text);
+	}
+	.mini-btn:disabled,
+	.action-btn:disabled {
+		cursor: not-allowed;
+		opacity: 0.55;
+	}
+	.mini-btn.danger {
+		color: var(--danger, #a33);
+	}
+	.action-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 8px;
+	}
+	.status-card {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+		margin-top: 10px;
+		padding: 9px 10px;
+		border-radius: 8px;
+		background: var(--bg-secondary);
+		font-size: 11px;
+		color: var(--text-secondary);
+	}
+	.status-card strong {
+		color: var(--text);
+	}
+	.status-card span {
+		flex: 1 1 100%;
+	}
+	.credential-row,
+	.credential-form {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.credential-row {
+		justify-content: space-between;
+		font-size: 11px;
+		color: var(--text-secondary);
+	}
+	.credential-form {
+		margin-top: 8px;
+	}
+	.credential-form input {
+		min-width: 0;
+		flex: 1;
+		border: 1px solid var(--hr);
+		border-radius: 7px;
+		background: var(--bg-secondary);
+		color: var(--text);
+		padding: 7px 9px;
+		font-size: 11px;
 	}
 	.settings-title {
 		font-size: 14px;
