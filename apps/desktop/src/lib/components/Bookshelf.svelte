@@ -497,7 +497,18 @@
 							<div><dt>当前章节</dt><dd>{selectedBookDetail.progress.current || '未开始'}</dd></div>
 							<div><dt>章节位置</dt><dd>{Math.round(selectedBookDetail.progress.position * 100)}%</dd></div>
 						</dl>
-						<p class="book-detail-note">manifest 与阅读状态来自当前 Library；provenance、revision 和任务记录将在对应详情面板接入。</p>
+						{#if selectedBookDetail.provenance}
+							<div class="provenance-grid">
+								<div><span>revision</span><strong>{selectedBookDetail.provenance.revision ?? '未提供'}</strong></div>
+								<div><span>sourceKind</span><strong>{selectedBookDetail.provenance.sourceKind ?? '未提供'}</strong></div>
+								<div><span>创建任务</span><strong>{selectedBookDetail.provenance.createdByTaskId ?? '未提供'}</strong></div>
+								<div><span>最近成功任务</span><strong>{selectedBookDetail.provenance.lastSuccessfulTaskId ?? '未提供'}</strong></div>
+								<div><span>engineVersion</span><strong>{selectedBookDetail.provenance.engineVersion ?? '未提供'}</strong></div>
+								<div><span>manifest SHA-256</span><strong>{selectedBookDetail.provenance.manifestSha256?.slice(0, 16) ?? '未提供'}</strong></div>
+							</div>
+						{:else}
+							<p class="book-detail-note">此书目没有 provenance.json；manifest 与阅读状态仍来自当前 Library。</p>
+						{/if}
 						<ol class="chapter-list">
 							{#each selectedBookDetail.manifest.chapters.slice(0, 20) as chapter}
 								<li><span>{chapter.title}</span><small>{chapter.date ?? ''}</small></li>

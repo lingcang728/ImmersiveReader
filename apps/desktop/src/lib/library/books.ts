@@ -63,6 +63,20 @@ export interface TemporaryItem {
 export interface BookDetail {
 	manifest: BookManifest;
 	progress: ReadingState;
+	provenance?: BookProvenance | null;
+}
+
+export interface BookProvenance {
+	schemaVersion: number;
+	bookId: string;
+	sourceId?: string | null;
+	sourceKind?: string | null;
+	createdByTaskId?: string | null;
+	lastSuccessfulTaskId?: string | null;
+	revision?: number | null;
+	manifestSha256?: string | null;
+	engineVersion?: string | null;
+	updatedAt?: string | null;
 }
 
 export interface AppSettings {

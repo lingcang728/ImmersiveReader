@@ -1,6 +1,6 @@
 use crate::contracts::{validate_manifest, Manifest, ReadingProgress};
 use crate::progress::load_progress;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -33,11 +33,27 @@ pub struct LibraryScan {
     pub writable: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookProvenance {
+    pub schema_version: u32,
+    pub book_id: String,
+    pub source_id: Option<String>,
+    pub source_kind: Option<String>,
+    pub created_by_task_id: Option<String>,
+    pub last_successful_task_id: Option<String>,
+    pub revision: Option<u64>,
+    pub manifest_sha256: Option<String>,
+    pub engine_version: Option<String>,
+    pub updated_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookDetail {
     pub manifest: Manifest,
     pub progress: ReadingProgress,
+    pub provenance: Option<BookProvenance>,
 }
 
 fn collect_manifests(dir: &Path, depth: usize, manifests: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -104,6 +120,19 @@ fn read_manifest(path: &Path) -> Result<Manifest, String> {
     let manifest: Manifest = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
     validate_manifest(&manifest)?;
     Ok(manifest)
+}
+
+fn read_provenance(book_root: &Path, expected_book_id: &str) -> Result<Option<BookProvenance>, String> {
+    let path = book_root.join("provenance.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let provenance: BookProvenance = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    if provenance.schema_version != 1 || provenance.book_id != expected_book_id {
+        return Err("Book provenance does not match its manifest".to_string());
+    }
+    Ok(Some(provenance))
 }
 
 fn progress_value(manifest: &Manifest, progress: &ReadingProgress) -> f64 {
@@ -207,8 +236,13 @@ fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingPr
 }
 
 pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
-    let (_, manifest, progress) = find_book(root, book_id)?;
-    Ok(BookDetail { manifest, progress })
+    let (book_root, manifest, progress) = find_book(root, book_id)?;
+    let provenance = read_provenance(&book_root, &manifest.book_id)?;
+    Ok(BookDetail {
+        manifest,
+        progress,
+        provenance,
+    })
 }
 
 pub fn find_book_by_source_id(root: &Path, source_id: &str) -> Result<Option<Manifest>, String> {
