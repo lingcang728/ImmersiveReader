@@ -159,6 +159,25 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
         }
     }
     let (success, status_message) = match status {
+        Ok(value) if value.success() => {
+            match StorageLocations::current().and_then(|locations| {
+                let mut control = ControlDb::open_current()?;
+                super::publish_task_result_at(&mut control, &locations, &task_id).map(|_| ())
+            }) {
+                Ok(()) => (true, last_error),
+                Err(error) => (
+                    false,
+                    Some(
+                        serde_json::json!({
+                            "type": "fatal",
+                            "errorCode": "PUBLISH_FAILED",
+                            "message": error,
+                        })
+                        .to_string(),
+                    ),
+                ),
+            }
+        }
         Ok(value) => (value.success(), last_error),
         Err(error) => (false, Some(error.to_string())),
     };

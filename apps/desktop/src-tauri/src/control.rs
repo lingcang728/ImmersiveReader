@@ -241,6 +241,30 @@ impl ControlDb {
         Ok(())
     }
 
+    pub fn record_publish_transaction(
+        &self,
+        transaction_id: &str,
+        task_id: &str,
+        book_id: &str,
+        phase: &str,
+        journal_relative_path: &str,
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT INTO publish_transaction_index(transaction_id, task_id, book_id, phase, journal_relative_path, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(transaction_id) DO UPDATE SET task_id=excluded.task_id, book_id=excluded.book_id, phase=excluded.phase, journal_relative_path=excluded.journal_relative_path, updated_at=excluded.updated_at",
+                params![
+                    transaction_id,
+                    task_id,
+                    book_id,
+                    phase,
+                    journal_relative_path,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     pub fn migration_run(&self, migration_id: &str) -> Result<Option<MigrationRunRecord>, String> {
         self.connection
             .query_row(
@@ -761,6 +785,8 @@ fn worker_error_code(message: Option<&str>) -> Option<TaskErrorCode> {
         "CONFIG_INCOMPATIBLE" => Some(TaskErrorCode::ConfigIncompatible),
         "ENGINE_UNAVAILABLE" => Some(TaskErrorCode::EngineUnavailable),
         "BUDGET_CONFIRMATION_REQUIRED" => Some(TaskErrorCode::BudgetConfirmationRequired),
+        "PUBLISH_FAILED" => Some(TaskErrorCode::PublishFailed),
+        "PUBLISH_RECOVERY_REQUIRED" => Some(TaskErrorCode::PublishRecoveryRequired),
         "UPSTREAM_UNAUTHORIZED" => Some(TaskErrorCode::UpstreamUnauthorized),
         "RATE_LIMITED" => Some(TaskErrorCode::RateLimited),
         "UPSTREAM_TIMEOUT" => Some(TaskErrorCode::UpstreamTimeout),

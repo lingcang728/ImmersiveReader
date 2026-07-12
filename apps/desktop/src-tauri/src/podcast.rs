@@ -16,9 +16,11 @@ use std::process::Command;
 
 mod tasks;
 pub use tasks::*;
+mod publish;
 mod task_contract;
 mod task_request;
 mod worker;
+pub use publish::publish_task_result_at;
 pub use task_request::{
     AddPodcastFilesRequest, DuplicatePolicy, PodcastAddResult, PodcastBudgetApproval,
     PodcastPreviewStore,
