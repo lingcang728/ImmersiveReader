@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 17:45（Asia/Shanghai）
+更新时间：2026-07-12 18:00（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`1965b42 feat(desktop): add podcast workflow panel`
+- 当前产品 commit：`95393d3 feat(zhihu): add unified task control adapter`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 17:45:23`
-- 最新开发 EXE SHA-256：`5F34348CBB759937C7113EF11DBACB635564E5E5623646C5E4C4A63E4744223A`
+- 最新开发 EXE 时间：`2026-07-12 17:59:36`
+- 最新开发 EXE SHA-256：`981254CC74967BA24273399DC69BA1AE3C4EEC971EC9B740354FC160CE1E3F09`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 85、知乎 20、Podcast 27；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -277,6 +277,17 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 17:45:23`，SHA-256 `5F34348CBB759937C7113EF11DBACB635564E5E5623646C5E4C4A63E4744223A`；精确开发 EXE QA PID `100568` 启动路径正确，停止后残留开发进程为 0。
   - 未运行真实音频、DeepSeek/Ollama 或付费 API；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 文件关联未改动。
 
+### 23. Zhihu 统一任务执行与控制适配器
+
+- [x] 实现 Rust `create_zhihu_task`、`control_zhihu_task`、`TaskSnapshot/Event` 适配器。
+  - 实现 commit：`95393d3 feat(zhihu): add unified task control adapter`。
+  - 受管 sidecar 通过 Bearer HTTP 创建任务；Rust 校验答主 ID、内容类型、Top N 和排序，持久化统一 queued 事件，并提供开始、暂停、恢复、取消的幂等 requestId 控制命令。
+  - 新增 `/api/tasks/:id` 状态查询与安全停止端点；后台轮询将 sidecar pending/running/paused/success/partial_success/failed 进度映射到共享 TaskSnapshot/Event，统一书目 sourceId/bookId 和恢复/重试能力。
+  - `mark_task_starting` 与外部快照更新保持 sequence/revision 单调；sidecar token 只留在进程内存，HTTP 客户端限定 loopback 与 Bearer。
+  - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 警告、Rust 87、知乎 20、Podcast 27、quick validation；`cargo check --all-targets` 通过。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 17:59:36`，SHA-256 `981254CC74967BA24273399DC69BA1AE3C4EEC971EC9B740354FC160CE1E3F09`；精确开发 EXE QA PID `99468` 启动路径正确，停止后残留开发进程为 0。
+  - 未启动真实知乎抓取、登录或验证码；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 关联仍为 `ImmersiveReader.Markdown`，open command 未变。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -286,8 +297,6 @@
 ### B. Podcast 执行、控制与发布
 
 ### C. 知乎执行、登录与发布
-
-- [ ] 实现 Rust `create_zhihu_task`、control_task、TaskSnapshot/Event 适配器。
 - [ ] 实现回答/文章/全部、排序和 Top N 合计语义；Top 5 必须总计 5 条。
 - [ ] 实现受管 Chromium 登录/验证码流程；Profile 位于 Data\Private，BrowserCache 位于 Cache。
 - [ ] 修正知乎 API：除 health 外全部由 Rust token 鉴权；禁止前端直接连接/SSE sidecar。
@@ -380,4 +389,4 @@
 
 ## 下一项推荐执行
 
-继续“C. 知乎执行、登录与发布”：先实现 Rust `create_zhihu_task`、control_task 与 TaskSnapshot/Event 适配器；保留旧知乎控制台回退入口，暂不自动运行真实抓取或登录。
+继续“C. 知乎执行、登录与发布”：实现回答/文章/全部、排序和 Top N 合计语义（Top 5 必须总计 5 条）；保留旧知乎控制台回退入口，暂不自动运行真实抓取或登录。
