@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 22:38（Asia/Shanghai）
+更新时间：2026-07-12 22:43（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`1d45a26 feat(library): add safe source links`
+- 当前产品 commit：`e389914 feat(settings): add recovery center`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 22:34:21`
-- 最新开发 EXE SHA-256：`72CD183F6FAF93FAA1FC38E4662A789F55243F8072DB8662DCC90648A45A578B`
+- 最新开发 EXE 时间：`2026-07-12 22:38:31`
+- 最新开发 EXE SHA-256：`39CCA58AC8D00A7EE866A1F24B23B278E13A657119808646FA6A56A52372687A`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -452,7 +452,10 @@
   - Settings 显示 Library/Data/Cache/Logs/Backups/RuntimeState 受管目录大小；书架任务 rail 显示可恢复任务字节并保留安全清理入口；实现 commit：`111041d feat(settings): show storage usage and open roots`。
   - Rust 仅允许按当前 channel 打开固定受管目录；完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 22:03:47`，EXE SHA-256 前 16 位 `7A579831E8D47252`，PID `102452` 启动存活并已停止，残留匹配进程 0。
   - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。
-- [ ] 实现 publish recovery 与 migration recovery 页面。
+- [x] 实现 publish recovery 与 migration recovery 页面。
+  - Settings 的“恢复中心”集中展示只读 migration preview/run 状态、publish 待恢复事务和无待恢复空状态；publish 仍提供“执行恢复检查”，真实 migration 执行不在此页面触发；实现 commit：`e389914 feat(settings): add recovery center`。
+  - 完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 22:38:31`，EXE SHA-256 前 16 位 `39CCA58AC8D00A7EE`，PID `99312` 启动存活并已停止，残留匹配进程 0；正式 EXE 与 Markdown 关联未变。
+  - 完整 Library 备份、真实 migration recovery 执行仍受数据迁移授权门约束。
 
 ### F. 安全收紧与旧前端移除
 
