@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 22:06（Asia/Shanghai）
+更新时间：2026-07-12 22:10（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`111041d feat(settings): show storage usage and open roots`
+- 当前产品 commit：`cdcdda9 fix(reader): guard continuous reader navigation`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 22:03:47`
-- 最新开发 EXE SHA-256：`7A579831E8D47252C49C0E568095ECAA3E69D85041FAE68911573F10CA0AB3E6`
+- 最新开发 EXE 时间：`2026-07-12 22:07:58`
+- 最新开发 EXE SHA-256：`41601D20AA2656BE68B563A38BF0AAD3BF11388B2745D08A19192E093ADE3F5F`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -427,8 +427,9 @@
   - `+page.svelte` 增加原生 dialog 三选项 Guard；保存失败会取消导航，放弃会恢复编辑前 DOM，取消保持当前编辑；实现 commit：`9186eec fix(reader): add unsaved navigation guard`。
   - Guard 接入 Markdown 切换、书目/章节切换、返回书架、退出精读和退出应用；完整 `scripts\verify.ps1` 通过，Svelte 0 警告。
   - `ship:dev` 时间 `2026-07-12 21:52:13`，EXE SHA-256 前 16 位 `70354B03744DDBA5`，PID `104540` 启动存活并已停止，残留匹配进程 0；正式 EXE 与 Markdown 关联未变。
-- [ ] NavigationGuard 覆盖工作区切换、书目切换、精读/连读、返回书架、第二实例 Markdown 和退出。
-  - 已覆盖书目/章节、精读、返回书架、第二实例 `open-file`、外部 Markdown 和退出；连续阅读返回路径仍需接入与交互 QA。
+- [x] NavigationGuard 覆盖工作区切换、书目切换、精读/连读、返回书架、第二实例 Markdown 和退出。
+  - 已覆盖书目/章节、精读/连读进入与返回、返回书架、第二实例 `open-file`、外部 Markdown 和退出；实现补充 commit：`cdcdda9 fix(reader): guard continuous reader navigation`。
+  - `npm.cmd --prefix .\apps\desktop run check` 与 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 22:07:58`，EXE SHA-256 前 16 位 `41601D20AA2656BE`，PID `106196` 启动存活并已停止，残留匹配进程 0；正式 EXE 与 Markdown 关联未变。
 - [x] 实现 Podcast 配置页、知乎配置页和 Markdown 导入页。
   - `PodcastWorkflow.svelte` 提供文件选择/拖放、翻译、预算、重复策略、预检和任务加入；`ZhihuWorkflow.svelte` 提供受管登录态、回答/文章类型、排序、Top N 和任务控制；`Bookshelf.svelte` 提供 Markdown 文件/文件夹导入入口。
   - 现有 `npm.cmd --prefix .\apps\desktop run check` 与 `scripts\verify.ps1` 已通过；统一 Shell Playwright harness 已覆盖书架获取内容入口，未使用 Computer Use。
