@@ -105,6 +105,7 @@ pub(crate) fn stop_all() -> Result<(), String> {
         .lock()
         .map_err(|_| "Tool process state is unavailable".to_string())?;
     manager.clear();
+    crate::podcast::stop_workers()?;
     Ok(())
 }
 
@@ -116,6 +117,7 @@ pub(crate) fn stop_all() -> Result<(), String> {
             .map_err(|_| "Tool launch state is unavailable".to_string())?
             .clear();
     }
+    crate::podcast::stop_workers()?;
     Ok(())
 }
 

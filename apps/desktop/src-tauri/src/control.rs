@@ -482,6 +482,153 @@ impl ControlDb {
         Ok(podcast_task_ids)
     }
 
+    pub fn mark_task_starting(&mut self, task_id: &str) -> Result<Option<TaskEvent>, String> {
+        let Some(mut snapshot) = self.task_snapshot(task_id)? else {
+            return Err("TASK_NOT_FOUND".to_string());
+        };
+        if snapshot.kind != TaskKind::Podcast || snapshot.lifecycle_state != LifecycleState::Queued
+        {
+            return Err("TASK_NOT_QUEUED".to_string());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        snapshot.last_sequence = snapshot
+            .last_sequence
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+        snapshot.lifecycle_state = LifecycleState::Starting;
+        snapshot.engine_stage = "launching".to_string();
+        snapshot.engine_status = "starting".to_string();
+        snapshot.updated_at = now.clone();
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: snapshot.id.clone(),
+            sequence: snapshot.last_sequence,
+            revision: snapshot.revision,
+            event_type: "worker_starting".to_string(),
+            snapshot,
+            created_at: now,
+        };
+        self.persist_task_event(&event)?;
+        Ok(Some(event))
+    }
+
+    pub fn record_worker_line(
+        &mut self,
+        task_id: &str,
+        stream: &str,
+        line: &str,
+    ) -> Result<Option<TaskEvent>, String> {
+        let Some(mut snapshot) = self.task_snapshot(task_id)? else {
+            return Err("TASK_NOT_FOUND".to_string());
+        };
+        if matches!(snapshot.lifecycle_state, LifecycleState::Terminal) {
+            return Ok(None);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        snapshot.last_sequence = snapshot
+            .last_sequence
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+        snapshot.lifecycle_state = LifecycleState::Running;
+        snapshot.outcome = TaskOutcome::None;
+        snapshot.engine_stage = worker_stage(line);
+        snapshot.engine_status = "working".to_string();
+        if stream == "stderr" {
+            snapshot.error_message = Some(line.trim().chars().take(500).collect());
+        }
+        if let Some(percent) = worker_percent(line) {
+            snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
+            snapshot.progress.percent = Some(percent);
+        }
+        snapshot.progress.label = Some(line.trim().chars().take(180).collect());
+        snapshot.updated_at = now.clone();
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: snapshot.id.clone(),
+            sequence: snapshot.last_sequence,
+            revision: snapshot.revision,
+            event_type: format!("worker_{stream}"),
+            snapshot,
+            created_at: now,
+        };
+        self.persist_task_event(&event)?;
+        Ok(Some(event))
+    }
+
+    pub fn finish_worker_task(
+        &mut self,
+        task_id: &str,
+        success: bool,
+        message: Option<&str>,
+    ) -> Result<Option<TaskEvent>, String> {
+        let Some(mut snapshot) = self.task_snapshot(task_id)? else {
+            return Err("TASK_NOT_FOUND".to_string());
+        };
+        if matches!(snapshot.lifecycle_state, LifecycleState::Terminal) {
+            return Ok(None);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        snapshot.last_sequence = snapshot
+            .last_sequence
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+        snapshot.lifecycle_state = LifecycleState::Terminal;
+        snapshot.outcome = if success {
+            TaskOutcome::Success
+        } else {
+            TaskOutcome::Failed
+        };
+        snapshot.error_code = if success {
+            None
+        } else {
+            Some(TaskErrorCode::Unknown)
+        };
+        snapshot.error_message = message.map(|value| value.trim().chars().take(500).collect());
+        snapshot.engine_stage = if success {
+            "completed".to_string()
+        } else {
+            "failed".to_string()
+        };
+        snapshot.engine_status = "exited".to_string();
+        snapshot.recoverable = !success;
+        snapshot.can_pause = false;
+        snapshot.can_resume = false;
+        snapshot.can_retry = !success;
+        snapshot.can_cancel = false;
+        if success {
+            snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
+            snapshot.progress.percent = Some(100.0);
+        }
+        snapshot.updated_at = now.clone();
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: snapshot.id.clone(),
+            sequence: snapshot.last_sequence,
+            revision: snapshot.revision,
+            event_type: if success {
+                "worker_completed".to_string()
+            } else {
+                "worker_failed".to_string()
+            },
+            snapshot,
+            created_at: now,
+        };
+        self.persist_task_event(&event)?;
+        Ok(Some(event))
+    }
+
     pub fn task_events(
         &self,
         task_id: &str,
@@ -531,6 +678,44 @@ fn task_kind_for_engine(engine: &str) -> Result<TaskKind, String> {
         "zhihu" => Ok(TaskKind::Zhihu),
         _ => Err("UNKNOWN_ENGINE".to_string()),
     }
+}
+
+fn worker_percent(line: &str) -> Option<f64> {
+    let bytes = line.as_bytes();
+    for start in 0..bytes.len() {
+        if bytes[start] != b'%' {
+            continue;
+        }
+        let mut end = start;
+        while end > 0 && (bytes[end - 1].is_ascii_digit() || bytes[end - 1] == b'.') {
+            end -= 1;
+        }
+        if end == start {
+            continue;
+        }
+        let value = line[end..start].parse::<f64>().ok()?;
+        if value.is_finite() && value <= 100.0 {
+            return Some(value.max(0.0));
+        }
+    }
+    None
+}
+
+fn worker_stage(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    for (needle, stage) in [
+        ("normaliz", "normalizing"),
+        ("chunk", "chunking"),
+        ("translat", "translating"),
+        ("writ", "writing_output"),
+        ("postprocess", "postprocess"),
+        ("transcrib", "transcribing"),
+    ] {
+        if lower.contains(needle) {
+            return stage.to_string();
+        }
+    }
+    "working".to_string()
 }
 
 fn is_active_task(state: &LifecycleState) -> bool {

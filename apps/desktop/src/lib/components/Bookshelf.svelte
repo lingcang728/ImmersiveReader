@@ -18,6 +18,7 @@
 	export let onOpenFile: () => void;
 	export let onOpenTemporary: (path: string) => void;
 	export let onLaunchTool: (tool: 'zhihu' | 'podcast') => void;
+	export let onStartTask: (taskId: string) => void;
 	export let onChooseLibrary: () => void;
 	export let onOpenTrash: () => void;
 	export let onRemoveBook: (bookId: string, title: string, chapterCount: number) => void;
@@ -277,6 +278,11 @@
 								<output>{Math.round(percent)}%</output>
 							{:else}
 								<span class="task-pulse" aria-hidden="true"></span>
+							{/if}
+							{#if task.kind === 'podcast' && task.lifecycleState === 'queued'}
+								<button type="button" class="task-start" on:click={() => onStartTask(task.id)}>
+									开始
+								</button>
 							{/if}
 						</div>
 					{/each}

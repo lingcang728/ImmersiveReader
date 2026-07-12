@@ -646,6 +646,11 @@ fn cancel_and_discard(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn start_podcast_task(task_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    podcast::start_task(task_id, app)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -705,6 +710,7 @@ pub fn run() {
             close_reader_session,
             quit_app,
             cancel_and_discard,
+            start_podcast_task,
         ])
         .manage(podcast::PodcastPreviewStore::default())
         .manage(reader_server::ReaderServiceState::default())

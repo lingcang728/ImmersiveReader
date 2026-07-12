@@ -365,3 +365,43 @@ fn cancel_active_tasks_marks_them_cancelled_and_is_idempotent() {
     drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
+
+#[test]
+fn worker_stdout_stderr_and_exit_map_to_task_events() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-worker-events-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    database
+        .persist_task_event(&task_event(1, 1))
+        .expect("running task must persist");
+    let stdout = database
+        .record_worker_line("podcast-1", "stdout", "[ 42.50%] transcribing chunk")
+        .expect("stdout must map")
+        .expect("stdout event must exist");
+    assert_eq!(stdout.event_type, "worker_stdout");
+    assert_eq!(stdout.snapshot.progress.percent, Some(42.5));
+    assert_eq!(stdout.snapshot.engine_stage, "chunking");
+    let stderr = database
+        .record_worker_line("podcast-1", "stderr", "worker warning")
+        .expect("stderr must map")
+        .expect("stderr event must exist");
+    assert_eq!(stderr.event_type, "worker_stderr");
+    assert_eq!(
+        stderr.snapshot.error_message.as_deref(),
+        Some("worker warning")
+    );
+    let done = database
+        .finish_worker_task("podcast-1", true, None)
+        .expect("worker completion must map")
+        .expect("completion event must exist");
+    assert_eq!(done.event_type, "worker_completed");
+    assert_eq!(done.snapshot.outcome, TaskOutcome::Success);
+    assert_eq!(done.snapshot.progress.percent, Some(100.0));
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}

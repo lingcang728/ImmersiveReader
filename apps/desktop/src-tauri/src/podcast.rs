@@ -13,10 +13,12 @@ mod tasks;
 pub use tasks::*;
 mod task_contract;
 mod task_request;
+mod worker;
 pub use task_request::{
     AddPodcastFilesRequest, DuplicatePolicy, PodcastAddResult, PodcastBudgetApproval,
     PodcastPreviewStore,
 };
+pub use worker::{start_task, stop_all as stop_workers};
 
 const ESTIMATE_VERSION: &str = "podcast-budget-v1-deepseek-v4-2026-07-12";
 
