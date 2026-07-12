@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`a81870a feat(desktop): add tray safe-exit actions`
+- 当前产品 commit：`5d86e50 feat(podcast): run queued task workers`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 16:16:50`
-- 最新开发 EXE SHA-256：`E41957F1C3CFF863EAAB2000555BA2C70A6FFF960CAED664D59246553C325932`
+- 最新开发 EXE 时间：`2026-07-12 16:27:38`
+- 最新开发 EXE SHA-256：`C5F66E4458C218CF79C705C62F9D97C72C4FA3D6E4A533BA3B709C571D88A433`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 80、知乎 20、Podcast 22；Podcast quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 82、知乎 20、Podcast 22；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -180,6 +180,16 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 16:16:50`，SHA-256 `E41957F1C3CFF863EAAB2000555BA2C70A6FFF960CAED664D59246553C325932`；精确开发 EXE QA PID `91832` 启动路径正确，停止后残留开发进程为 0。
   - 正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；Markdown 文件关联未改动。
 
+### 14. Podcast queued worker 与结构化任务事件
+
+- [x] 从 queued TaskSpec 启动单个 Podcast worker，并将 stdout/stderr 结构化映射为 TaskEvent。
+  - 实现 commit：`5d86e50 feat(podcast): run queued task workers`。
+  - 书架 queued Podcast 任务提供“开始”；Rust 校验 taskId/TaskSpec/受管 runtime 后只启动一个 worker，Windows 使用 Job Object，worker stdout/stderr 由单一 dispatcher 顺序写入 control.db 并广播 `acquisition://task-event`。
+  - 输出行映射为 `worker_stdout`/`worker_stderr`，识别百分比和 normalizing/chunking/transcribing/translating/writing stages；进程成功/失败分别写入 `worker_completed`/`worker_failed` 终态。
+  - 新增 worker 进程状态、stdout/stderr/百分比/终态映射测试；`cargo test --lib` 82 项、`cargo check --all-targets`、Svelte 0 警告和 `scripts\verify.ps1` 全部通过。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 16:27:38`，SHA-256 `C5F66E4458C218CF79C705C62F9D97C72C4FA3D6E4A533BA3B709C571D88A433`；精确开发 EXE QA PID `93060` 启动路径正确，停止后残留开发进程为 0。
+  - 未执行真实音频或付费 API；正式 EXE 时间/哈希和 Markdown 文件关联未改动。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -187,8 +197,6 @@
 ### A. 最高优先级：让 queued 任务真正执行
 
 ### B. Podcast 执行、控制与发布
-
-- [ ] 从 queued TaskSpec 启动单个 Podcast worker，并将 stdout/stderr 结构化映射为 TaskEvent。
 - [ ] 实现兼容性恢复：五项 hash 任一不兼容时不混用旧 chunks，提供重新开始新 revision。
 - [ ] 实现 pause/pausing/resume、cancel、cancel_and_discard，所有控制带 expectedRevision/requestId。
 - [ ] 实现 401/429/5xx/timeout 结构化错误码和 Retry-After。
@@ -294,4 +302,4 @@
 
 ## 下一项推荐执行
 
-继续“B. Podcast 执行、控制与发布”：从 queued TaskSpec 启动单个 Podcast worker，并将 stdout/stderr 结构化映射为 TaskEvent。暂不自动运行桌面长音频、暂不调用付费 API。
+继续“B. Podcast 执行、控制与发布”：实现兼容性恢复，五项 hash 任一不兼容时不混用旧 chunks，并提供重新开始新 revision。暂不自动运行桌面长音频、暂不调用付费 API。
