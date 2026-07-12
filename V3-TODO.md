@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 18:00（Asia/Shanghai）
+更新时间：2026-07-12 20:21（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`95393d3 feat(zhihu): add unified task control adapter`
+- 当前产品 commit：`f825aa2 fix(zhihu): enforce combined top n selection`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 17:59:36`
-- 最新开发 EXE SHA-256：`981254CC74967BA24273399DC69BA1AE3C4EEC971EC9B740354FC160CE1E3F09`
+- 最新开发 EXE 时间：`2026-07-12 20:20:58`
+- 最新开发 EXE SHA-256：`C6AB0C8A6BFFC6ABED4C7A1A90924BDD4D70DD133B60ADADE44D32D2E9CD40BE`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 85、知乎 20、Podcast 27；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -288,6 +288,16 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 17:59:36`，SHA-256 `981254CC74967BA24273399DC69BA1AE3C4EEC971EC9B740354FC160CE1E3F09`；精确开发 EXE QA PID `99468` 启动路径正确，停止后残留开发进程为 0。
   - 未启动真实知乎抓取、登录或验证码；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 关联仍为 `ImmersiveReader.Markdown`，open command 未变。
 
+### 24. Zhihu 内容类型、排序与 Top N 合计语义
+
+- [x] 实现回答/文章/全部、排序和 Top N 合计语义；Top 5 必须总计 5 条。
+  - 实现 commit：`f825aa2 fix(zhihu): enforce combined top n selection`。
+  - scheduler 和 CLI 对 `all` 先收集合并回答/文章索引，再用统一排序选择器按发布时间或点赞数排序；Top N 在合并集合上截取，因此 Top 5 不会变成回答 5 + 文章 5。
+  - 选择器使用次级排序和稳定 id tie-breaker，避免同时间/同点赞结果漂移；保留 `answers`/`articles` 单类型过滤语义。
+  - 新增 2 个选择器测试覆盖合计数量、点赞排序、时间排序和输入不变性；`scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 警告、Rust 87、知乎 22、Podcast 27、quick validation；`cargo check --all-targets` 通过。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 20:20:58`，SHA-256 `C6AB0C8A6BFFC6ABED4C7A1A90924BDD4D70DD133B60ADADE44D32D2E9CD40BE`；精确开发 EXE QA PID `94380` 启动路径正确，停止后残留开发进程为 0。
+  - 未启动真实知乎抓取、登录或验证码；正式 EXE 时间/哈希 `2026-07-11 09:49:40 / 47C39DF121129215735520C18E54919B631CEAB73AF73EB97230441A9B57BA1F` 未变；`.md/.markdown` 关联仍为 `ImmersiveReader.Markdown`，open command 未变。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -297,7 +307,6 @@
 ### B. Podcast 执行、控制与发布
 
 ### C. 知乎执行、登录与发布
-- [ ] 实现回答/文章/全部、排序和 Top N 合计语义；Top 5 必须总计 5 条。
 - [ ] 实现受管 Chromium 登录/验证码流程；Profile 位于 Data\Private，BrowserCache 位于 Cache。
 - [ ] 修正知乎 API：除 health 外全部由 Rust token 鉴权；禁止前端直接连接/SSE sidecar。
 - [ ] 新抓取内容先进入 `.incoming`，成功后再发布 archive revision；partial success 保留旧成功版本。
@@ -389,4 +398,4 @@
 
 ## 下一项推荐执行
 
-继续“C. 知乎执行、登录与发布”：实现回答/文章/全部、排序和 Top N 合计语义（Top 5 必须总计 5 条）；保留旧知乎控制台回退入口，暂不自动运行真实抓取或登录。
+继续“C. 知乎执行、登录与发布”：实现主窗口知乎答主 ID、类型、排序、Top N、登录状态、队列和结果页；保留旧知乎控制台回退入口，暂不自动运行真实抓取或登录。
