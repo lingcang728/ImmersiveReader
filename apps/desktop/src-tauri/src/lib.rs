@@ -651,6 +651,25 @@ fn start_podcast_task(task_id: String, app: tauri::AppHandle) -> Result<(), Stri
     podcast::start_task(task_id, app)
 }
 
+#[tauri::command]
+fn restart_podcast_task(
+    task_id: String,
+    app: tauri::AppHandle,
+) -> Result<tasks::TaskSnapshot, String> {
+    let mut locations = storage::StorageLocations::current()?;
+    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+    let mut control = control::ControlDb::open_current()?;
+    let snapshot = podcast::restart_incompatible_task_at(&mut control, &locations, &task_id)?;
+    let event = control
+        .task_events(&snapshot.id, 0, 1)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "TASK_EVENT_MISSING".to_string())?;
+    app.emit(podcast::TASK_EVENT_NAME, event)
+        .map_err(|error| error.to_string())?;
+    Ok(snapshot)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -711,6 +730,7 @@ pub fn run() {
             quit_app,
             cancel_and_discard,
             start_podcast_task,
+            restart_podcast_task,
         ])
         .manage(podcast::PodcastPreviewStore::default())
         .manage(reader_server::ReaderServiceState::default())

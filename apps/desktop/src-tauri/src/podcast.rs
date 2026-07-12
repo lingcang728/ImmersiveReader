@@ -1,12 +1,17 @@
 use crate::cache::{acquire_podcast_cache_lease, validate_task_id};
+use crate::cache::{
+    discard_podcast_task_at, set_podcast_recovery_compatibility, PodcastCompatibility,
+};
 use crate::storage::StorageLocations;
+use crate::tasks::TaskSnapshot;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 mod tasks;
@@ -326,11 +331,161 @@ pub fn copy_verified_input(
     copied
 }
 
+pub fn restart_incompatible_task_at(
+    control: &mut crate::control::ControlDb,
+    locations: &StorageLocations,
+    task_id: &str,
+) -> Result<TaskSnapshot, String> {
+    validate_task_id(task_id)?;
+    let snapshot = control
+        .task_snapshot(task_id)?
+        .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
+    if !matches!(
+        snapshot.error_code,
+        Some(
+            crate::tasks::TaskErrorCode::InputChanged
+                | crate::tasks::TaskErrorCode::PipelineIncompatible
+                | crate::tasks::TaskErrorCode::ModelIncompatible
+                | crate::tasks::TaskErrorCode::ConfigIncompatible
+        )
+    ) {
+        return Err("TASK_NOT_COMPATIBILITY_FAILED".to_string());
+    }
+    let old_task_root = locations
+        .data_root
+        .join("Podcast")
+        .join("Tasks")
+        .join(task_id);
+    let old_spec_path = old_task_root.join("task.json");
+    let spec: Value = serde_json::from_str(
+        &fs::read_to_string(&old_spec_path).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let input = spec
+        .get("input")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?;
+    let relative_path = input
+        .get("relativePath")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?;
+    let input_sha256 = input
+        .get("inputSha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?;
+    let bytes = input
+        .get("bytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?;
+    let old_cache_root = locations
+        .cache_root
+        .join("Podcast")
+        .join("Tasks")
+        .join(task_id);
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
+    }
+    let old_input = old_cache_root.join(relative);
+    let new_task_id = uuid::Uuid::new_v4().simple().to_string();
+    let publish = spec
+        .get("publish")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?;
+    let revision = publish
+        .get("revision")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
+        .checked_add(1)
+        .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+    let compatibility = PodcastCompatibility {
+        input_sha256: input_sha256.to_string(),
+        pipeline_version: spec["compatibility"]["pipelineVersion"]
+            .as_str()
+            .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
+            .to_string(),
+        engine_version: spec["compatibility"]["engineVersion"]
+            .as_str()
+            .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
+            .to_string(),
+        config_hash: spec["compatibility"]["configHash"]
+            .as_str()
+            .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
+            .to_string(),
+        model_hash: spec["compatibility"]["modelHash"]
+            .as_str()
+            .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
+            .to_string(),
+    };
+    let result = (|| {
+        let verified =
+            copy_verified_input(&old_input, locations, &new_task_id, input_sha256, bytes)?;
+        let mut new_spec = spec.clone();
+        new_spec["taskId"] = Value::String(new_task_id.clone());
+        new_spec["input"]["relativePath"] = Value::String(verified.relative_path);
+        new_spec["publish"]["revision"] = json!(revision);
+        new_spec["publish"]["incomingRelativePath"] =
+            Value::String(format!(".incoming/{new_task_id}"));
+        let new_task_root = locations
+            .data_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(&new_task_id);
+        fs::create_dir_all(&new_task_root).map_err(|error| error.to_string())?;
+        let data = serde_json::to_vec_pretty(&new_spec).map_err(|error| error.to_string())?;
+        crate::atomic_file::write(&new_task_root.join("task.json"), &data)?;
+        set_podcast_recovery_compatibility(locations, &new_task_id, compatibility)?;
+        let file_name = old_input
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?;
+        let file = PodcastFilePreview {
+            path: old_input.to_string_lossy().into_owned(),
+            file_name,
+            bytes,
+            duration_seconds: input
+                .get("durationSeconds")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+            input_sha256: input_sha256.to_string(),
+            source_id: snapshot.source_id.clone().unwrap_or_default(),
+            book_id: snapshot.book_id.clone().unwrap_or_default(),
+            duplicate_book_id: None,
+        };
+        let event = tasks::queued_event(new_task_id.clone(), &file, bytes);
+        control.persist_task_event(&event)?;
+        Ok(event.snapshot)
+    })();
+    if result.is_err() {
+        let _ = discard_podcast_task_at(locations, &new_task_id);
+        let new_task_root = locations
+            .data_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(&new_task_id);
+        let _ = fs::remove_dir_all(new_task_root);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{copy_verified_input, preview_podcast_files_at, PodcastPreviewOptions};
+    use super::{
+        copy_verified_input, preview_podcast_files_at, restart_incompatible_task_at,
+        PodcastPreviewOptions,
+    };
     use crate::cache::read_podcast_recovery;
+    use crate::control::ControlDb;
     use crate::storage::StorageLocations;
+    use crate::tasks::{
+        LifecycleState, ProgressMode, RequiredAction, TaskErrorCode, TaskEvent, TaskKind,
+        TaskOutcome, TaskProgress, TaskSnapshot,
+    };
+    use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::PathBuf;
@@ -459,6 +614,115 @@ mod tests {
                 .expect("recovery metadata must exist")
                 .lease_held
         );
+        fs::remove_dir_all(root).expect("fixture must be removed");
+    }
+
+    #[test]
+    fn incompatible_restart_creates_fresh_cache_and_next_revision() {
+        let (root, locations) = fixture("restart");
+        let old_task_root = locations
+            .data_root
+            .join("Podcast")
+            .join("Tasks")
+            .join("task-old");
+        let old_cache_root = locations
+            .cache_root
+            .join("Podcast")
+            .join("Tasks")
+            .join("task-old");
+        fs::create_dir_all(&old_task_root).expect("old task root must exist");
+        fs::create_dir_all(old_cache_root.join("input")).expect("old input root must exist");
+        fs::create_dir_all(old_cache_root.join("chunks")).expect("old chunks root must exist");
+        let input = b"restart-audio";
+        fs::write(old_cache_root.join("input").join("sample.mp3"), input)
+            .expect("old input must write");
+        fs::write(old_cache_root.join("chunks").join("old.bin"), b"old chunk")
+            .expect("old chunk must write");
+        let input_sha256 = format!("{:x}", Sha256::digest(input));
+        fs::write(
+            old_task_root.join("task.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "taskId": "task-old",
+                "input": {"relativePath": "input/sample.mp3", "inputSha256": input_sha256, "bytes": input.len(), "durationSeconds": 2.0},
+                "compatibility": {"pipelineVersion": "pipeline-1", "engineVersion": "engine-1", "configHash": "config-1", "modelHash": "model-1"},
+                "publish": {"bookId": "podcast:book", "sourceId": "source", "revision": 1, "incomingRelativePath": ".incoming/task-old"}
+            }))
+            .expect("task spec must serialize"),
+        )
+        .expect("task spec must write");
+        let now = chrono::Utc::now().to_rfc3339();
+        let snapshot = TaskSnapshot {
+            id: "task-old".to_string(),
+            kind: TaskKind::Podcast,
+            revision: 1,
+            last_sequence: 1,
+            lifecycle_state: LifecycleState::Terminal,
+            outcome: TaskOutcome::Failed,
+            required_action: RequiredAction::None,
+            progress: TaskProgress {
+                mode: ProgressMode::Determinate,
+                percent: Some(12.0),
+                completed_units: None,
+                total_units: None,
+                label: None,
+            },
+            error_code: Some(TaskErrorCode::PipelineIncompatible),
+            error_message: Some("incompatible".to_string()),
+            engine_stage: "recovery_check".to_string(),
+            engine_status: "exited".to_string(),
+            recoverable: true,
+            can_pause: false,
+            can_resume: false,
+            can_retry: true,
+            can_cancel: false,
+            book_id: Some("podcast:book".to_string()),
+            source_id: Some("source".to_string()),
+            cache_lease_bytes: input.len() as u64,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: snapshot.id.clone(),
+            sequence: 1,
+            revision: 1,
+            event_type: "worker_failed".to_string(),
+            snapshot,
+            created_at: now,
+        };
+        let mut control =
+            ControlDb::open(&root.join("control.db")).expect("control database must open");
+        control
+            .persist_task_event(&event)
+            .expect("failed task must persist");
+
+        let restarted = restart_incompatible_task_at(&mut control, &locations, "task-old")
+            .expect("restart must create a new revision");
+        assert_ne!(restarted.id, "task-old");
+        assert_eq!(restarted.revision, 1);
+        assert_eq!(restarted.lifecycle_state, LifecycleState::Queued);
+        let new_root = locations
+            .cache_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(&restarted.id);
+        assert!(new_root.join("input").join("sample.mp3").is_file());
+        assert!(!new_root.join("chunks").join("old.bin").exists());
+        let new_spec: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(
+                locations
+                    .data_root
+                    .join("Podcast")
+                    .join("Tasks")
+                    .join(&restarted.id)
+                    .join("task.json"),
+            )
+            .expect("new task spec must exist"),
+        )
+        .expect("new task spec must parse");
+        assert_eq!(new_spec["publish"]["revision"], 2);
+        drop(control);
         fs::remove_dir_all(root).expect("fixture must be removed");
     }
 }

@@ -522,6 +522,9 @@ impl ControlDb {
         stream: &str,
         line: &str,
     ) -> Result<Option<TaskEvent>, String> {
+        if !matches!(stream, "stdout" | "stderr") {
+            return Err("INVALID_WORKER_STREAM".to_string());
+        }
         let Some(mut snapshot) = self.task_snapshot(task_id)? else {
             return Err("TASK_NOT_FOUND".to_string());
         };
@@ -593,7 +596,7 @@ impl ControlDb {
         snapshot.error_code = if success {
             None
         } else {
-            Some(TaskErrorCode::Unknown)
+            worker_error_code(message).or(Some(TaskErrorCode::Unknown))
         };
         snapshot.error_message = message.map(|value| value.trim().chars().take(500).collect());
         snapshot.engine_stage = if success {
@@ -716,6 +719,19 @@ fn worker_stage(line: &str) -> String {
         }
     }
     "working".to_string()
+}
+
+fn worker_error_code(message: Option<&str>) -> Option<TaskErrorCode> {
+    let raw = message?;
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    match value.get("errorCode")?.as_str()? {
+        "INPUT_CHANGED" => Some(TaskErrorCode::InputChanged),
+        "PIPELINE_INCOMPATIBLE" => Some(TaskErrorCode::PipelineIncompatible),
+        "MODEL_INCOMPATIBLE" => Some(TaskErrorCode::ModelIncompatible),
+        "CONFIG_INCOMPATIBLE" => Some(TaskErrorCode::ConfigIncompatible),
+        "ENGINE_UNAVAILABLE" => Some(TaskErrorCode::EngineUnavailable),
+        _ => None,
+    }
 }
 
 fn is_active_task(state: &LifecycleState) -> bool {

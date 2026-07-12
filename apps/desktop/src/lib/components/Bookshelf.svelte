@@ -19,6 +19,7 @@
 	export let onOpenTemporary: (path: string) => void;
 	export let onLaunchTool: (tool: 'zhihu' | 'podcast') => void;
 	export let onStartTask: (taskId: string) => void;
+	export let onRestartTask: (taskId: string) => void;
 	export let onChooseLibrary: () => void;
 	export let onOpenTrash: () => void;
 	export let onRemoveBook: (bookId: string, title: string, chapterCount: number) => void;
@@ -282,6 +283,11 @@
 							{#if task.kind === 'podcast' && task.lifecycleState === 'queued'}
 								<button type="button" class="task-start" on:click={() => onStartTask(task.id)}>
 									开始
+								</button>
+							{/if}
+							{#if task.kind === 'podcast' && task.lifecycleState === 'terminal' && task.outcome === 'failed' && ['INPUT_CHANGED', 'PIPELINE_INCOMPATIBLE', 'MODEL_INCOMPATIBLE', 'CONFIG_INCOMPATIBLE'].includes(task.errorCode ?? '')}
+								<button type="button" class="task-start" on:click={() => onRestartTask(task.id)}>
+									新 revision
 								</button>
 							{/if}
 						</div>

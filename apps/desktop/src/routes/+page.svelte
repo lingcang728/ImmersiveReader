@@ -982,6 +982,16 @@
 		}
 	}
 
+	async function restartPodcastTask(taskId: string) {
+		try {
+			await invoke("restart_podcast_task", { taskId });
+			showAppNotice("已创建新的 Podcast revision");
+			await refreshAcquisitionSnapshot();
+		} catch (error) {
+			showAppNotice(`无法重新开始播客任务：${String(error)}`);
+		}
+	}
+
 	async function refreshTrash(): Promise<void> {
 		trashLoading = true;
 		try {
@@ -3781,6 +3791,7 @@
 				onOpenTemporary={(path) => void openFile(path)}
 				onLaunchTool={(tool) => void launchCompanionTool(tool)}
 				onStartTask={(taskId) => void startPodcastTask(taskId)}
+				onRestartTask={(taskId) => void restartPodcastTask(taskId)}
 				onChooseLibrary={() => void chooseLibraryRoot()}
 				onOpenTrash={openTrashPanel}
 				onRemoveBook={(bookId, title, chapterCount) =>

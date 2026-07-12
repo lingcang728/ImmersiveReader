@@ -17,7 +17,11 @@ use uuid::Uuid;
 const COMMAND_NAME: &str = "add_podcast_files";
 pub const TASK_EVENT_NAME: &str = "acquisition://task-event";
 
-fn queued_event(task_id: String, file: &super::PodcastFilePreview, cache_bytes: u64) -> TaskEvent {
+pub(crate) fn queued_event(
+    task_id: String,
+    file: &super::PodcastFilePreview,
+    cache_bytes: u64,
+) -> TaskEvent {
     let now = chrono::Utc::now().to_rfc3339();
     let snapshot = TaskSnapshot {
         id: task_id,
