@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 15:52（Asia/Shanghai）
+更新时间：2026-07-12 15:53（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -153,13 +153,19 @@
   - 源码与安装 runtime 均实际验证 `/health=200`、缺失/旧认证 `401`、正确 Bearer `200`；QA 进程已清理。
   - `ship:dev` 通过；开发 EXE `2026-07-12 15:50:56`，SHA-256 `0842D41B19E16ADFBB5E1282996199276D936D85316D7042F42AE527681993B9`；正式 EXE、正式数据和 Markdown 文件关联未改动。
 
+### 11. Sidecar token 生命周期
+
+- [x] sidecar token 每次启动随机生成、只存在内存，不写磁盘或备份。
+  - 实现与审计证据：`c1ef6c5 feat(runtime): enforce sidecar bearer HTTP`；Rust UUID v4 在每次 launch 前生成，Child 环境和 ToolManager 内存 descriptor 是唯一运行时承载面。
+  - ToolManager snapshot 序列化不包含 token；READY JSON、数据库、日志、备份和静态文件不写 token。Zhihu fragment 在 API 初始化前用 `history.replaceState` 移除，query/旧 header 认证路径拒绝。
+  - `git grep` 持久化审计无 token write/append/backup/serialization 路径；源码与安装 runtime Bearer 冒烟、完整 Rust/Node/Python 验证和 `ship:dev` 均通过。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
 
 ### A. 最高优先级：让 queued 任务真正执行
 
-- [ ] sidecar token 每次启动随机生成、只存在内存，不写磁盘或备份。
 - [ ] 引擎异常退出时把相关任务持久化为 interrupted，不继续显示 running。
 - [ ] 实现统一托盘与安全退出：保留 lease；`退出并清理` 只允许明确的 cancel_and_discard。
 
@@ -271,4 +277,4 @@
 
 ## 下一项推荐执行
 
-继续“A. 最高优先级”：完成 sidecar token 生命周期审计，确认每次启动随机生成且只存在内存，不写磁盘或备份；随后处理引擎异常退出的 interrupted 持久化。暂不自动运行桌面长音频、暂不调用付费 API。完成后立即更新并勾选本文件对应条目。
+继续“A. 最高优先级”：处理引擎异常退出，把相关任务持久化为 `interrupted` 并停止显示 `running`。暂不自动运行桌面长音频、暂不调用付费 API。完成后立即更新并勾选本文件对应条目。
