@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 21:12（Asia/Shanghai）
+更新时间：2026-07-12 21:16（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`106991e test(zhihu): add isolated qa run preparation`
+- 当前产品 commit：`08332d5 security(desktop): tighten runtime capabilities and csp`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 21:05:17`
-- 最新开发 EXE SHA-256：`37CD2417B7286820A61D21E3ADD877659F0D988E543C4037491F2E53CDA0F95E`
+- 最新开发 EXE 时间：`2026-07-12 21:14:12`
+- 最新开发 EXE SHA-256：`2112B0DC61997891F4A93B9837BF79A12EDEAA947AFF96A7D0BC70BE54293F8E`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -401,7 +401,10 @@
 - [ ] 新 Podcast/知乎流程自动测试与短样本 QA 全部通过后，暂停等待“删除旧前端”独立授权。
 - [ ] 获准后删除 Podcast 旧 GUI/PowerShell 托盘打包入口。
 - [ ] 获准后删除知乎旧控制台打包入口。
-- [ ] 收紧 Tauri CSP、capabilities、通用 `fs:default` 和 `opener:default`。
+- [x] 收紧 Tauri CSP、capabilities、通用 `fs:default` 和 `opener:default`。
+  - 实现 commit：`08332d5 security(desktop): tighten runtime capabilities and csp`。
+  - `tauri.conf.json` 设置显式 CSP，允许受控 Tauri IPC、loopback Reader、asset/data/blob 图片和显式外链；main capability 移除 `fs:default`/`opener:default`，只保留 `dialog:allow-open` 与 `opener:allow-open-url`。
+  - `scripts\verify.ps1` 通过；开发安装启动/停止 QA PID `84624`，停止后残留开发进程 0；正式 EXE 与 Markdown 关联未变。
 - [ ] 所有文件访问经过受控 Rust 命令；外部打开只允许显式来源 http/https 链接。
 
 ### G. QA、发布与安装
