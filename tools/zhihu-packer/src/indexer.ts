@@ -20,6 +20,23 @@ export interface ScrapedIndexItem {
   questionUrl?: string;
 }
 
+export function selectIndexItems(
+  items: readonly ScrapedIndexItem[],
+  topN: number | null,
+  sortBy: 'time' | 'vote'
+): ScrapedIndexItem[] {
+  const sorted = [...items].sort((a, b) => {
+    const primary =
+      sortBy === 'vote' ? b.voteupCount - a.voteupCount : b.createdTime - a.createdTime;
+    if (primary !== 0) return primary;
+    const secondary =
+      sortBy === 'vote' ? b.createdTime - a.createdTime : b.voteupCount - a.voteupCount;
+    if (secondary !== 0) return secondary;
+    return a.id.localeCompare(b.id);
+  });
+  return topN === null ? sorted : sorted.slice(0, Math.max(0, topN));
+}
+
 /**
  * 从页面 SSR 注入的 #js-initialData (Hydration JSON) 中解析首屏的回答/文章索引。
  *

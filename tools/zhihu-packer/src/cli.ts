@@ -8,7 +8,7 @@ import { logger, sanitizeFilename } from './utils.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import { createTask, runTask } from './scheduler.js';
-import { scrapePeopleIndex } from './indexer.js';
+import { scrapePeopleIndex, selectIndexItems } from './indexer.js';
 import { startServer } from './server.js';
 import { resolveArchiveOutputDir } from './runtime-paths.js';
 
@@ -182,28 +182,20 @@ taskCmd
           context = await getBrowserContext(true);
           const page = await context.newPage();
           const scrapedIndexes = [];
-          const topN = options.topN || null;
-
           if (options.types === 'answers' || options.types === 'all') {
-            const answers = await scrapePeopleIndex(page, peopleId, 'answers', topN);
+            const answers = await scrapePeopleIndex(page, peopleId, 'answers', null);
             scrapedIndexes.push(...answers);
           }
           if (options.types === 'articles' || options.types === 'all') {
-            const articles = await scrapePeopleIndex(page, peopleId, 'articles', topN);
+            const articles = await scrapePeopleIndex(page, peopleId, 'articles', null);
             scrapedIndexes.push(...articles);
           }
 
           logger.info('=== 扫描结果预览 (前 20 条) ===');
           logger.info(`总发现条目: ${scrapedIndexes.length}`);
           
-          // 根据排序规则预览排序
-          if (options.sort === 'vote') {
-            scrapedIndexes.sort((a, b) => b.voteupCount - a.voteupCount);
-          } else {
-            scrapedIndexes.sort((a, b) => b.createdTime - a.createdTime);
-          }
-          
-          const previewItems = scrapedIndexes.slice(0, 20);
+          const selectedIndexes = selectIndexItems(scrapedIndexes, options.topN, options.sort);
+          const previewItems = selectedIndexes.slice(0, 20);
           previewItems.forEach((item, index) => {
             const typeStr = item.type === 'answer' ? '回答' : '文章';
             const dateStr = new Date(item.createdTime * 1000).toLocaleDateString();
@@ -211,8 +203,8 @@ taskCmd
             logger.info(`    URL: ${item.url}`);
           });
 
-          if (scrapedIndexes.length > 20) {
-            logger.info(`... 以及另外 ${scrapedIndexes.length - 20} 个条目`);
+          if (selectedIndexes.length > 20) {
+            logger.info(`... 以及另外 ${selectedIndexes.length - 20} 个条目`);
           }
           logger.info('=======================');
           process.exitCode = 0;

@@ -1,5 +1,5 @@
 import { getBrowserContext, closeBrowserContext, syncCookiesToObscuraStorage } from './browser.js';
-import { scrapePeopleIndex, ScrapedIndexItem } from './indexer.js';
+import { scrapePeopleIndex, ScrapedIndexItem, selectIndexItems } from './indexer.js';
 import { scrapeAnswer, scrapeArticle, writeMarkdownFile } from './extractor.js';
 import { 
   saveTask, 
@@ -206,10 +206,9 @@ async function runTaskInternal(taskId: string) {
       saveTask({ id: taskId, index_status: 'running' });
       
       const scrapedIndexes: ScrapedIndexItem[] = [];
-      const topN = task.top_n;
 
       if (task.item_types === 'answers' || task.item_types === 'all') {
-        const answers = await scrapePeopleIndex(page, task.author_id, 'answers', topN);
+        const answers = await scrapePeopleIndex(page, task.author_id, 'answers', null);
         scrapedIndexes.push(...answers);
       }
 
@@ -217,7 +216,7 @@ async function runTaskInternal(taskId: string) {
       if (checkIsPaused(taskId)) return;
 
       if (task.item_types === 'articles' || task.item_types === 'all') {
-        const articles = await scrapePeopleIndex(page, task.author_id, 'articles', topN);
+        const articles = await scrapePeopleIndex(page, task.author_id, 'articles', null);
         scrapedIndexes.push(...articles);
       }
 
@@ -229,9 +228,10 @@ async function runTaskInternal(taskId: string) {
 
       // 获取并更新作者名
       const authorName = scrapedIndexes[0].authorName || '未知作者';
+      const selectedIndexes = selectIndexItems(scrapedIndexes, task.top_n, task.sort_by);
 
       // 用单个事务替换索引，避免半写入后被误认为索引完成。
-      replaceTaskIndex(taskId, authorName, scrapedIndexes);
+      replaceTaskIndex(taskId, authorName, selectedIndexes);
       taskItems = getTaskItems(taskId);
       emitProgress(taskId, 'running', `列表扫描完毕。共发现 ${taskItems.length} 个条目，开始消费正文队列...`);
     } else {
