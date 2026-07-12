@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 21:59（Asia/Shanghai）
+更新时间：2026-07-12 22:06（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`b451822 feat(tasks): show structured event log`
+- 当前产品 commit：`111041d feat(settings): show storage usage and open roots`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 21:57:16`
-- 最新开发 EXE SHA-256：`07DA7EDCD1FFF7F6F8B8ADB46383A3193FD1DD685C7A6B4CD6412B8C5FF03FD5`
+- 最新开发 EXE 时间：`2026-07-12 22:03:47`
+- 最新开发 EXE SHA-256：`7A579831E8D47252C49C0E568095ECAA3E69D85041FAE68911573F10CA0AB3E6`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -438,12 +438,15 @@
   - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。
 - [ ] 实现书目详情、provenance、revision、来源链接和任务记录。
 - [ ] 完成设置页：Library/Data/Cache/Logs/Backups 路径、大小、打开目录、安全清理、备份、凭据、迁移和恢复状态。
-  - 已接入受管路径展示、路径复制、安全缓存清理、只读迁移 preview、发布恢复检查和 Credential Manager 状态；目录打开、大小、备份与完整恢复状态仍未完成。
+  - 已接入受管路径展示、路径大小、固定根目录打开、路径复制、安全缓存清理、只读迁移 preview、发布恢复检查和 Credential Manager 状态；备份操作与完整 migration recovery 状态仍未完成。
 - [x] 实现 DeepSeek 配置/删除 UI，永不显示 Key。
   - `SettingsPanel.svelte` 提供密码输入、Credential Manager 写入/删除和仅显示 configured 状态，不显示 Key；实现 commit：`7eff974 feat(settings): expose local maintenance controls`。
   - 完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 21:42:14`，EXE SHA-256 前 16 位 `FD5EDB16478B591E`，PID `105528` 启动存活并已停止，残留匹配进程 0。
   - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。
-- [ ] 实现缓存占用与可恢复任务空间 UI。
+- [x] 实现缓存占用与可恢复任务空间 UI。
+  - Settings 显示 Library/Data/Cache/Logs/Backups/RuntimeState 受管目录大小；书架任务 rail 显示可恢复任务字节并保留安全清理入口；实现 commit：`111041d feat(settings): show storage usage and open roots`。
+  - Rust 仅允许按当前 channel 打开固定受管目录；完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 22:03:47`，EXE SHA-256 前 16 位 `7A579831E8D47252`，PID `102452` 启动存活并已停止，残留匹配进程 0。
+  - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。
 - [ ] 实现 publish recovery 与 migration recovery 页面。
 
 ### F. 安全收紧与旧前端移除
