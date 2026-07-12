@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 15:33（Asia/Shanghai）
+更新时间：2026-07-12 15:52（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`5913f91 feat(runtime): add sidecar READY handshake`
+- 当前产品 commit：`c1ef6c5 feat(runtime): enforce sidecar bearer HTTP`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 15:31:55`
-- 最新开发 EXE SHA-256：`4D622EC00B4EAD0D977B2141CBEBE285E0C9902AE17C10DD51E3950DA2E8B54A`
+- 最新开发 EXE 时间：`2026-07-12 15:50:56`
+- 最新开发 EXE SHA-256：`0842D41B19E16ADFBB5E1282996199276D936D85316D7042F42AE527681993B9`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 74、知乎 19、Podcast 21；Podcast quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、桌面 Rust 77、知乎 20、Podcast 22；Podcast quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -142,13 +142,23 @@
   - `ship:dev` 通过；开发 EXE `2026-07-12 15:31:55`，SHA-256 `4D622EC00B4EAD0D977B2141CBEBE285E0C9902AE17C10DD51E3950DA2E8B54A`；正式 EXE、正式数据和 Markdown 文件关联未改动。
   - 为完整验证修复未安装 PyAV 时的 WAV 时长 fallback，独立 commit：`4995301 fix(podcast): add stdlib wav duration fallback`。
 
+### 10. Sidecar 异步 HTTP、超时与 Bearer 鉴权
+
+- [x] Rust 使用异步 HTTP 与连接/读取/总超时；除 `/health` 外全部 Bearer token 鉴权。
+  - 实现 commit：`c1ef6c5 feat(runtime): enforce sidecar bearer HTTP`。
+  - Rust reqwest 使用 5 秒连接、10 秒读取、15 秒总超时；READY 后先检查 `/health`，再带 Bearer 请求 `/api/status`，失败时关闭 Job 并回收 Child。
+  - Zhihu/Podcast `/api` 均拒绝缺失 Bearer、旧 `X-Zhihu-Packer-Token` 和 query token；`/health` 保持无认证。Zhihu 前端 API、流式事件和下载均改为 Bearer。
+  - 内存 token 不写磁盘或备份；Zhihu UI 只通过 URL fragment 接收 token，历史 URL/query token 不再作为认证路径。
+  - `cargo test --lib` 77 项、`cargo check --all-targets`、严格 changed-file hygiene checker、`cargo fmt` 和 `scripts\verify.ps1` 全部通过；Zhihu 20 项、Podcast 22 项和 quick validation 通过。
+  - 源码与安装 runtime 均实际验证 `/health=200`、缺失/旧认证 `401`、正确 Bearer `200`；QA 进程已清理。
+  - `ship:dev` 通过；开发 EXE `2026-07-12 15:50:56`，SHA-256 `0842D41B19E16ADFBB5E1282996199276D936D85316D7042F42AE527681993B9`；正式 EXE、正式数据和 Markdown 文件关联未改动。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
 
 ### A. 最高优先级：让 queued 任务真正执行
 
-- [ ] Rust 使用异步 HTTP 与连接/读取/总超时；除 `/health` 外全部 Bearer token 鉴权。
 - [ ] sidecar token 每次启动随机生成、只存在内存，不写磁盘或备份。
 - [ ] 引擎异常退出时把相关任务持久化为 interrupted，不继续显示 running。
 - [ ] 实现统一托盘与安全退出：保留 lease；`退出并清理` 只允许明确的 cancel_and_discard。
@@ -261,4 +271,4 @@
 
 ## 下一项推荐执行
 
-继续“A. 最高优先级”：实现 Rust 异步 HTTP 连接/读取/总超时，并让除 `/health` 外的 sidecar API 全部使用 Bearer token 鉴权。暂不自动运行桌面长音频、暂不调用付费 API。完成后立即更新并勾选本文件对应条目。
+继续“A. 最高优先级”：完成 sidecar token 生命周期审计，确认每次启动随机生成且只存在内存，不写磁盘或备份；随后处理引擎异常退出的 interrupted 持久化。暂不自动运行桌面长音频、暂不调用付费 API。完成后立即更新并勾选本文件对应条目。
