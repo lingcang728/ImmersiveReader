@@ -4,6 +4,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(windows)]
+fn sidecar_stdout() -> Stdio {
+    Stdio::piped()
+}
+
+#[cfg(not(windows))]
+fn sidecar_stdout() -> Stdio {
+    Stdio::null()
+}
+
 pub(super) struct ToolPaths {
     executable: PathBuf,
     script: PathBuf,
@@ -19,7 +29,7 @@ pub(super) fn tool_paths(runtime_root: &Path, kind: ToolKind) -> ToolPaths {
         },
         ToolKind::Podcast => ToolPaths {
             executable: runtime_root.join(r"podcast\python\python.exe"),
-            script: runtime_root.join(r"podcast\app\scripts\run_with_gui.py"),
+            script: runtime_root.join(r"podcast\app\scripts\sidecar_server.py"),
             working_directory: runtime_root.join(r"podcast\app"),
         },
     }
@@ -49,6 +59,7 @@ pub(super) fn command_for(
     runtime_root: &Path,
     settings: &AppSettings,
     kind: ToolKind,
+    token: &str,
 ) -> Result<Command, String> {
     let paths = tool_paths(runtime_root, kind);
     require_runtime(&paths)?;
@@ -57,8 +68,11 @@ pub(super) fn command_for(
         .arg(&paths.script)
         .current_dir(&paths.working_directory)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(sidecar_stdout())
         .stderr(Stdio::null());
+    command
+        .env("IMMERSIVE_SIDECAR_PORT", "0")
+        .env("IMMERSIVE_SIDECAR_TOKEN", token);
     match kind {
         ToolKind::Zhihu => {
             let data_root = crate::settings::local_runtime_data().join("zhihu");
@@ -71,6 +85,7 @@ pub(super) fn command_for(
                 )
                 .env("IMMERSIVE_ZHIHU_DB", data_root.join("zhihu-packer.db"))
                 .env("IMMERSIVE_ZHIHU_PROFILE", data_root.join("browser-profile"))
+                .env("ZHIHU_PACKER_TOKEN", token)
                 .env(
                     "IMMERSIVE_CHROMIUM_EXECUTABLE",
                     runtime_root.join(r"zhihu\chromium\msedge.exe"),
@@ -113,7 +128,7 @@ mod tests {
         assert_eq!(zhihu.executable, root.join(r"zhihu\node\node.exe"));
         assert_eq!(
             podcast.script,
-            root.join(r"podcast\app\scripts\run_with_gui.py")
+            root.join(r"podcast\app\scripts\sidecar_server.py")
         );
     }
 }

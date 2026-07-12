@@ -7,14 +7,18 @@ import * as fs from 'fs';
 import { exec } from 'child_process';
 import { randomBytes } from 'crypto';
 import { resolveArchiveOutputDir } from './runtime-paths.js';
+import { resolveSidecarPort, writeReady } from './sidecar-protocol.js';
 
 const app = express();
-const PORT = 3000;
 const HOST = '127.0.0.1';
 const localToken = process.env.ZHIHU_PACKER_TOKEN || randomBytes(24).toString('hex');
 const localHosts = new Set(['127.0.0.1', 'localhost', '::1']);
 
 app.use(express.json());
+
+app.get('/health', (_req, res) => {
+  res.json({ engine: 'zhihu', status: 'ok' });
+});
 
 function parseHost(hostHeader: string | undefined): string {
   return (hostHeader || '').split(':')[0].replace(/^\[|\]$/g, '').toLowerCase();
@@ -322,15 +326,22 @@ app.get('/api/download', requireLocalToken, async (req, res) => {
 });
 
 export function startServer(port = 3000) {
-  try {
-    resetRunningTasks();
-  } catch (err: any) {
-    logger.error(`启动时重置残留任务状态失败: ${err.message}`);
-  }
-  app.listen(port, HOST, () => {
-    logger.info(`Web 控制台已成功启动。控制面板: http://${HOST}:${port}`);
+  const server = app.listen(port, HOST, () => {
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      logger.error('无法读取 sidecar 动态端口。');
+      return;
+    }
+    writeReady('zhihu', process.pid, address.port);
+    try {
+      resetRunningTasks();
+    } catch (err: any) {
+      logger.error(`启动时重置残留任务状态失败: ${err.message}`);
+    }
+    logger.info(`Web 控制台已成功启动。控制面板: http://${HOST}:${address.port}`);
     logger.info(`本地控制令牌已启用。令牌不会写入前端静态文件，只通过同源 /api/config 获取。`);
   });
+  return server;
 }
 
 import { fileURLToPath } from 'url';
@@ -340,5 +351,5 @@ const isMain = process.argv[1] && (
   process.argv[1].endsWith('server.js')
 );
 if (isMain) {
-  startServer(PORT);
+  startServer(resolveSidecarPort());
 }

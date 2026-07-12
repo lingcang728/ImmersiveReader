@@ -3,14 +3,19 @@ use serde::Serialize;
 #[cfg(not(windows))]
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 mod launcher;
+#[cfg(windows)]
+mod ready;
 #[cfg(windows)]
 mod tool_manager;
 
 #[cfg(windows)]
 use crate::job_object::JobObject;
 use launcher::{command_for, require_runtime, tool_paths};
+#[cfg(windows)]
+use ready::wait_for_ready;
 #[cfg(windows)]
 use tool_manager::{EngineHealth, ManagedProcess, ProcessDescriptor, ToolManager};
 
@@ -57,13 +62,12 @@ impl ToolKind {
             Self::Podcast => "podcast",
         }
     }
+}
 
-    const fn url(self) -> Option<&'static str> {
-        match self {
-            Self::Zhihu => Some("http://127.0.0.1:3000"),
-            Self::Podcast => None,
-        }
-    }
+fn tool_url(kind: ToolKind, port: Option<u16>) -> Option<String> {
+    port.map(|port| match kind {
+        ToolKind::Zhihu | ToolKind::Podcast => format!("http://127.0.0.1:{port}"),
+    })
 }
 
 fn action_for(tool: &str) -> Result<ToolKind, String> {
@@ -110,19 +114,21 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
     let kind = action_for(tool)?;
     let runtime_root = crate::settings::runtime_root()?;
     let key = kind.key();
-    let url = kind.url();
+    let token = uuid::Uuid::new_v4().simple().to_string();
     #[cfg(windows)]
     let mut manager = TOOL_MANAGER
         .get_or_init(|| Mutex::new(ToolManager::default()))
         .lock()
         .map_err(|_| "Tool process state is unavailable".to_string())?;
     #[cfg(windows)]
-    if manager.is_running(key)? {
-        return Ok(ToolLaunch {
-            tool: key.to_string(),
-            message: "工具已在本次应用会话中启动。".to_string(),
-            url: url.map(str::to_string),
-        });
+    if let Some(snapshot) = manager.refresh(key)? {
+        if snapshot.exit_status.is_none() {
+            return Ok(ToolLaunch {
+                tool: key.to_string(),
+                message: "工具已在本次应用会话中启动。".to_string(),
+                url: tool_url(kind, snapshot.port),
+            });
+        }
     }
     #[cfg(not(windows))]
     let launches = LAUNCHED.get_or_init(|| Mutex::new(HashSet::new()));
@@ -135,24 +141,34 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
         return Ok(ToolLaunch {
             tool: key.to_string(),
             message: "工具已在本次应用会话中启动。".to_string(),
-            url: url.map(str::to_string),
+            url: None,
         });
     }
 
-    let mut command = command_for(&runtime_root, settings, kind)?;
+    let mut command = command_for(&runtime_root, settings, kind, &token)?;
     #[cfg(windows)]
-    {
-        let (child, job) = JobObject::spawn_suspended(&mut command)?;
+    let ready = {
+        let (mut child, job) = JobObject::spawn_suspended(&mut command)?;
+        let ready = match wait_for_ready(&mut child, key, Duration::from_secs(15)) {
+            Ok((ready, _reader)) => ready,
+            Err(error) => {
+                drop(job);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         let descriptor = ProcessDescriptor {
             engine: key.to_string(),
-            port: None,
-            protocol_version: None,
-            token: uuid::Uuid::new_v4().simple().to_string(),
+            port: Some(ready.port),
+            protocol_version: Some(ready.protocol_version),
+            token,
             started_at: chrono::Utc::now().to_rfc3339(),
-            health: EngineHealth::Starting,
+            health: EngineHealth::Ready,
         };
         manager.insert(ManagedProcess::new(child, job, descriptor))?;
-    }
+        ready
+    };
     #[cfg(not(windows))]
     {
         command.spawn().map_err(|error| error.to_string())?;
@@ -165,7 +181,10 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
             ToolKind::Podcast => "播客转写窗口正在启动。",
         }
         .to_string(),
-        url: url.map(str::to_string),
+        #[cfg(windows)]
+        url: tool_url(kind, Some(ready.port)),
+        #[cfg(not(windows))]
+        url: None,
     })
 }
 

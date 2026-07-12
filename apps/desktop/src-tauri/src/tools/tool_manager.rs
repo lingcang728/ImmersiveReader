@@ -6,7 +6,7 @@ use std::process::{Child, ExitStatus};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum EngineHealth {
-    Starting,
+    Ready,
     Exited,
 }
 
@@ -148,7 +148,7 @@ mod tests {
             protocol_version: Some(1),
             token: "memory-only-secret".to_string(),
             started_at: "2026-07-12T06:30:00Z".to_string(),
-            health: EngineHealth::Starting,
+            health: EngineHealth::Ready,
         };
         let process = ManagedProcess::new(child, job, descriptor);
         let mut manager = ToolManager::default();

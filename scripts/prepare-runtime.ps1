@@ -82,7 +82,7 @@ if ($RefreshApps) {
 $required = @(
     (Join-Path $zhihuSource 'dist\server.js'),
     (Join-Path $zhihuSource 'node_modules'),
-    (Join-Path $podcastAppSource 'scripts\run_with_gui.py'),
+    (Join-Path $podcastAppSource 'scripts\sidecar_server.py'),
     $podcastSitePackages,
     $podcastModels,
     (Join-Path $PythonRoot 'python.exe'),
