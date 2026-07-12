@@ -54,6 +54,12 @@ test. It does not waive any independent authorization gate in the V3 plan.
   API budget authorization gate.
 - [x] Embed continuous reading in the Tauri main window, revoke closed reader
   sessions, and stop the daily reading flow from opening the system browser.
+- [x] Turn an approved Podcast preview into persisted queued tasks, write a
+  schema-versioned TaskSpec and five-field recovery compatibility record, and
+  replay completed request IDs without recopying input.
+- [x] Persist queued task snapshots/events before broadcasting
+  `acquisition://task-event`; budget rejection and duplicate reuse create no
+  cache task.
 
 ## In progress
 
@@ -67,12 +73,13 @@ test. It does not waive any independent authorization gate in the V3 plan.
 
 ## Remaining product work
 
-- [ ] Emit persisted task events from Rust to the frontend and complete all
-  remaining mutating commands with expectedRevision/requestId.
+- [ ] Subscribe the frontend to persisted Rust task events, recover sequence
+  gaps from snapshots, and complete remaining mutating commands with
+  expectedRevision/requestId.
 - [ ] Add suspended sidecar spawning, ToolManager ownership, authenticated async
   IPC, READY protocol validation, crash mapping, and one unified tray.
-- [ ] Finish Podcast TaskSpec creation, compatibility recovery, pause/cancel
-  semantics, deduplication revisions, task launch, and publishing.
+- [ ] Finish Podcast engine launch, compatibility resume decisions,
+  pause/cancel semantics, revision publication, and result opening.
 - [ ] Finish Zhihu staging publication, archive revision replacement, login
   mediation, and the main-window acquisition flow.
 - [ ] Build the unified shell, acquisition pages, task/event panels, settings,
@@ -99,11 +106,13 @@ test. It does not waive any independent authorization gate in the V3 plan.
 
 ## Latest verification
 
-- `scripts\verify.ps1`: passed on 2026-07-12 after the continuous-reader integration.
+- `scripts\verify.ps1`: passed on 2026-07-12 after queued Podcast task creation.
 - Desktop TypeScript tests: 35 passed.
-- Desktop Rust tests: 59 passed.
+- Desktop Rust tests: 63 passed.
 - Zhihu tests: 17 passed.
 - Podcast tests with the managed runtime Python: 19 passed.
 - Podcast quick validation: passed.
 - Development EXE from commit `3976b67`: built at `2026-07-12 09:21:01`,
   SHA-256 `221CEE3FD2AC9285FA039BF2484CB0D695EF79A88DB7383727BDF9FB84874F85`.
+- Development EXE from commit `b2eaa56`: built at `2026-07-12 09:43:28`,
+  SHA-256 `8CC5B23FA4ECC05DA4B891F264AE01A2726D4E74A3DC327D408AF0B4B7D45B41`.
