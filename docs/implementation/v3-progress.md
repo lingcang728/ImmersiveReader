@@ -60,6 +60,9 @@ test. It does not waive any independent authorization gate in the V3 plan.
 - [x] Persist queued task snapshots/events before broadcasting
   `acquisition://task-event`; budget rejection and duplicate reuse create no
   cache task.
+- [x] Subscribe the main window to Rust task events, recover sequence gaps and
+  focus/visibility resumes from the authoritative snapshot, and show a compact
+  unified task rail with structured state and recoverable cache usage.
 
 ## In progress
 
@@ -73,8 +76,7 @@ test. It does not waive any independent authorization gate in the V3 plan.
 
 ## Remaining product work
 
-- [ ] Subscribe the frontend to persisted Rust task events, recover sequence
-  gaps from snapshots, and complete remaining mutating commands with
+- [ ] Complete task controls and the remaining mutating commands with
   expectedRevision/requestId.
 - [ ] Add suspended sidecar spawning, ToolManager ownership, authenticated async
   IPC, READY protocol validation, crash mapping, and one unified tray.
@@ -106,8 +108,8 @@ test. It does not waive any independent authorization gate in the V3 plan.
 
 ## Latest verification
 
-- `scripts\verify.ps1`: passed on 2026-07-12 after queued Podcast task creation.
-- Desktop TypeScript tests: 35 passed.
+- `scripts\verify.ps1`: passed on 2026-07-12 after frontend task synchronization.
+- Desktop TypeScript tests: 38 passed.
 - Desktop Rust tests: 63 passed.
 - Zhihu tests: 17 passed.
 - Podcast tests with the managed runtime Python: 19 passed.
@@ -116,3 +118,5 @@ test. It does not waive any independent authorization gate in the V3 plan.
   SHA-256 `221CEE3FD2AC9285FA039BF2484CB0D695EF79A88DB7383727BDF9FB84874F85`.
 - Development EXE from commit `b2eaa56`: built at `2026-07-12 09:43:28`,
   SHA-256 `8CC5B23FA4ECC05DA4B891F264AE01A2726D4E74A3DC327D408AF0B4B7D45B41`.
+- Development EXE from commit `74cece5`: built at `2026-07-12 09:50:55`,
+  SHA-256 `77FAA3A57AB9C4ED9BE9B2926D45C722A04D51BB7FE2040B81A356AD5B2EE783`.
