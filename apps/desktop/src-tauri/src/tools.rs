@@ -98,6 +98,27 @@ pub(crate) fn recover_stale_engine_instances() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub(crate) fn stop_all() -> Result<(), String> {
+    let mut manager = TOOL_MANAGER
+        .get_or_init(|| Mutex::new(ToolManager::default()))
+        .lock()
+        .map_err(|_| "Tool process state is unavailable".to_string())?;
+    manager.clear();
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn stop_all() -> Result<(), String> {
+    if let Some(launches) = LAUNCHED.get() {
+        launches
+            .lock()
+            .map_err(|_| "Tool launch state is unavailable".to_string())?
+            .clear();
+    }
+    Ok(())
+}
+
 #[cfg(not(windows))]
 pub(crate) fn recover_stale_engine_instances() -> Result<(), String> {
     Ok(())

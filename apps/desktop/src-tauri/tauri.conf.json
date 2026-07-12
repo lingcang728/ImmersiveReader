@@ -10,6 +10,10 @@
     "frontendDist": "../build"
   },
   "app": {
+    "trayIcon": {
+      "iconPath": "icons/icon.ico",
+      "tooltip": "沉浸阅读"
+    },
     "windows": [
       {
         "title": "沉浸阅读",

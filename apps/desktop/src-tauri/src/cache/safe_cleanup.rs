@@ -140,6 +140,40 @@ fn remove_managed_path(locations: &StorageLocations, path: &Path) -> Result<(u64
     Ok(metrics)
 }
 
+pub fn discard_podcast_task_at(
+    locations: &StorageLocations,
+    task_id: &str,
+) -> Result<(u64, u64), String> {
+    validate_task_id(task_id)?;
+    let cache_path = locations
+        .cache_root
+        .join("Podcast")
+        .join("Tasks")
+        .join(task_id);
+    let metrics = remove_managed_path(locations, &cache_path)?;
+    let recovery = locations
+        .data_root
+        .join("Podcast")
+        .join("Tasks")
+        .join(task_id)
+        .join("recovery.json");
+    if recovery.exists() {
+        let data_root =
+            fs::canonicalize(&locations.data_root).map_err(|error| error.to_string())?;
+        let parent = recovery
+            .parent()
+            .ok_or_else(|| "Invalid Podcast recovery path".to_string())?;
+        if parent.exists() {
+            let canonical_parent = fs::canonicalize(parent).map_err(|error| error.to_string())?;
+            if !canonical_parent.starts_with(&data_root) {
+                return Err("Podcast recovery path is outside the managed Data root".to_string());
+            }
+        }
+        fs::remove_file(recovery).map_err(|error| error.to_string())?;
+    }
+    Ok(metrics)
+}
+
 fn cleanup_podcast_task(
     locations: &StorageLocations,
     task_id: &str,

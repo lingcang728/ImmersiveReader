@@ -321,3 +321,47 @@ fn stale_running_engine_is_recovered_after_reopen() {
     drop(reopened);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
+
+#[test]
+fn cancel_active_tasks_marks_them_cancelled_and_is_idempotent() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-cancel-discard-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    database
+        .persist_task_event(&task_event(1, 1))
+        .expect("running task must persist");
+
+    let podcast_ids = database
+        .cancel_active_tasks()
+        .expect("active tasks must be cancelled");
+    assert_eq!(podcast_ids, vec!["podcast-1".to_string()]);
+    let snapshot = database
+        .task_snapshot("podcast-1")
+        .expect("snapshot must load")
+        .expect("snapshot must exist");
+    assert_eq!(snapshot.lifecycle_state, LifecycleState::Terminal);
+    assert_eq!(snapshot.outcome, TaskOutcome::Cancelled);
+    assert_eq!(snapshot.error_code, Some(TaskErrorCode::CancelledByUser));
+    assert!(!snapshot.recoverable);
+    assert!(!snapshot.can_retry);
+    assert_eq!(
+        database
+            .cancel_active_tasks()
+            .expect("second cleanup must be idempotent"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        database
+            .task_events("podcast-1", 1, 100)
+            .expect("events must load")
+            .len(),
+        1
+    );
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}

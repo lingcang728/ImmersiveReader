@@ -4,7 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 
 mod safe_cleanup;
-pub use safe_cleanup::{clear_safe_cache_at, CacheCategory, CacheClearResult};
+pub use safe_cleanup::{
+    clear_safe_cache_at, discard_podcast_task_at, CacheCategory, CacheClearResult,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

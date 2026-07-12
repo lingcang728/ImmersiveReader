@@ -1722,44 +1722,45 @@
 		};
 		window.addEventListener("beforeunload", handleBeforeUnload);
 
-		// Intercept window close to save active edit before exit
+		// Closing the window hides it; tray exit explicitly chooses lease-preserving
+		// quit or cancel_and_discard cleanup.
 		let isClosing = false;
+		const finishExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
+			try {
+				await appWindow.hide();
+				if (editingParagraph) {
+					await Promise.race([
+						finishEdit(),
+						new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1200)),
+					]);
+				}
+				await Promise.race([
+					flushSaveState(),
+					new Promise<void>((resolve) => setTimeout(resolve, 500)),
+				]);
+				await closeFlowReader();
+				if (mode === "preserve") {
+					await invoke("quit_app");
+				} else if (mode === "cancel_and_discard") {
+					await invoke("cancel_and_discard");
+				}
+			} catch (err) {
+				console.error("Failed to finish app exit:", err);
+			} finally {
+				isClosing = false;
+			}
+		};
+		const unlistenExit = listen<{ mode?: string }>("request-app-exit", (event) => {
+			if (isClosing) return;
+			isClosing = true;
+			const mode = event.payload?.mode === "cancel_and_discard" ? "cancel_and_discard" : "preserve";
+			void finishExit(mode);
+		});
 		const unlistenClose = appWindow.onCloseRequested((event) => {
 			if (isClosing) return;
 			event.preventDefault();
 			isClosing = true;
-			void (async () => {
-				try {
-					await appWindow.hide();
-					if (editingParagraph) {
-						// Best effort: never block app exit on save/diff/render edge cases
-						await Promise.race([
-							finishEdit(),
-							new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1200)),
-						]);
-					}
-					await Promise.race([
-						flushSaveState(),
-						new Promise<void>((resolve) => setTimeout(resolve, 500)),
-					]);
-					await closeFlowReader();
-				} catch (err) {
-					console.error("Failed to finish edit on close:", err);
-				} finally {
-					// Exit from the Rust side so the process terminates even if window APIs misbehave.
-					try {
-						await invoke("quit_app");
-					} catch (err) {
-						console.error("Failed to quit via backend:", err);
-						try {
-							await appWindow.destroy();
-						} catch (destroyErr) {
-							isClosing = false;
-							console.error("Failed to destroy window:", destroyErr);
-						}
-					}
-				}
-			})();
+			void finishExit("hide");
 		});
 
 		void refreshLibrary();
@@ -1817,6 +1818,7 @@
 			unlistenDrop.then(fn => fn());
 			unlistenOpenFile.then(fn => fn());
 			unlistenTaskEvents.then(fn => fn());
+			unlistenExit.then(fn => fn());
 			unlistenClose.then(fn => fn());
 			window.removeEventListener("focus", refreshTasksOnResume);
 			document.removeEventListener("visibilitychange", refreshTasksOnResume);

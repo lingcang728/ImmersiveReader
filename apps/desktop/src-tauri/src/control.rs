@@ -461,6 +461,27 @@ impl ControlDb {
         Ok(recovered)
     }
 
+    pub fn cancel_active_tasks(&mut self) -> Result<Vec<String>, String> {
+        let snapshots = self.task_snapshots(None)?;
+        let mut podcast_task_ids = Vec::new();
+        for snapshot in snapshots {
+            if !is_active_task(&snapshot.lifecycle_state) {
+                continue;
+            }
+            if matches!(snapshot.kind, TaskKind::Podcast) {
+                podcast_task_ids.push(snapshot.id.clone());
+            }
+            self.persist_task_event(&cancelled_event(snapshot)?)?;
+        }
+        self.connection
+            .execute(
+                "UPDATE engine_instances SET status = 'stopped', updated_at = ?1 WHERE status = 'running'",
+                [chrono::Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(podcast_task_ids)
+    }
+
     pub fn task_events(
         &self,
         task_id: &str,
@@ -557,6 +578,39 @@ fn interrupted_event(
         sequence: snapshot.last_sequence,
         revision: snapshot.revision,
         event_type: "engine_crashed".to_string(),
+        snapshot,
+        created_at: now,
+    })
+}
+
+fn cancelled_event(mut snapshot: TaskSnapshot) -> Result<TaskEvent, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    snapshot.last_sequence = snapshot
+        .last_sequence
+        .checked_add(1)
+        .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+    snapshot.revision = snapshot
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+    snapshot.lifecycle_state = LifecycleState::Terminal;
+    snapshot.outcome = TaskOutcome::Cancelled;
+    snapshot.error_code = Some(TaskErrorCode::CancelledByUser);
+    snapshot.error_message = Some("用户明确选择退出并清理，任务及其缓存已丢弃。".to_string());
+    snapshot.engine_stage = "cancelled".to_string();
+    snapshot.engine_status = "stopped".to_string();
+    snapshot.recoverable = false;
+    snapshot.can_pause = false;
+    snapshot.can_resume = false;
+    snapshot.can_retry = false;
+    snapshot.can_cancel = false;
+    snapshot.updated_at = now.clone();
+    Ok(TaskEvent {
+        schema_version: 1,
+        task_id: snapshot.id.clone(),
+        sequence: snapshot.last_sequence,
+        revision: snapshot.revision,
+        event_type: "cancelled_and_discarded".to_string(),
         snapshot,
         created_at: now,
     })

@@ -5,6 +5,8 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+#[cfg(desktop)]
+use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::{Emitter, Manager};
 mod atomic_file;
 pub mod cache;
@@ -631,6 +633,19 @@ fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+#[tauri::command]
+fn cancel_and_discard(app: tauri::AppHandle) -> Result<(), String> {
+    tools::stop_all()?;
+    let locations = storage::StorageLocations::current()?;
+    let mut control = control::ControlDb::open_current()?;
+    let podcast_task_ids = control.cancel_active_tasks()?;
+    for task_id in podcast_task_ids {
+        cache::discard_podcast_task_at(&locations, &task_id)?;
+    }
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -689,6 +704,7 @@ pub fn run() {
             start_reader_session,
             close_reader_session,
             quit_app,
+            cancel_and_discard,
         ])
         .manage(podcast::PodcastPreviewStore::default())
         .manage(reader_server::ReaderServiceState::default())
@@ -701,6 +717,65 @@ pub fn run() {
                     "window.__INITIAL_FILE__ = {};",
                     serde_json::to_string(&file_path).unwrap()
                 ));
+            }
+            #[cfg(desktop)]
+            {
+                let handle = app.handle();
+                let show = MenuItem::with_id(handle, "tray_show", "显示窗口", true, None::<&str>)?;
+                let hide = MenuItem::with_id(handle, "tray_hide", "隐藏窗口", true, None::<&str>)?;
+                let exit = MenuItem::with_id(
+                    handle,
+                    "tray_exit_safe",
+                    "退出（保留任务）",
+                    true,
+                    None::<&str>,
+                )?;
+                let cleanup = MenuItem::with_id(
+                    handle,
+                    "tray_exit_cleanup",
+                    "退出并清理（取消任务）",
+                    true,
+                    None::<&str>,
+                )?;
+                let menu = MenuBuilder::new(handle)
+                    .items(&[&show, &hide])
+                    .separator()
+                    .items(&[&exit, &cleanup])
+                    .build()?;
+                if let Some(tray) = handle.tray_by_id("main") {
+                    tray.set_menu(Some(menu))?;
+                }
+                app.on_menu_event(|app, event| match event.id().as_ref() {
+                    "tray_show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "tray_hide" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
+                    "tray_exit_safe" => {
+                        let _ = app.emit(
+                            "request-app-exit",
+                            serde_json::json!({
+                                "mode": "preserve"
+                            }),
+                        );
+                    }
+                    "tray_exit_cleanup" => {
+                        let _ = app.emit(
+                            "request-app-exit",
+                            serde_json::json!({
+                                "mode": "cancel_and_discard"
+                            }),
+                        );
+                    }
+                    _ => {}
+                });
             }
             Ok(())
         })

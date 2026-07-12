@@ -91,6 +91,10 @@ pub(super) struct ToolManager {
 }
 
 impl ToolManager {
+    pub(super) fn clear(&mut self) {
+        self.processes.clear();
+    }
+
     pub(super) fn insert(&mut self, process: ManagedProcess) -> Result<(), String> {
         if process.descriptor.token.is_empty() {
             return Err("ENGINE_TOKEN_REQUIRED".to_string());
