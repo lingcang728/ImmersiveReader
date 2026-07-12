@@ -8,6 +8,16 @@ pub use safe_cleanup::{clear_safe_cache_at, CacheCategory, CacheClearResult};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PodcastCompatibility {
+    pub input_sha256: String,
+    pub pipeline_version: String,
+    pub engine_version: String,
+    pub config_hash: String,
+    pub model_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PodcastRecovery {
     pub schema_version: u32,
     pub task_id: String,
@@ -18,6 +28,8 @@ pub struct PodcastRecovery {
     pub last_compatible_checkpoint: Option<String>,
     pub bytes: u64,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<PodcastCompatibility>,
 }
 
 impl PodcastRecovery {
@@ -32,6 +44,7 @@ impl PodcastRecovery {
             last_compatible_checkpoint: None,
             bytes,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            compatibility: None,
         }
     }
 }
@@ -55,6 +68,19 @@ pub fn release_podcast_cache_lease(
 ) -> Result<PodcastRecovery, String> {
     validate_task_id(task_id)?;
     let recovery = PodcastRecovery::new(task_id, false, "completed", false, bytes);
+    write_podcast_recovery(locations, &recovery)?;
+    Ok(recovery)
+}
+
+pub fn set_podcast_recovery_compatibility(
+    locations: &StorageLocations,
+    task_id: &str,
+    compatibility: PodcastCompatibility,
+) -> Result<PodcastRecovery, String> {
+    let mut recovery = read_podcast_recovery(locations, task_id)?
+        .ok_or_else(|| "Podcast recovery metadata is missing".to_string())?;
+    recovery.compatibility = Some(compatibility);
+    recovery.updated_at = chrono::Utc::now().to_rfc3339();
     write_podcast_recovery(locations, &recovery)?;
     Ok(recovery)
 }

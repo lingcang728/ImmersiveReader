@@ -9,9 +9,18 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod tasks;
+pub use tasks::*;
+mod task_contract;
+mod task_request;
+pub use task_request::{
+    AddPodcastFilesRequest, DuplicatePolicy, PodcastAddResult, PodcastBudgetApproval,
+    PodcastPreviewStore,
+};
+
 const ESTIMATE_VERSION: &str = "podcast-budget-v1-deepseek-v4-2026-07-12";
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodcastPreviewOptions {
     pub translate: bool,

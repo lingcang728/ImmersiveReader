@@ -474,10 +474,38 @@ fn get_task_events(
 fn preview_podcast_files(
     paths: Vec<String>,
     options: podcast::PodcastPreviewOptions,
+    state: tauri::State<'_, podcast::PodcastPreviewStore>,
 ) -> Result<podcast::PodcastFilesPreview, String> {
     let mut locations = storage::StorageLocations::current()?;
     locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
-    podcast::preview_podcast_files_at(&paths, &options, &locations)
+    let preview = podcast::preview_podcast_files_at(&paths, &options, &locations)?;
+    state.insert(preview.clone(), options)?;
+    Ok(preview)
+}
+
+#[tauri::command]
+fn add_podcast_files(
+    preview_id: String,
+    duplicate_policy: podcast::DuplicatePolicy,
+    budget_approval: Option<podcast::PodcastBudgetApproval>,
+    request_id: String,
+    state: tauri::State<'_, podcast::PodcastPreviewStore>,
+    app: tauri::AppHandle,
+) -> Result<podcast::PodcastAddResult, String> {
+    let mut locations = storage::StorageLocations::current()?;
+    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+    let mut control = control::ControlDb::open_current()?;
+    let request = podcast::AddPodcastFilesRequest {
+        preview_id: &preview_id,
+        duplicate_policy,
+        budget_approval: budget_approval.as_ref(),
+        request_id: &request_id,
+    };
+    podcast::add_podcast_files_at(&state, &mut control, &locations, &request, |event| {
+        if let Err(error) = app.emit(podcast::TASK_EVENT_NAME, event) {
+            eprintln!("Task event broadcast failed after persistence: {error}");
+        }
+    })
 }
 
 #[tauri::command]
@@ -602,6 +630,7 @@ pub fn run() {
             get_acquisition_snapshot,
             get_task_events,
             preview_podcast_files,
+            add_podcast_files,
             scan_library,
             open_book,
             get_book_chapter_path,
@@ -616,6 +645,7 @@ pub fn run() {
             close_reader_session,
             quit_app,
         ])
+        .manage(podcast::PodcastPreviewStore::default())
         .manage(reader_server::ReaderServiceState::default())
         .setup(|app| {
             // Windows: file path passed as CLI argument
