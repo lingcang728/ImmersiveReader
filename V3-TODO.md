@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 22:33（Asia/Shanghai）
+更新时间：2026-07-12 22:38（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`9b1378d feat(settings): add state backup and migration status`
+- 当前产品 commit：`1d45a26 feat(library): add safe source links`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 22:29:33`
-- 最新开发 EXE SHA-256：`5B9E03673723D583CAEBEB3672532C3EE42EAA55F3CEC26F576564006C691B3F`
+- 最新开发 EXE 时间：`2026-07-12 22:34:21`
+- 最新开发 EXE SHA-256：`72CD183F6FAF93FAA1FC38E4662A789F55243F8072DB8662DCC90648A45A578B`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -439,6 +439,7 @@
   - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。
 - [ ] 实现书目详情、provenance、revision、来源链接和任务记录。
   - 书架“详情”对话框已展示 manifest 的 source/sourceId、生成/更新时间、章节列表和当前阅读状态；Rust `open_book` 已校验并返回匹配的 provenance.json（revision、任务 ID、engineVersion、manifest SHA-256）。来源链接与完整任务记录仍待对应数据契约和 UI 接入；实现 commit：`aa1016f feat(library): expose book provenance details`。
+  - 知乎 sourceId 现在可通过受限 `https://www.zhihu.com/people/<id>` 来源按钮打开，并复用既有 HTTP/HTTPS 外链校验；实现 commit：`1d45a26 feat(library): add safe source links`。
   - 书架 Playwright harness 于 `2026-07-12T22:24:19+0800` 通过，覆盖 900×700、1280×800、1440×900 与 ready/loading/empty/unwritable 状态；使用 mock Tauri 数据，未接触正式 Library。
 - [x] 完成设置页：Library/Data/Cache/Logs/Backups 路径、大小、打开目录、安全清理、备份、凭据、迁移和恢复状态。
   - Settings 已接入受管路径展示/大小/固定根目录打开/路径复制、安全缓存清理、只读迁移 preview、发布恢复检查、Credential Manager 状态、排除 Library/Cache/Logs/凭据/Profile 的状态备份和 migration run 状态；实现 commit：`9b1378d feat(settings): add state backup and migration status`。
