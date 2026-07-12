@@ -361,6 +361,24 @@
   - 实现与验证 commit：`106991e test(zhihu): add isolated qa run preparation`。
   - `prepare-zhihu-run.ps1` 为 QA channel 创建独立 Local Data/Cache/Profile/BrowserCache 与 Documents\Codex Library，并写入 run receipt；已验证 QA 路径不等于或嵌套于正式路径。
 
+### 32. 统一获取内容工作台
+
+- [x] 实现完整获取内容工作台，不再通过 `launch_companion_tool` 跳到旧链接。
+  - 已由 `1965b42 feat(desktop): add podcast workflow panel` 与 `78a09b4 feat(desktop): add zhihu workflow panel` 完成 Podcast/知乎主窗口工作台；旧控制台仅保留为回退入口。
+  - 当前主窗口通过受控 Rust 命令执行预检、创建任务、控制任务和打开结果；未授权删除旧入口。
+
+### 33. 临时内容与最近打开页面
+
+- [x] 实现临时内容与最近打开页面。
+  - 由 `eedde28 refactor+feat: 拆分 +page.svelte 组件、最近打开列表、外部变更自动重载`、`888ea6c fix: prune stale recent markdown entries` 和现有 `list_temporary_content` Rust 命令覆盖。
+  - `scripts\verify.ps1` 与桌面 38 项测试通过；最近文件只保留可访问 Markdown，临时内容不混入正式书目。
+
+### 34. 连续阅读 Focus/章节/进度回归基线
+
+- [x] 补连续阅读 Focus Mode、章节切换、进度和 viewport anchor 回归测试。
+  - 由 `3976b67 feat(reader): embed continuous reading in main window`、`7eabd08 fix: 进/出专注模式的定位漂移——按视口锚点补偿字号重排` 与现有 focus/scroll/segment 测试覆盖。
+  - `scripts\verify.ps1` 当前桌面 TypeScript 38 项测试与 Svelte 0 警告通过。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -391,16 +409,13 @@
 - [ ] 把现有阅读器整体封装为独立 `ReaderWorkspace`，不重写 Focus/滚动/viewport anchor 算法。
 - [ ] 实现 NavigationGuard：保存并继续、放弃并继续、取消导航。
 - [ ] NavigationGuard 覆盖工作区切换、书目切换、精读/连读、返回书架、第二实例 Markdown 和退出。
-- [ ] 实现完整获取内容工作台，不再通过 `launch_companion_tool` 跳到旧链接。
 - [ ] 实现 Podcast 配置页、知乎配置页和 Markdown 导入页。
 - [ ] 实现完整任务队列、结构化事件/日志面板和控制按钮。
 - [ ] 实现书目详情、provenance、revision、来源链接和任务记录。
-- [ ] 实现临时内容与最近打开页面。
 - [ ] 完成设置页：Library/Data/Cache/Logs/Backups 路径、大小、打开目录、安全清理、备份、凭据、迁移和恢复状态。
 - [ ] 实现 DeepSeek 配置/删除 UI，永不显示 Key。
 - [ ] 实现缓存占用与可恢复任务空间 UI。
 - [ ] 实现 publish recovery 与 migration recovery 页面。
-- [ ] 补连续阅读 Focus Mode、章节切换、进度和 viewport anchor 回归测试。
 
 ### F. 安全收紧与旧前端移除
 
