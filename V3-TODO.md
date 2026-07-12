@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 21:44（Asia/Shanghai）
+更新时间：2026-07-12 21:54（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,11 +15,11 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`7eff974 feat(settings): expose local maintenance controls`
+- 当前产品 commit：`9186eec fix(reader): add unsaved navigation guard`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 21:42:14`
-- 最新开发 EXE SHA-256：`FD5EDB16478B591EEED9CF80EE307433707B73D707E3ED7E836FBBBBB9CA9A21`
+- 最新开发 EXE 时间：`2026-07-12 21:52:13`
+- 最新开发 EXE SHA-256：`70354B03744DDBA5A6483F3755C7197912505EFD32805E986C66239841285FD1`
 - 最近全仓验证：`scripts\verify.ps1` 通过
 - 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
@@ -423,9 +423,12 @@
 ### E. 统一 Shell、阅读保护与设置
 
 - [ ] 把现有阅读器整体封装为独立 `ReaderWorkspace`，不重写 Focus/滚动/viewport anchor 算法。
-- [ ] 实现 NavigationGuard：保存并继续、放弃并继续、取消导航。
-  - 部分基线已由 `3f0a1dc fix(reader): guard bookshelf navigation during edits` 覆盖：返回书架前先完成当前段落编辑，保存失败则停止导航；三选项 Guard UI 仍未完成。
+- [x] 实现 NavigationGuard：保存并继续、放弃并继续、取消导航。
+  - `+page.svelte` 增加原生 dialog 三选项 Guard；保存失败会取消导航，放弃会恢复编辑前 DOM，取消保持当前编辑；实现 commit：`9186eec fix(reader): add unsaved navigation guard`。
+  - Guard 接入 Markdown 切换、书目/章节切换、返回书架、退出精读和退出应用；完整 `scripts\verify.ps1` 通过，Svelte 0 警告。
+  - `ship:dev` 时间 `2026-07-12 21:52:13`，EXE SHA-256 前 16 位 `70354B03744DDBA5`，PID `104540` 启动存活并已停止，残留匹配进程 0；正式 EXE 与 Markdown 关联未变。
 - [ ] NavigationGuard 覆盖工作区切换、书目切换、精读/连读、返回书架、第二实例 Markdown 和退出。
+  - 已覆盖书目/章节、精读、返回书架、第二实例 `open-file`、外部 Markdown 和退出；连续阅读返回路径仍需接入与交互 QA。
 - [ ] 实现 Podcast 配置页、知乎配置页和 Markdown 导入页。
 - [ ] 实现完整任务队列、结构化事件/日志面板和控制按钮。
 - [ ] 实现书目详情、provenance、revision、来源链接和任务记录。
