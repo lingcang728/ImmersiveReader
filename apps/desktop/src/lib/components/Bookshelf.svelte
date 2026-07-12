@@ -295,9 +295,9 @@
 							{#if task.kind === 'podcast' && task.canCancel}
 								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'cancel', task.revision)}>取消</button>
 							{/if}
-							{#if task.kind === 'podcast' && task.lifecycleState === 'terminal' && task.outcome === 'failed' && ['INPUT_CHANGED', 'PIPELINE_INCOMPATIBLE', 'MODEL_INCOMPATIBLE', 'CONFIG_INCOMPATIBLE'].includes(task.errorCode ?? '')}
+							{#if task.kind === 'podcast' && task.lifecycleState === 'terminal' && task.canRetry && task.requiredAction !== 'approve_budget'}
 								<button type="button" class="task-start" on:click={() => onRestartTask(task.id)}>
-									新 revision
+									重新转写 revision
 								</button>
 							{/if}
 						</div>

@@ -342,16 +342,13 @@ pub fn restart_incompatible_task_at(
     let snapshot = control
         .task_snapshot(task_id)?
         .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
-    if !matches!(
-        snapshot.error_code,
-        Some(
-            crate::tasks::TaskErrorCode::InputChanged
-                | crate::tasks::TaskErrorCode::PipelineIncompatible
-                | crate::tasks::TaskErrorCode::ModelIncompatible
-                | crate::tasks::TaskErrorCode::ConfigIncompatible
+    if !snapshot.can_retry
+        || !matches!(
+            snapshot.lifecycle_state,
+            crate::tasks::LifecycleState::Terminal
         )
-    ) {
-        return Err("TASK_NOT_COMPATIBILITY_FAILED".to_string());
+    {
+        return Err("TASK_NOT_RETRYABLE".to_string());
     }
     let old_task_root = locations
         .data_root
@@ -725,6 +722,8 @@ mod tests {
         )
         .expect("new task spec must parse");
         assert_eq!(new_spec["publish"]["revision"], 2);
+        assert_eq!(new_spec["publish"]["bookId"], "podcast:book");
+        assert_eq!(new_spec["publish"]["sourceId"], "source");
         drop(control);
         fs::remove_dir_all(root).expect("fixture must be removed");
     }
