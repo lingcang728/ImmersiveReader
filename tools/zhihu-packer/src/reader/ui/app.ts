@@ -798,6 +798,26 @@ export class ReaderApp {
   /**
    * 节流的滚动处理函数，用于计算视口高亮文章
    */
+  /**
+   * Post a private, versioned activity message to the parent ImmersiveReader shell.
+   * Throttled by the existing scroll RAF so high-frequency scroll does not spam.
+   */
+  private notifyParentReadingActivity() {
+    if (window.parent === window) return;
+    try {
+      window.parent.postMessage(
+        {
+          source: 'immersive-reader-flow',
+          version: 1,
+          type: 'reading-activity',
+        },
+        '*'
+      );
+    } catch {
+      // Cross-origin edge cases — ignore.
+    }
+  }
+
   private handleScrollThrottled() {
     this.updateProgressBar();
 
@@ -1088,6 +1108,9 @@ export class ReaderApp {
         this.scrollRaf = window.requestAnimationFrame(() => {
           this.scrollRaf = null;
           this.handleScrollThrottled();
+          // Notify parent desktop shell (cross-origin iframe) of reading activity.
+          // Parent owns the top-edge chrome hotzone; we only report activity.
+          this.notifyParentReadingActivity();
         });
       }
     }, { passive: true });

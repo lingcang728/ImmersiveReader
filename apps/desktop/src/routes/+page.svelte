@@ -49,6 +49,8 @@
 	import PodcastWorkflow from "$lib/components/PodcastWorkflow.svelte";
 	import ZhihuWorkflow from "$lib/components/ZhihuWorkflow.svelte";
 	import TrashPanel from "$lib/components/TrashPanel.svelte";
+	import WindowChrome from "$lib/components/WindowChrome.svelte";
+	import WindowResizeHandles from "$lib/components/WindowResizeHandles.svelte";
 	import type { TrashDeleteResult, TrashItem } from "$lib/trash/types";
 	import {
 		chapterTocItems,
@@ -60,6 +62,19 @@
 		type BookSummary,
 		type TemporaryItem,
 	} from "$lib/library/books";
+	import {
+		CHROME_HIDE_DELAY_MS,
+		CHROME_TOP_EDGE_PX,
+		createChromeState,
+		deriveChromeSurface,
+		isFlowReadingActivityMessage,
+		isImmersiveSurface,
+		isOverlaySurface,
+		isReadingActivityKey,
+		reduceChrome,
+		type ChromeEvent,
+		type ChromeState,
+	} from "$lib/chrome/state";
 
 	let contentEl: HTMLElement;
 	let tocItems: TocItem[] = [];
@@ -556,28 +571,90 @@
 		lightboxScale = Math.min(6, Math.max(0.2, lightboxScale * factor));
 	}
 
-	// Reading mode can hide chrome; temporary / non-book files keep a discoverable back control.
-	let topbarRevealed = false;
-	let topbarHideTimer: ReturnType<typeof setTimeout> | null = null;
-	// true when opened as a single file (not library book chapter)
+	// true when opened as a single file (not library book chapter) — label only, not chrome pin.
 	let isTemporaryReading = false;
 
-	function revealTopbar() {
-		if (topbarHideTimer) {
-			clearTimeout(topbarHideTimer);
-			topbarHideTimer = null;
+	// Unified immersion chrome: window bar + context toolbar share chromeVisible.
+	let chromeState: ChromeState = createChromeState("library");
+	let chromeHideTimer: ReturnType<typeof setTimeout> | null = null;
+	let chromeTitle = "沉浸阅读";
+	let flowIframeEl: HTMLIFrameElement | null = null;
+
+	function clearChromeHideTimer() {
+		if (chromeHideTimer) {
+			clearTimeout(chromeHideTimer);
+			chromeHideTimer = null;
 		}
-		topbarRevealed = true;
 	}
 
-	function scheduleTopbarHide() {
-		// Keep chrome visible for temporary files so "back to shelf" is always findable.
-		if (isTemporaryReading || !activeBook) return;
-		if (topbarHideTimer) clearTimeout(topbarHideTimer);
-		topbarHideTimer = setTimeout(() => {
-			topbarRevealed = false;
-			topbarHideTimer = null;
-		}, 350);
+	function dispatchChrome(event: ChromeEvent) {
+		chromeState = reduceChrome(chromeState, event);
+		if (chromeState.shouldCancelHide) {
+			clearChromeHideTimer();
+		}
+		if (chromeState.shouldScheduleHide && !chromeHideTimer) {
+			chromeHideTimer = setTimeout(() => {
+				chromeHideTimer = null;
+				dispatchChrome({ type: "apply-hide" });
+			}, CHROME_HIDE_DELAY_MS);
+		}
+	}
+
+	function syncChromeSurface() {
+		const surface = deriveChromeSurface({
+			flowActive: !!flowReaderSession,
+			focusMode: $focusMode,
+			fileOpen: !!$currentFilePath,
+			workflowOpen: podcastWorkflowOpen || zhihuWorkflowOpen,
+		});
+		if (surface !== chromeState.surface) {
+			dispatchChrome({ type: "enter-surface", surface });
+		}
+	}
+
+	function noteReadingActivity() {
+		if (isImmersiveSurface(chromeState.surface)) {
+			dispatchChrome({ type: "reading-activity" });
+		}
+	}
+
+	function revealChromeFromTopEdge() {
+		dispatchChrome({ type: "top-edge-enter" });
+	}
+
+	function onChromeMouseEnter() {
+		dispatchChrome({ type: "cancel-hide" });
+	}
+
+	function onChromeMouseLeave() {
+		dispatchChrome({ type: "chrome-leave" });
+	}
+
+	function onChromeFocusIn() {
+		dispatchChrome({ type: "chrome-focus" });
+	}
+
+	function onChromeFocusOut(event: FocusEvent) {
+		const next = event.relatedTarget as Node | null;
+		const stack = event.currentTarget as HTMLElement | null;
+		if (stack && next && stack.contains(next)) return;
+		dispatchChrome({ type: "chrome-blur" });
+	}
+
+	$: chromeVisible = chromeState.chromeVisible;
+	$: chromeOverlay = isOverlaySurface(chromeState.surface);
+	$: showMarkdownContext =
+		!!$currentFilePath && !flowReaderSession;
+	$: showFlowContext = !!flowReaderSession;
+	$: showTopEdgeHotzone = isImmersiveSurface(chromeState.surface);
+	$: {
+		// Keep surface in sync with mode flags without fighting explicit dispatches mid-transition.
+		void flowReaderSession;
+		void $focusMode;
+		void $currentFilePath;
+		void podcastWorkflowOpen;
+		void zhihuWorkflowOpen;
+		syncChromeSurface();
 	}
 
 	const FOCUS_ANCHOR_RATIO = 0.5;
@@ -831,8 +908,9 @@
 	}
 
 	function updateWindowTitle(name: string) {
+		chromeTitle = name ? `${name} — 沉浸阅读` : "沉浸阅读";
 		void getCurrentWebviewWindow()
-			.setTitle(name ? `${name} — 沉浸阅读` : "沉浸阅读")
+			.setTitle(chromeTitle)
 			.catch(() => {});
 	}
 
@@ -1240,7 +1318,6 @@
 		activeChapterIndex = -1;
 		preloadedChapter = null;
 		isTemporaryReading = false;
-		topbarRevealed = false;
 		$currentFilePath = "";
 		$markdownSource = "";
 		$renderedHtml = "";
@@ -1540,6 +1617,17 @@
 				return;
 			}
 
+			if (
+				($currentFilePath || flowReaderSession) &&
+				!e.ctrlKey &&
+				!e.metaKey &&
+				!e.altKey &&
+				!isTextInputTarget(e.target) &&
+				isReadingActivityKey(e.key)
+			) {
+				noteReadingActivity();
+			}
+
 			if ($focusMode && !e.ctrlKey && !e.metaKey && !e.altKey && !isTextInputTarget(e.target)) {
 				// Short taps move block-by-block; OS key repeat scrolls continuously.
 				if (e.key === "ArrowUp") {
@@ -1623,6 +1711,7 @@
 			const scrollHeight = contentEl.scrollHeight - contentEl.clientHeight;
 			readingProgress = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
 			if (activeBook && readingProgress >= 0.84) void preloadNextBookChapter();
+			if ($currentFilePath) noteReadingActivity();
 
 			if ($focusMode) {
 				markFocusScrollActive();
@@ -1662,6 +1751,9 @@
 					adjustFontScale(e.deltaY < 0 ? 1 : -1);
 				}
 				return;
+			}
+			if ($currentFilePath || flowReaderSession) {
+				noteReadingActivity();
 			}
 			if (contentEl && activeBook && !$focusMode && e.deltaY > 0) {
 				const remaining = contentEl.scrollHeight - contentEl.clientHeight - contentEl.scrollTop;
@@ -1864,6 +1956,20 @@
 
 		void refreshLibrary();
 
+		const handleFlowReaderMessage = (event: MessageEvent) => {
+			if (!flowReaderSession || !flowIframeEl) return;
+			if (event.source !== flowIframeEl.contentWindow) return;
+			// Local reader sessions are served from 127.0.0.1; accept same-origin and null for file.
+			const allowed =
+				event.origin === "null" ||
+				event.origin.startsWith("http://127.0.0.1") ||
+				event.origin.startsWith("http://localhost");
+			if (!allowed) return;
+			if (!isFlowReadingActivityMessage(event.data)) return;
+			noteReadingActivity();
+		};
+		window.addEventListener("message", handleFlowReaderMessage);
+
 		void loadRecentFiles().then((files) => {
 			recentFiles = files;
 			void loadContinueInfo();
@@ -1924,6 +2030,7 @@
 			window.removeEventListener("keydown", handleKeydown);
 			window.removeEventListener("keyup", handleKeyup);
 			window.removeEventListener("blur", handleWindowBlur);
+			window.removeEventListener("message", handleFlowReaderMessage);
 			contentEl?.removeEventListener("scroll", handleScroll);
 			contentEl?.removeEventListener("wheel", handleWheel);
 			contentEl?.removeEventListener("click", handleContentClick);
@@ -1947,9 +2054,7 @@
 			if (saveStateTimer) {
 				clearTimeout(saveStateTimer);
 			}
-			if (topbarHideTimer) {
-				clearTimeout(topbarHideTimer);
-			}
+			clearChromeHideTimer();
 			if (zoomIndicatorTimer) {
 				clearTimeout(zoomIndicatorTimer);
 			}
@@ -2011,7 +2116,6 @@
 			activeChapterIndex = -1;
 			preloadedChapter = null;
 			isTemporaryReading = true;
-			topbarRevealed = true;
 		} else {
 			isTemporaryReading = false;
 		}
@@ -2041,9 +2145,6 @@
 					? nextFileName
 					: `临时 · ${nextFileName}`
 			);
-			if (isTemporaryReading) {
-				topbarRevealed = true;
-			}
 			$markdownSource = result.content;
 			fileEncoding = result.encoding;
 			$renderedHtml = resolveRenderedHtmlAssets(rendered.html, path);
@@ -3654,8 +3755,11 @@
 	class:focus-key-scroll-active={isFocusKeyScrollActive}
 	class:is-light-theme={isLightTheme}
 	class:editing-in-focus={isEditingInDarkFocus}
+	class:chrome-overlay={chromeOverlay}
 	role="application"
 >
+	<WindowResizeHandles />
+
 	<!-- Reading progress indicator -->
 	{#if $currentFilePath}
 		<div
@@ -3664,128 +3768,176 @@
 		></div>
 	{/if}
 
-	<!-- Reveal zone: book reading can hide chrome; temporary keeps back control visible -->
-	{#if $currentFilePath && !$focusMode && activeBook && !isTemporaryReading}
+	<!-- 10px top-edge hotzone: only way to re-show immersive chrome -->
+	{#if showTopEdgeHotzone}
 		<div
 			class="topbar-hover-zone"
+			style="height: {CHROME_TOP_EDGE_PX}px"
 			role="presentation"
-			on:mouseenter={revealTopbar}
+			on:mouseenter={revealChromeFromTopEdge}
 		></div>
 	{/if}
 
-	<!-- Top bar - always recoverable when a file is open -->
-	<header
-		class="topbar"
-		class:hidden={!$currentFilePath || $focusMode || (!topbarRevealed && !!activeBook && !isTemporaryReading)}
-		class:topbar-pinned={isTemporaryReading || !activeBook}
-		role="toolbar"
-		tabindex="-1"
-		on:mouseenter={revealTopbar}
-		on:mouseleave={scheduleTopbarHide}
+	<!-- Unified chrome: custom window bar + context toolbar share chromeVisible -->
+	<div
+		class="chrome-stack"
+		class:hidden={!chromeVisible}
+		class:overlay={chromeOverlay}
+		aria-hidden={!chromeVisible}
+		inert={!chromeVisible || undefined}
+		on:mouseenter={onChromeMouseEnter}
+		on:mouseleave={onChromeMouseLeave}
+		on:focusin={onChromeFocusIn}
+		on:focusout={onChromeFocusOut}
 	>
-		<div class="topbar-left">
-			{#if $currentFilePath}
-				<!-- Icon-only: avoids clip of “书架” text against window chrome -->
-				<button
-					type="button"
-					class="icon-btn shelf-back"
-					on:click={() => void returnToBookshelf()}
-					title="返回书架"
-					aria-label="返回书架"
-				>
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-						<path
-							d="M15 6L9 12l6 6"
+		<WindowChrome title={chromeTitle} visible={true} overlay={false}>
+			<div slot="actions" class="chrome-extra-actions">
+				{#if !showMarkdownContext && !showFlowContext}
+					<button
+						type="button"
+						class="icon-btn chrome-settings"
+						class:active={$settingsOpen}
+						on:click={() => ($settingsOpen = !$settingsOpen)}
+						title="设置 ({modLabel},)"
+						aria-label="设置"
+						aria-pressed={$settingsOpen}
+					>
+						<svg
+							width="16"
+							height="16"
+							viewBox="0 0 24 24"
+							fill="none"
 							stroke="currentColor"
-							stroke-width="1.85"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-						/>
-					</svg>
-				</button>
-			{/if}
-			{#if fileName}
-				<span class="filename">{isTemporaryReading ? `临时 · ${fileName}` : fileName}</span>
-			{/if}
-		</div>
-		<div class="topbar-right">
-			{#if $currentFilePath}
-				<button
-					class="icon-btn"
-					class:active={$focusMode}
-					on:click={() => void toggleFocusMode(!$focusMode)}
-					title="专注模式 (F11 / Esc)"
-				>
-					<svg
-						width="18"
-						height="18"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="1.5"
+							stroke-width="1.5"
+						>
+							<circle cx="12" cy="12" r="3" />
+							<path
+								d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"
+							/>
+						</svg>
+					</button>
+				{/if}
+			</div>
+		</WindowChrome>
+
+		{#if showMarkdownContext}
+			<header class="topbar context-bar" role="toolbar" aria-label="阅读工具栏">
+				<div class="topbar-left">
+					<button
+						type="button"
+						class="icon-btn shelf-back"
+						on:click={() => void returnToBookshelf()}
+						title="返回书架"
+						aria-label="返回书架"
 					>
-						<circle cx="12" cy="12" r="3" />
-						<path d="M3 12h3M18 12h3M12 3v3M12 18v3" />
-					</svg>
-				</button>
-				<button
-					class="icon-btn"
-					class:active={$tocOpen}
-					on:click={() => ($tocOpen = !$tocOpen)}
-					title="目录 ({modLabel}T)"
-				>
-					<svg
-						width="18"
-						height="18"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="1.5"
+						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+							<path
+								d="M15 6L9 12l6 6"
+								stroke="currentColor"
+								stroke-width="1.85"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							/>
+						</svg>
+					</button>
+					{#if fileName}
+						<span class="filename">{isTemporaryReading ? `临时 · ${fileName}` : fileName}</span>
+					{/if}
+				</div>
+				<div class="topbar-right">
+					<button
+						class="icon-btn"
+						class:active={$focusMode}
+						on:click={() => void toggleFocusMode(!$focusMode)}
+						title="专注模式 (F11 / Esc)"
+						aria-label="专注模式"
+						aria-pressed={$focusMode}
 					>
-						<path d="M4 6h16M4 12h12M4 18h8" />
-					</svg>
-				</button>
-				<button
-					class="icon-btn"
-					class:active={$searchOpen}
-					on:click={() => ($searchOpen = !$searchOpen)}
-					title="搜索 ({modLabel}F)"
-				>
-					<svg
-						width="18"
-						height="18"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="1.5"
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.5"
+						>
+							<circle cx="12" cy="12" r="3" />
+							<path d="M3 12h3M18 12h3M12 3v3M12 18v3" />
+						</svg>
+					</button>
+					<button
+						class="icon-btn"
+						class:active={$tocOpen}
+						on:click={() => ($tocOpen = !$tocOpen)}
+						title="目录 ({modLabel}T)"
+						aria-label="目录"
+						aria-pressed={$tocOpen}
 					>
-						<circle cx="11" cy="11" r="7" />
-						<path d="M21 21l-4.35-4.35" />
-					</svg>
-				</button>
-			{/if}
-			<button
-				class="icon-btn"
-				class:active={$settingsOpen}
-				on:click={() => ($settingsOpen = !$settingsOpen)}
-				title="设置 ({modLabel},)"
-			>
-				<svg
-					width="18"
-					height="18"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="1.5"
-				>
-					<circle cx="12" cy="12" r="3" />
-					<path
-						d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"
-					/>
-				</svg>
-			</button>
-		</div>
-	</header>
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.5"
+						>
+							<path d="M4 6h16M4 12h12M4 18h8" />
+						</svg>
+					</button>
+					<button
+						class="icon-btn"
+						class:active={$searchOpen}
+						on:click={() => ($searchOpen = !$searchOpen)}
+						title="搜索 ({modLabel}F)"
+						aria-label="搜索"
+						aria-pressed={$searchOpen}
+					>
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.5"
+						>
+							<circle cx="11" cy="11" r="7" />
+							<path d="M21 21l-4.35-4.35" />
+						</svg>
+					</button>
+					<button
+						class="icon-btn"
+						class:active={$settingsOpen}
+						on:click={() => ($settingsOpen = !$settingsOpen)}
+						title="设置 ({modLabel},)"
+						aria-label="设置"
+						aria-pressed={$settingsOpen}
+					>
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.5"
+						>
+							<circle cx="12" cy="12" r="3" />
+							<path
+								d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"
+							/>
+						</svg>
+					</button>
+				</div>
+			</header>
+		{:else if showFlowContext}
+			<header class="flow-context-bar context-bar" role="toolbar" aria-label="连续阅读">
+				<div>
+					<strong>连续阅读</strong>
+					<span>所有章节留在沉浸阅读窗口内</span>
+				</div>
+				<button type="button" on:click={() => void closeFlowReader()}>返回书库</button>
+			</header>
+		{/if}
+	</div>
 
 	<!-- Search bar -->
 	<SearchBar
@@ -3824,14 +3976,8 @@
 	<ReaderWorkspace flowActive={!!flowReaderSession} bind:element={contentEl}>
 		{#if flowReaderSession}
 			<section class="flow-reader-workspace" aria-label="连续阅读">
-				<header>
-					<div>
-						<strong>连续阅读</strong>
-						<span>所有章节留在沉浸阅读窗口内</span>
-					</div>
-					<button type="button" on:click={() => void closeFlowReader()}>返回书库</button>
-				</header>
 				<iframe
+					bind:this={flowIframeEl}
 					title="连续阅读器"
 					src={flowReaderSession.url}
 					sandbox="allow-same-origin allow-scripts allow-forms"
@@ -4128,6 +4274,39 @@
 		position: relative;
 	}
 
+	/* ========== Unified chrome stack ========== */
+	.chrome-stack {
+		display: flex;
+		flex-direction: column;
+		flex: none;
+		z-index: 55;
+		background: var(--bg);
+		transition:
+			transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1),
+			opacity 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+		will-change: transform, opacity;
+	}
+
+	.chrome-stack.overlay {
+		position: fixed;
+		top: 0;
+		left: 0;
+		right: 0;
+	}
+
+	.chrome-stack.hidden {
+		transform: translateY(-100%);
+		opacity: 0;
+		pointer-events: none;
+		visibility: hidden;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.chrome-stack {
+			transition: none;
+		}
+	}
+
 	/* ========== Progress line ========== */
 	.progress-line {
 		position: fixed;
@@ -4136,36 +4315,32 @@
 		height: 2px;
 		background: var(--link);
 		opacity: 0.3;
-		z-index: 100;
+		z-index: 80;
 		transition: width 0.1s linear;
 	}
 
-	/* ========== Top bar ========== */
-	/* Overlay bar: content flows underneath, so hiding it while reading leaves
-	   nothing but text on screen. */
-	.topbar {
-		position: fixed;
-		top: 0;
-		left: 0;
-		right: 0;
+	/* ========== Context toolbar under window chrome ========== */
+	.topbar,
+	.context-bar {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		height: 48px;
+		height: 40px;
 		padding: 0 16px;
 		border-bottom: 1px solid var(--hr);
-		-webkit-app-region: drag;
 		user-select: none;
-		transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0.4s ease;
-		z-index: 50;
 		background: var(--bg);
 	}
 
-	.topbar.hidden {
-		transform: translateY(-100%);
-		opacity: 0;
-		pointer-events: none;
-		visibility: hidden;
+	.chrome-extra-actions {
+		display: flex;
+		align-items: center;
+		margin-right: 2px;
+	}
+
+	.chrome-settings {
+		width: 32px;
+		height: 28px;
 	}
 
 	.shelf-back {
@@ -4189,11 +4364,6 @@
 		background: color-mix(in srgb, var(--link) 14%, var(--bg-secondary));
 	}
 
-	.topbar-pinned {
-		/* temporary / non-book reading keeps chrome discoverable */
-		box-shadow: 0 1px 0 color-mix(in srgb, var(--link) 12%, transparent);
-	}
-
 	.book-seam {
 		display: flex;
 		flex-direction: column;
@@ -4213,16 +4383,13 @@
 		letter-spacing: 0.12em;
 	}
 
-	/* Invisible strip along the top edge; hovering it summons the topbar and
-	   it doubles as a window drag handle. */
+	/* Invisible strip along the top edge; hovering summons chrome (does not drag). */
 	.topbar-hover-zone {
 		position: fixed;
 		top: 0;
 		left: 0;
 		right: 0;
-		height: 14px;
-		z-index: 60;
-		-webkit-app-region: drag;
+		z-index: 65;
 	}
 
 	.topbar-left,
@@ -4230,9 +4397,50 @@
 		display: flex;
 		align-items: center;
 		gap: 4px;
-		-webkit-app-region: no-drag;
 		min-width: 0;
 		overflow: visible;
+	}
+
+	.flow-context-bar {
+		gap: 12px;
+	}
+
+	.flow-context-bar > div {
+		display: flex;
+		align-items: baseline;
+		gap: 10px;
+		min-width: 0;
+	}
+
+	.flow-context-bar strong {
+		font-size: 13px;
+		font-weight: 650;
+	}
+
+	.flow-context-bar span {
+		font-size: 11px;
+		color: var(--text-secondary);
+	}
+
+	.flow-context-bar button {
+		border: 1px solid var(--hr);
+		border-radius: 8px;
+		background: var(--bg-secondary);
+		color: var(--text);
+		padding: 6px 12px;
+		cursor: pointer;
+		font: inherit;
+		font-size: 12px;
+	}
+
+	.flow-context-bar button:hover {
+		border-color: var(--link);
+		color: var(--link);
+	}
+
+	.flow-context-bar button:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: 2px;
 	}
 
 	.filename {
@@ -4289,46 +4497,17 @@
 	}
 
 	/* ========== Main content ========== */
+	/* Flow chrome lives in the overlay stack; iframe fills the workspace. */
 	.flow-reader-workspace {
 		height: 100%;
-		display: grid;
-		grid-template-rows: 52px minmax(0, 1fr);
 		background: var(--bg);
-	}
-	.flow-reader-workspace > header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0 18px;
-		border-bottom: 1px solid var(--hr);
-		background: color-mix(in srgb, var(--bg) 92%, transparent);
-	}
-	.flow-reader-workspace > header div {
-		display: flex;
-		align-items: baseline;
-		gap: 10px;
-	}
-	.flow-reader-workspace > header strong {
-		font-size: 14px;
-		font-weight: 650;
-	}
-	.flow-reader-workspace > header span {
-		font-size: 11px;
-		color: var(--text-secondary);
-	}
-	.flow-reader-workspace > header button {
-		border: 1px solid var(--hr);
-		border-radius: 8px;
-		background: var(--bg-secondary);
-		color: var(--text);
-		padding: 7px 12px;
-		cursor: pointer;
 	}
 	.flow-reader-workspace iframe {
 		width: 100%;
 		height: 100%;
 		border: 0;
 		background: var(--bg);
+		display: block;
 	}
 
 	.article {
