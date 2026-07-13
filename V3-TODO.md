@@ -553,7 +553,9 @@
 
 ### H. 干净 Git 历史与远程
 
-- [ ] 产品、数据、QA 和安装全部通过后创建第二份 pre-force-push bundle并 verify。
+- [x] 产品、数据、QA 和安装全部通过后创建第二份 pre-force-push bundle并 verify。
+  - bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260713-pre-force-push\02-pre-force-push.bundle`，`git bundle verify` 为 complete history，SHA-256 `6E09ABF37156970B09285A1946A9377E0E27CED883C68349C60CADA60A49A711`。
+  - 本清单证据提交后还会创建一份包含最终 `DEV_TIP` 的只读补充 bundle，避免 checklist-only commit 落在回滚边界之外。
 - [ ] 记录执行时 BASE、DEV_TIP、旧 origin/main SHA。
 - [ ] 从 `BASE^{tree}` 创建无父 CLEAN_ROOT，再按顺序重放 `BASE..DEV_TIP` 新 commits。
 - [ ] 生成 CLEAN_TIP 与 `chore(release): package ImmersiveReader 1.1.0`。
