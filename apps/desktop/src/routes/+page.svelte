@@ -919,18 +919,6 @@
 		}
 	}
 
-	async function launchCompanionTool(tool: "zhihu" | "podcast") {
-		try {
-			const result = await invoke<{ message: string; url?: string }>("launch_companion_tool", { tool });
-			showAppNotice(result.message);
-			if (result.url) {
-				setTimeout(() => void openUrl(result.url!).catch(() => {}), 900);
-			}
-		} catch (error) {
-			showAppNotice(`无法启动工具：${String(error)}`);
-		}
-	}
-
 	async function removeLibraryBook(bookId: string, title: string, chapterCount: number) {
 		const ok = window.confirm(
 			`将《${title}》移出书架？\n\n${chapterCount} 篇内容会移到书库 .trash，可手动恢复，不会立刻永久删除。`
@@ -3941,7 +3929,6 @@
 					onRefreshTasks={() => void refreshAcquisitionSnapshot()}
 					onStartTask={(taskId) => void startPodcastTask(taskId)}
 					onOpenResult={(taskId) => void openPodcastTaskResult(taskId)}
-					onFallback={() => void launchCompanionTool('podcast')}
 				/>
 			{/if}
 			{#if zhihuWorkflowOpen}
@@ -3951,7 +3938,6 @@
 					onRefreshTasks={() => void refreshAcquisitionSnapshot()}
 					onStartTask={(taskId, revision) => void startZhihuTask(taskId, revision)}
 					onControlTask={(taskId, action, revision) => void controlZhihuTask(taskId, action, revision)}
-					onFallback={() => void launchCompanionTool('zhihu')}
 				/>
 			{/if}
 		{/if}

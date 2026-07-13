@@ -33,14 +33,6 @@ static LAUNCHED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ToolLaunch {
-    pub tool: String,
-    pub message: String,
-    pub url: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ToolStatus {
     pub tool: String,
     pub state: String,
@@ -69,19 +61,6 @@ impl ToolKind {
             Self::Podcast => "podcast",
         }
     }
-}
-
-fn tool_url(kind: ToolKind, port: Option<u16>, token: Option<&str>) -> Option<String> {
-    if matches!(kind, ToolKind::Podcast) {
-        return None;
-    }
-    let port = port?;
-    let origin = format!("http://127.0.0.1:{port}");
-    Some(
-        token
-            .map(|token| format!("{origin}#immersiveToken={token}"))
-            .unwrap_or(origin),
-    )
 }
 
 fn action_for(tool: &str) -> Result<ToolKind, String> {
@@ -184,7 +163,7 @@ pub fn status(tool: &str) -> Result<ToolStatus, String> {
     })
 }
 
-pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> {
+fn launch(tool: &str, settings: &AppSettings) -> Result<(), String> {
     let kind = action_for(tool)?;
     let runtime_root = crate::settings::runtime_root()?;
     let key = kind.key();
@@ -199,11 +178,7 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
     #[cfg(windows)]
     if let Some(snapshot) = manager.refresh(key)? {
         if snapshot.exit_status.is_none() {
-            return Ok(ToolLaunch {
-                tool: key.to_string(),
-                message: "工具已在本次应用会话中启动。".to_string(),
-                url: tool_url(kind, snapshot.port, manager.token(key)),
-            });
+            return Ok(());
         }
     }
     #[cfg(not(windows))]
@@ -214,16 +189,12 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
         .map_err(|_| "Tool launch state is unavailable".to_string())?;
     #[cfg(not(windows))]
     if guard.contains(key) {
-        return Ok(ToolLaunch {
-            tool: key.to_string(),
-            message: "工具已在本次应用会话中启动。".to_string(),
-            url: None,
-        });
+        return Ok(());
     }
 
     let mut command = command_for(&runtime_root, settings, kind, &token)?;
     #[cfg(windows)]
-    let ready = {
+    let _ready = {
         let (mut child, job) = JobObject::spawn_suspended(&mut command)?;
         let ready = match wait_for_ready(&mut child, key, Duration::from_secs(15)) {
             Ok((ready, _reader)) => ready,
@@ -286,18 +257,7 @@ pub fn launch(tool: &str, settings: &AppSettings) -> Result<ToolLaunch, String> 
         command.spawn().map_err(|error| error.to_string())?;
         guard.insert(key.to_string());
     }
-    Ok(ToolLaunch {
-        tool: key.to_string(),
-        message: match kind {
-            ToolKind::Zhihu => "知乎归档控制台正在启动。",
-            ToolKind::Podcast => "播客转写窗口正在启动。",
-        }
-        .to_string(),
-        #[cfg(windows)]
-        url: tool_url(kind, Some(ready.port), Some(&token)),
-        #[cfg(not(windows))]
-        url: None,
-    })
+    Ok(())
 }
 
 #[cfg(windows)]

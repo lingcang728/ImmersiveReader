@@ -198,9 +198,9 @@ async function waitForRealContent(page: Page): Promise<void> {
   const cookies = await page.context().cookies();
   const loggedIn = cookies.some(c => c.name === 'z_c0');
   if (!loggedIn) {
-    throw new Error('LOGIN_REQUIRED: 无头浏览器未登录（缺少 z_c0 cookie），知乎已不再向未登录客户端返回主页内容。请先运行 npm run login 完成扫码登录后重试。');
+    throw new Error('LOGIN_REQUIRED: 无头浏览器未登录（缺少 z_c0 cookie），知乎已不再向未登录客户端返回主页内容。请在沉浸阅读的知乎获取面板登录后重试。');
   }
-  throw new Error('CAPTCHA_REQUIRED: 触发知乎反爬（zse-ck）拦截，等待后仍未渲染出内容。请运行 npm run login 在有头浏览器中完成人机验证后重试。');
+  throw new Error('CAPTCHA_REQUIRED: 触发知乎反爬（zse-ck）拦截，等待后仍未渲染出内容。请在沉浸阅读的知乎获取面板完成人机验证后重试。');
 }
 
 export async function scrapePeopleIndex(
@@ -292,10 +292,10 @@ export async function scrapePeopleIndex(
 
   const currentUrl = page.url();
   if (currentUrl.includes('signin')) {
-    throw new Error('LOGIN_REQUIRED: 访问个人主页需要登录态，请在终端运行 npm run login 登录。');
+    throw new Error('LOGIN_REQUIRED: 访问个人主页需要登录态，请在沉浸阅读的知乎获取面板登录。');
   }
   if (currentUrl.includes('unhuman') || currentUrl.includes('captcha')) {
-    throw new Error('CAPTCHA_REQUIRED: 访问主页触发了人机验证，请运行 npm run login 完成人机验证。');
+    throw new Error('CAPTCHA_REQUIRED: 访问主页触发了人机验证，请在沉浸阅读的知乎获取面板完成人机验证。');
   }
 
   // 1.4 等待知乎反爬（zse-ck）质询通过并确认渲染出真实内容；
@@ -465,12 +465,12 @@ export async function scrapePeopleIndex(
       };
     }, itemType);
     if (accessState.hasLoginWall) {
-      throw new Error('LOGIN_REQUIRED: 当前知乎会话显示登录页面，登录态缺失或已过期。请重新运行 npm run login 后重试。');
+      throw new Error('LOGIN_REQUIRED: 当前知乎会话显示登录页面，登录态缺失或已过期。请在沉浸阅读的知乎获取面板重新登录后重试。');
     }
     const cookies = await page.context().cookies();
     const loggedIn = cookies.some(cookie => cookie.name === 'z_c0');
     if (!loggedIn) {
-      throw new Error('LOGIN_REQUIRED: 无头浏览器未登录（缺少 z_c0 cookie），知乎未返回任何可归档内容。请先运行 npm run login 完成扫码登录后重试。');
+      throw new Error('LOGIN_REQUIRED: 无头浏览器未登录（缺少 z_c0 cookie），知乎未返回任何可归档内容。请在沉浸阅读的知乎获取面板登录后重试。');
     }
     if (accessState.hasExplicitEmpty) {
       logger.info(`知乎明确返回 ${itemType} 空状态。`);
@@ -486,8 +486,8 @@ export async function scrapePeopleIndex(
       // ignore
     }
     throw new Error(accessState.hasChallenge
-      ? 'CAPTCHA_REQUIRED: 知乎返回了人机验证页面，请重新运行 npm run login 完成验证后重试。'
-      : 'CAPTCHA_REQUIRED: 登录态存在，但知乎未返回可验证的内容索引；请运行 npm run login 在有头浏览器中确认页面后重试。');
+      ? 'CAPTCHA_REQUIRED: 知乎返回了人机验证页面，请在沉浸阅读的知乎获取面板完成验证后重试。'
+      : 'CAPTCHA_REQUIRED: 登录态存在，但知乎未返回可验证的内容索引；请在沉浸阅读的知乎获取面板用有头浏览器确认页面后重试。');
   }
 
   logger.info(`扫描答主 ${peopleId} 列表结束，共发现 ${result.length} 条有效内容`);

@@ -26,7 +26,6 @@
     action: 'pause' | 'resume' | 'cancel',
     revision: number
   ) => void;
-  export let onFallback: () => void;
 
   let peopleId = '';
   let itemTypes: ItemTypes = 'all';
@@ -139,7 +138,6 @@
         <div class="login-actions">
           <button type="button" class="quiet-button" on:click={() => void refreshLoginStatus()}>刷新</button>
           <button type="button" class="quiet-button" on:click={() => void startLogin()}>开始登录</button>
-          <button type="button" class="quiet-button" on:click={onFallback}>打开旧版登录/控制台</button>
         </div>
       </section>
 
@@ -200,7 +198,6 @@
     </div>
 
     <footer class="zhihu-footer">
-      <button type="button" class="quiet-button" on:click={onFallback}>保留并打开旧版控制台</button>
       <div>
         <button type="button" class="quiet-button" on:click={onClose}>稍后处理</button>
         <button type="button" class="primary-button" disabled={busy} on:click={() => void createTask()}>{busy ? '创建中…' : '加入任务队列'}</button>

@@ -276,10 +276,10 @@ export async function scrapeAnswer(page: Page, targetUrl: string): Promise<Extra
   // 检测跳转
   const currentUrl = page.url();
   if (currentUrl.includes('signin')) {
-    throw new Error('LOGIN_REQUIRED: 未登录或登录态失效，无法访问内容。请先运行 npm run login 进行扫码登录。');
+    throw new Error('LOGIN_REQUIRED: 未登录或登录态失效，无法访问内容。请在沉浸阅读的知乎获取面板登录。');
   }
   if (currentUrl.includes('unhuman') || currentUrl.includes('captcha')) {
-    throw new Error('CAPTCHA_REQUIRED: 触发了知乎防爬人机验证。请先运行 npm run login 完成人机验证。');
+    throw new Error('CAPTCHA_REQUIRED: 触发了知乎防爬人机验证。请在沉浸阅读的知乎获取面板完成人机验证。');
   }
 
   // 2. 优先通过 API 拦截结果解析
@@ -490,10 +490,10 @@ export async function scrapeArticle(page: Page, targetUrl: string): Promise<Extr
   // 检测跳转
   const currentUrl = page.url();
   if (currentUrl.includes('signin')) {
-    throw new Error('LOGIN_REQUIRED: 未登录或登录态失效，无法访问内容。请先运行 npm run login 进行扫码登录。');
+    throw new Error('LOGIN_REQUIRED: 未登录或登录态失效，无法访问内容。请在沉浸阅读的知乎获取面板登录。');
   }
   if (currentUrl.includes('unhuman') || currentUrl.includes('captcha')) {
-    throw new Error('CAPTCHA_REQUIRED: 触发了知乎防爬人机验证。请先运行 npm run login 完成人机验证。');
+    throw new Error('CAPTCHA_REQUIRED: 触发了知乎防爬人机验证。请在沉浸阅读的知乎获取面板完成人机验证。');
   }
 
   // 1. API 拦截数据

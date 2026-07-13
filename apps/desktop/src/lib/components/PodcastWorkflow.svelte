@@ -45,7 +45,6 @@
 	export let onRefreshTasks: () => void;
 	export let onStartTask: (taskId: string) => void;
 	export let onOpenResult: (taskId: string) => void;
-	export let onFallback: () => void;
 
 	let selectedPaths: string[] = [];
 	let translate = false;
@@ -286,7 +285,6 @@
 		</div>
 
 		<footer class="podcast-footer">
-			<button type="button" class="quiet-button" on:click={onFallback}>打开旧版 Podcast 工具</button>
 			<div class="footer-actions">
 				<button type="button" class="quiet-button" on:click={onClose}>稍后处理</button>
 				<button type="button" class="secondary-button" disabled={busy || selectedPaths.length === 0} on:click={() => void runPreview()}>{busy && !preview ? '预检中…' : '运行预检'}</button>

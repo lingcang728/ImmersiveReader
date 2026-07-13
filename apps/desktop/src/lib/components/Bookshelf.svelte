@@ -247,7 +247,7 @@
 						<button type="button" on:click={() => runAcquire(onOpenFile)}>
 							临时打开
 						</button>
-						<div class="menu-hint">播客可在这里预检并排队；旧版工具仍可从流程页回退。</div>
+						<div class="menu-hint">播客可在这里预检、确认预算并加入统一任务队列。</div>
 					</div>
 				{/if}
 			</div>

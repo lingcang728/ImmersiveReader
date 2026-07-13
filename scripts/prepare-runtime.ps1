@@ -14,8 +14,10 @@ Set-StrictMode -Version Latest
 
 $root = Get-RepoRoot
 $runtime = Join-Path $root 'runtime'
+$fullRuntime = [IO.Path]::GetFullPath($runtime)
 $zhihuSource = Join-Path $root 'tools\zhihu-packer'
 $podcastAppSource = Join-Path $root 'tools\podcast-transcriber'
+$contractsSource = Join-Path $root 'packages\contracts'
 $podcastSitePackages = if ($PodcastSource) {
     Join-Path $PodcastSource '.venv\Lib\site-packages'
 } else {
@@ -61,20 +63,42 @@ function Copy-Tree {
     }
 }
 
+function Reset-AppDestination {
+    param([Parameter(Mandatory)][string]$Destination)
+
+    $fullDestination = [IO.Path]::GetFullPath($Destination)
+    $allowedRoot = $fullRuntime.TrimEnd('\') + [IO.Path]::DirectorySeparatorChar
+    if (-not $fullDestination.StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "拒绝清理受管运行时外的应用目录：$fullDestination"
+    }
+    if (Test-Path -LiteralPath $fullDestination) {
+        Remove-Item -LiteralPath $fullDestination -Recurse -Force
+    }
+}
+
 if ($RefreshApps) {
     foreach ($requiredRuntime in @(
         (Join-Path $runtime 'zhihu\node\node.exe'),
         (Join-Path $runtime 'podcast\python\python.exe'),
-        (Join-Path $runtime 'podcast\models')
+        (Join-Path $runtime 'podcast\models'),
+        (Join-Path $contractsSource 'dist\index.js')
     )) {
         Require-Path -Path $requiredRuntime
     }
-    Copy-Tree -Source $zhihuSource -Destination (Join-Path $runtime 'zhihu\app') `
+    $zhihuApp = Join-Path $runtime 'zhihu\app'
+    $podcastApp = Join-Path $runtime 'podcast\app'
+    $contractsRuntime = Join-Path $runtime 'packages\contracts'
+    Reset-AppDestination -Destination $zhihuApp
+    Reset-AppDestination -Destination $podcastApp
+    Reset-AppDestination -Destination $contractsRuntime
+    Copy-Tree -Source $zhihuSource -Destination $zhihuApp `
         -ExcludeDirectories @('.git', '.browser-profile', '.obscura-profile') `
         -ExcludeFiles @('*.log', '*.db', '*.db-*')
-    Copy-Tree -Source $podcastAppSource -Destination (Join-Path $runtime 'podcast\app') `
+    Copy-Tree -Source $podcastAppSource -Destination $podcastApp `
         -ExcludeDirectories @('.git', '.venv', 'models', 'input', 'output', 'work', '.pytest_cache', '__pycache__') `
         -ExcludeFiles @('config.json', '*.log', '*.pyc')
+    Copy-Tree -Source $contractsSource -Destination $contractsRuntime `
+        -ExcludeDirectories @('.git', 'node_modules')
     Write-Output '[runtime] application code refreshed without rebuilding large assets'
     exit 0
 }
@@ -82,6 +106,7 @@ if ($RefreshApps) {
 $required = @(
     (Join-Path $zhihuSource 'dist\server.js'),
     (Join-Path $zhihuSource 'node_modules'),
+    (Join-Path $contractsSource 'dist\index.js'),
     (Join-Path $podcastAppSource 'scripts\sidecar_server.py'),
     $podcastSitePackages,
     $podcastModels,
@@ -101,7 +126,6 @@ if ($ValidateOnly) {
 }
 
 $stagingRuntime = "$runtime.__staging__"
-$fullRuntime = [IO.Path]::GetFullPath($runtime)
 $fullStagingRuntime = [IO.Path]::GetFullPath($stagingRuntime)
 $fullRoot = [IO.Path]::GetFullPath($root) + [IO.Path]::DirectorySeparatorChar
 if (-not $fullRuntime.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCase) -or
@@ -121,6 +145,8 @@ Copy-Tree -Source $zhihuSource -Destination (Join-Path $zhihuRuntime 'app') `
     -ExcludeDirectories @('.git', '.browser-profile', '.obscura-profile') `
     -ExcludeFiles @('*.log', '*.db', '*.db-*')
 Copy-Tree -Source $EdgeRoot -Destination (Join-Path $zhihuRuntime 'chromium')
+Copy-Tree -Source $contractsSource -Destination (Join-Path $stagingRuntime 'packages\contracts') `
+    -ExcludeDirectories @('.git', 'node_modules')
 
 Copy-Tree -Source $podcastAppSource -Destination (Join-Path $podcastRuntime 'app') `
     -ExcludeDirectories @('.git', '.venv', 'models', 'input', 'output', 'work', '.pytest_cache', '__pycache__') `

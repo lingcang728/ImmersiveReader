@@ -43,7 +43,7 @@ def main() -> int:
 
     scripts_text = "\n".join(
         read(path).replace("\\", "/")
-        for path in (ROOT / "scripts").glob("*")
+        for path in (ROOT / "scripts").rglob("*")
         if path.is_file() and path.suffix in (".py", ".ps1") and path.name != "quick_validate.py"
     )
     if re.search(r"output/final", scripts_text):
@@ -60,11 +60,6 @@ def main() -> int:
     launcher = config.get("launcher") or {}
     if launcher.get("open_folder_after_run") is not True or launcher.get("open_folder") != "output":
         fail(errors, "config launcher must open output after runs by default")
-    run_script = read(ROOT / "scripts" / "run_podcast_transcriber.ps1")
-    if "ShortcutMode" not in run_script or 'Start-Process -FilePath "explorer.exe"' not in run_script:
-        fail(errors, "PowerShell launcher must support shortcut mode and opening the target folder")
-    if "--force" not in run_script:
-        fail(errors, "PowerShell launcher must force re-transcription for shortcut runs")
     if config.get("skip_processed_files") is not False or config.get("always_reprocess_inputs") is not True:
         fail(errors, "config must disable processed-file memory and always reprocess input audio")
     if "--force" not in scripts_text or "force_reprocess" not in scripts_text:
@@ -75,12 +70,6 @@ def main() -> int:
     if "maybe_start_ollama" not in scripts_text or '"serve"' not in scripts_text:
         fail(errors, "transcriber must try to start Ollama during preflight")
 
-    if not (ROOT / "input").exists() or not (ROOT / "output").exists():
-        fail(errors, "input/ and output/ directories must exist")
-    if not (ROOT / "input" / ".gitkeep").exists():
-        fail(errors, "input/.gitkeep is missing")
-    if not (ROOT / "output" / ".gitkeep").exists():
-        fail(errors, "output/.gitkeep is missing")
     if (ROOT / "output" / "final").exists():
         fail(errors, "output/final directory must not exist")
 

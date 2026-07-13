@@ -737,12 +737,6 @@ fn permanently_delete_trash_item(
 }
 
 #[tauri::command]
-fn launch_companion_tool(tool: String) -> Result<tools::ToolLaunch, String> {
-    let value = settings::load_settings()?;
-    tools::launch(&tool, &value)
-}
-
-#[tauri::command]
 fn list_temporary_content() -> Result<Vec<temporary_content::TemporaryItem>, String> {
     temporary_content::items()
 }
@@ -1027,7 +1021,6 @@ pub fn run() {
             list_trash,
             restore_trash_item,
             permanently_delete_trash_item,
-            launch_companion_tool,
             get_companion_status,
             list_temporary_content,
             start_reader_session,

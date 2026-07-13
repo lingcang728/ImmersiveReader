@@ -25,14 +25,8 @@ import {
   taskIncomingRoot,
 } from './publish.js';
 
-// SSE 控制台或日志全局事件总线回调
-let progressCallback: ((taskId: string, status: string, message: string) => void) | null = null;
 let runQueue: Promise<void> = Promise.resolve();
 const queuedTaskIds = new Set<string>();
-
-export function setSchedulerProgressCallback(cb: typeof progressCallback) {
-  progressCallback = cb;
-}
 
 export function queueTask(taskId: string): boolean {
   if (queuedTaskIds.has(taskId)) {
@@ -61,9 +55,6 @@ export function cancelTask(taskId: string): boolean {
 
 function emitProgress(taskId: string, status: string, message: string) {
   logger.info(`[Task ${taskId}] Status: ${status} | ${message}`);
-  if (progressCallback) {
-    progressCallback(taskId, status, message);
-  }
 }
 
 /**
@@ -406,7 +397,7 @@ async function runTaskInternal(taskId: string) {
         // 如果是不可恢复的登录错误，我们建议直接中断整个大任务，不要傻傻等待后面几十个任务报错
         if (failureCode === 'LOGIN_REQUIRED' || failureCode === 'CAPTCHA_REQUIRED') {
           saveTask({ id: taskId, status: 'failed' });
-          emitProgress(taskId, 'failed', `遇到登录障碍，任务终止: ${errorMessage}。重新 npm run login 后，可用「重跑失败条目」断点续跑。`);
+          emitProgress(taskId, 'failed', `遇到登录障碍，任务终止: ${errorMessage}。请在沉浸阅读的知乎获取面板重新登录后再重试。`);
           return;
         }
       }

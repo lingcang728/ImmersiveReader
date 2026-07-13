@@ -5,13 +5,9 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "dev": "tsx src/index.ts",
     "build": "tsc",
     "test": "node --import tsx --test tests/*.test.ts",
-    "doctor": "tsx src/cli.ts doctor",
-    "login": "tsx src/cli.ts login",
-    "cli": "tsx src/cli.ts",
-    "web": "tsx src/server.ts",
+    "sidecar": "tsx src/server.ts",
     "build-manifests": "tsx src/generate-manifests.ts",
     "migrate-legacy": "tsx src/migrate-legacy-archive.ts",
     "build-reader": "npm run compile-reader && npm run build-manifests && tsx src/build-html.ts",
@@ -24,7 +20,6 @@
   "license": "ISC",
   "dependencies": {
     "@types/express": "^5.0.0",
-    "commander": "^12.1.0",
     "dompurify": "^3.4.5",
     "express": "^4.21.2",
     "playwright-core": "^1.60.0",

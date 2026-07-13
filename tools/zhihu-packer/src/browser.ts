@@ -51,7 +51,6 @@ function getCdpEndpoint() {
 }
 
 function shouldUseObscura(headless: boolean) {
-  // 默认走 Playwright 持久化 Profile（.browser-profile）：它与 npm run login 的登录态共享，
   // 且实测能通过知乎 zse-ck 反爬质询；而无头 Obscura 会被 zse-ck 反复质询、拿不到内容。
   // 仅当显式设置 ZHIHU_PACKER_BROWSER=obscura 时才使用 Obscura 后端。
   return headless && process.env.ZHIHU_PACKER_BROWSER === 'obscura';
@@ -231,7 +230,7 @@ export async function syncCookiesToObscuraStorage(context: BrowserContext): Prom
 }
 
 /**
- * 把 npm run login 同步出来的 .obscura-profile/cookies.json 显式注入到 Obscura Context。
+ * 把桌面登录流程同步的 .obscura-profile/cookies.json 显式注入到 Obscura Context。
  *
  * Obscura 通过 CDP 连接，并不会自动读取 storage-dir 里的 cookies.json，
  * 因此必须在连接后用 Playwright 的 addCookies 主动注入，否则无头任务始终是未登录态。
@@ -240,7 +239,7 @@ export async function syncCookiesToObscuraStorage(context: BrowserContext): Prom
 async function injectStoredCookies(context: BrowserContext): Promise<void> {
   const file = path.join(obscuraStorageDir, 'cookies.json');
   if (!fs.existsSync(file)) {
-    logger.warn(`未找到本地登录 Cookie 文件 (${file})，Obscura 将以未登录态运行。请先运行 npm run login。`);
+    logger.warn(`未找到受管登录 Cookie 文件 (${file})，Obscura 将以未登录态运行。请在沉浸阅读的知乎获取面板登录。`);
     return;
   }
 
