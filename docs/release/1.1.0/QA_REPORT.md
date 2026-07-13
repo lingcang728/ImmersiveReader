@@ -17,4 +17,4 @@ Full original-audio execution and possible API charges were not performed. Real 
 
 ## Installed artifact
 
-The isolated development EXE was built by `ship:dev` at `2026-07-13 10:57:26`, size `19151872` bytes, SHA-256 `32CCA0946E733D0281FCFC92D2CEB6B0212B257DE6D8040299EC79F476EA27D5`; Markdown associations were not registered. The exact EXE started and stopped; its WebView child was gone afterward. A CLI close request kept the process alive, but the native visibility check did not prove the expected hidden state, so tray hide/restore remains open in `V3-TODO.md`.
+The isolated development EXE was built by `ship:dev` at `2026-07-13 11:16:37`, size `19151872` bytes, SHA-256 `C302561A94048DA27C8937E4F5D23036BCE5A75093BE16988F2D2D1D748E4F97`; Markdown associations were not registered. The exact EXE started and stopped; its WebView child was gone afterward. A CLI close request kept the process alive, but the native visibility check did not prove the expected hidden state, so tray hide/restore remains open in `V3-TODO.md`.
