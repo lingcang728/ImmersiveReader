@@ -566,10 +566,10 @@ def provider_name(config: dict[str, Any]) -> str:
     return str(config.get("backend", config.get("provider", "ollama"))).strip().lower()
 
 
-def has_api_entry(config: dict[str, Any]) -> bool:
+def has_api_entry(config: dict[str, Any], default_env: str = "DEEPSEEK_API_KEY") -> bool:
     if not str(config.get("base_url") or "").strip():
         return False
-    env_name = str(config.get("api_key_env") or "").strip()
+    env_name = str(config.get("api_key_env") or default_env).strip()
     return bool(env_name or str(config.get("api_key") or "").strip())
 
 

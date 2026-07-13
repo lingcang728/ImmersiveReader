@@ -18,12 +18,23 @@ from deepseek_pricing import (  # noqa: E402
     reserve_budget,
     settle_budget,
 )
+from podcast_transcriber.deepseek import effective_provider_name  # noqa: E402
 
 
 def test_deepseek_v4_thinking_mode_follows_config() -> None:
     assert deepseek_thinking_config({"think": False}) == {"type": "disabled"}
     assert deepseek_thinking_config({"think": "false"}) == {"type": "disabled"}
     assert deepseek_thinking_config({"think": True}) == {"type": "enabled"}
+
+
+def test_deepseek_uses_managed_default_env_when_legacy_config_leaves_name_blank() -> None:
+    assert effective_provider_name(
+        {
+            "backend": "deepseek",
+            "base_url": "https://api.deepseek.com",
+            "api_key_env": "",
+        }
+    ) == "deepseek"
 
 
 def http_error(status: int, headers: dict[str, str] | None = None) -> urllib.error.HTTPError:
