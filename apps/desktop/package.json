@@ -13,7 +13,7 @@
     "install:latest": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1",
     "ship:dev": "powershell -ExecutionPolicy Bypass -File scripts/install-dev-immersive-reader.ps1 -Build",
     "ship:local": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -Build",
-    "register:markdown": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RegisterMarkdownAssociations"
+    "register:markdown": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RegisterMarkdownAssociations -OpenDefaultAppsSettings"
   },
   "license": "MIT",
   "dependencies": {

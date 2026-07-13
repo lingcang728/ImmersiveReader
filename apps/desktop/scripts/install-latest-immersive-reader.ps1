@@ -2,6 +2,7 @@
 param(
   [switch]$Build,
   [switch]$RegisterMarkdownAssociations,
+  [switch]$OpenDefaultAppsSettings,
   [switch]$NoShortcuts,
   # Default: monorepo root (easy to find and delete with the project).
   [string]$InstallDir = ""
@@ -89,15 +90,45 @@ foreach ($required in @(
 
 if ($RegisterMarkdownAssociations) {
   $progId = "ImmersiveReader.Markdown"
+  $registeredName = "沉浸阅读"
+  $capabilitiesPath = "HKCU:\Software\ImmersiveReader\Capabilities"
   $openCommand = "`"$installedExe`" `"%1`""
   foreach ($extension in @(".md", ".markdown")) {
     New-Item -Path "HKCU:\Software\Classes\$extension" -Force | Out-Null
     Set-Item -Path "HKCU:\Software\Classes\$extension" -Value $progId
+    New-Item -Path "HKCU:\Software\Classes\$extension\OpenWithProgids" -Force | Out-Null
+    New-ItemProperty -Path "HKCU:\Software\Classes\$extension\OpenWithProgids" -Name $progId -Value "" -PropertyType String -Force | Out-Null
   }
   New-Item -Path "HKCU:\Software\Classes\$progId\shell\open\command" -Force | Out-Null
   Set-Item -Path "HKCU:\Software\Classes\$progId" -Value "Markdown Document"
   Set-Item -Path "HKCU:\Software\Classes\$progId\shell\open\command" -Value $openCommand
-  Write-Host "Markdown associations registered after validation."
+
+  New-Item -Path "$capabilitiesPath\FileAssociations" -Force | Out-Null
+  New-ItemProperty -Path $capabilitiesPath -Name "ApplicationName" -Value $registeredName -PropertyType String -Force | Out-Null
+  New-ItemProperty -Path $capabilitiesPath -Name "ApplicationDescription" -Value "本地长文阅读、知乎归档和播客转写工具。" -PropertyType String -Force | Out-Null
+  New-ItemProperty -Path $capabilitiesPath -Name "ApplicationIcon" -Value "$installedExe,0" -PropertyType String -Force | Out-Null
+  foreach ($extension in @(".md", ".markdown")) {
+    New-ItemProperty -Path "$capabilitiesPath\FileAssociations" -Name $extension -Value $progId -PropertyType String -Force | Out-Null
+  }
+  New-Item -Path "HKCU:\Software\RegisteredApplications" -Force | Out-Null
+  New-ItemProperty -Path "HKCU:\Software\RegisteredApplications" -Name $registeredName -Value "Software\ImmersiveReader\Capabilities" -PropertyType String -Force | Out-Null
+
+  $userChoices = foreach ($extension in @(".md", ".markdown")) {
+    $userChoicePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$extension\UserChoice"
+    $current = (Get-ItemProperty -LiteralPath $userChoicePath -Name "ProgId" -ErrorAction SilentlyContinue).ProgId
+    [pscustomobject]@{ Extension = $extension; ProgId = $current }
+  }
+  Write-Host "Markdown handler and Default Apps capabilities registered after validation."
+  foreach ($choice in $userChoices) {
+    if ($choice.ProgId -and $choice.ProgId -ne $progId) {
+      Write-Warning "$($choice.Extension) UserChoice remains $($choice.ProgId); Windows requires the user to change it in Default Apps."
+    }
+  }
+  if ($OpenDefaultAppsSettings) {
+    $settingsUri = "ms-settings:defaultapps?registeredAppUser=$([Uri]::EscapeDataString($registeredName))"
+    Start-Process $settingsUri
+    Write-Host "Opened Windows Default Apps for $registeredName."
+  }
 } else {
   Write-Host "Markdown associations were intentionally left unchanged."
 }
