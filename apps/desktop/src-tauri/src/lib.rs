@@ -978,7 +978,10 @@ pub fn run() {
     let builder = builder.on_window_event(|window, event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
-            let _ = window.hide();
+            let close_window = window.clone();
+            let _ = window.run_on_main_thread(move || {
+                let _ = close_window.hide();
+            });
         }
     });
     let app = builder
