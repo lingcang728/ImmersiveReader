@@ -114,11 +114,17 @@ fn migration_runs_survive_reopening_and_keep_receipt_location() {
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
 
-fn task_event(sequence: u64, revision: u64) -> TaskEvent {
+fn task_event_for(
+    task_id: &str,
+    kind: TaskKind,
+    book_id: &str,
+    sequence: u64,
+    revision: u64,
+) -> TaskEvent {
     let now = "2026-07-11T12:00:00Z".to_string();
     let snapshot = TaskSnapshot {
-        id: "podcast-1".to_string(),
-        kind: TaskKind::Podcast,
+        id: task_id.to_string(),
+        kind,
         revision,
         last_sequence: sequence,
         lifecycle_state: LifecycleState::Running,
@@ -141,7 +147,7 @@ fn task_event(sequence: u64, revision: u64) -> TaskEvent {
         can_resume: false,
         can_retry: false,
         can_cancel: true,
-        book_id: Some("book-1".to_string()),
+        book_id: Some(book_id.to_string()),
         source_id: Some("sha256".to_string()),
         cache_lease_bytes: 42,
         created_at: now.clone(),
@@ -156,6 +162,10 @@ fn task_event(sequence: u64, revision: u64) -> TaskEvent {
         snapshot,
         created_at: now,
     }
+}
+
+fn task_event(sequence: u64, revision: u64) -> TaskEvent {
+    task_event_for("podcast-1", TaskKind::Podcast, "book-1", sequence, revision)
 }
 
 #[test]
@@ -210,6 +220,54 @@ fn task_snapshot_and_events_survive_reopen() {
         .is_empty());
     drop(reopened);
     fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn podcast_and_zhihu_active_snapshots_can_coexist() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-parallel-tasks-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    let mut database = ControlDb::open(&path).expect("control database must open");
+    database
+        .persist_task_event(&task_event_for(
+            "podcast-active",
+            TaskKind::Podcast,
+            "podcast-book",
+            1,
+            1,
+        ))
+        .expect("podcast task must persist");
+    database
+        .persist_task_event(&task_event_for(
+            "zhihu-active",
+            TaskKind::Zhihu,
+            "zhihu-book",
+            1,
+            1,
+        ))
+        .expect("zhihu task must persist");
+
+    let active = database
+        .task_snapshots(None)
+        .expect("active task snapshots must load");
+    assert_eq!(active.len(), 2);
+    assert!(active.iter().all(|snapshot| {
+        snapshot.lifecycle_state == LifecycleState::Running
+            && snapshot.outcome == TaskOutcome::None
+    }));
+    assert!(active.iter().any(|snapshot| {
+        snapshot.id == "podcast-active" && snapshot.kind == TaskKind::Podcast
+    }));
+    assert!(active.iter().any(|snapshot| {
+        snapshot.id == "zhihu-active" && snapshot.kind == TaskKind::Zhihu
+    }));
+
+    drop(database);
+    fs::remove_dir_all(root).expect("test root must be removed");
 }
 
 #[test]
