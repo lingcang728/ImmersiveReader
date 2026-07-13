@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-13 15:03（Asia/Shanghai）
+更新时间：2026-07-13 15:20（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`f33f4bb fix(zhihu): repair authenticated Top N archive flow`
+- 当前产品 commit：`9fab2c6 fix(zhihu): open managed login in Chrome`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-13 14:50:17`
-- 最新开发 EXE SHA-256：`AEEC44147DF92FAD9C36241222BE8E5335B0A3C1F0C415E73E2252B1C196938F`
+- 最新开发 EXE 时间：`2026-07-13 15:19:15`
+- 最新开发 EXE SHA-256：`15F9241E21A76490A5FCE18DB71B0F9EE5E783A7A93EB6CDECDB85AF60DE4BF8`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、桌面 Rust 88、知乎 31、Podcast 27；quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、桌面 Rust 88、知乎 32、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -403,6 +403,7 @@
 ### C. 知乎执行、登录与发布
 - [x] 在新流程真实 QA 通过前，不删除旧知乎控制台回退入口。
   - 2026-07-13 已使用系统 Chrome 完成隔离受管 Profile 登录，并在 QA Library 对指定账号完成回答+文章合计 Top 5；旧入口在验证通过前始终保留且本轮未删除。
+  - 补充 commit：`9fab2c6 fix(zhihu): open managed login in Chrome`；开发版有头授权优先系统 Chrome，无头归档继续使用受管 Chromium。开发受管 Profile 已通过 Chrome 登录，实际运行时复核 `loggedIn=true`。
   - 删除旧知乎控制台仍是 `F` 节和清单末尾的独立授权门，不因本项完成而自动获准。
 
 ### D. 迁移、继承与数据对账
@@ -467,7 +468,7 @@
 ### F. 安全收紧与旧前端移除
 
 - [x] 新 Podcast/知乎流程自动测试与短样本 QA 全部通过后，暂停等待“删除旧前端”独立授权。
-  - 2026-07-13 `scripts\verify.ps1` 通过（contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、Rust 88、Podcast 27、Zhihu 31）；两份真实音频短样本和指定知乎账号真实 Top 5 均通过；旧 Podcast/知乎入口不删除，等待清单末尾独立授权门。
+  - 2026-07-13 `scripts\verify.ps1` 通过（contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、Rust 88、Podcast 27、Zhihu 32）；两份真实音频短样本和指定知乎账号真实 Top 5 均通过；旧 Podcast/知乎入口不删除，等待清单末尾独立授权门。
 - [ ] 获准后删除 Podcast 旧 GUI/PowerShell 托盘打包入口。
 - [ ] 获准后删除知乎旧控制台打包入口。
 - [x] 收紧 Tauri CSP、capabilities、通用 `fs:default` 和 `opener:default`。
@@ -487,7 +488,7 @@
   - 2026-07-13 先复现未登录空索引，随后通过系统 Chrome 的隔离受管 Profile 完成登录；用户原有 Chrome 窗口、正式 Profile、正式数据库和正式 Library 均未改动。
   - 修复 commit：`f33f4bb fix(zhihu): repair authenticated Top N archive flow`；修正文章 `/posts` 路由、空页登录/风控判定、time Top N 扫描上限和 Obscura 受管存储位置，并新增 6 项回归测试。
   - dry-run 扫描回答 5、文章 3，合并选取 Top 5；真实任务 `task_xiao-xue-shi-46-24_1783924363715` 状态 success，5/5 成功、0 失败，发布 `bookId=zhihu:xiao-xue-shi-46-24`、5 章、revision 1，manifest SHA-256 `FB874B252CD1AC6EB9B911CE532959104D4C924D7CAA6F2730F97619552BCD83`。
-  - 完整 `scripts\verify.ps1` 通过；隔离 `.incoming` 残留文件 0、精确 QA Node/Chrome 残留进程 0。开发安装 `2026-07-13 14:50:17`，EXE SHA-256 前 16 位 `AEEC44147DF92FAD`，真实启动后停止，精确同路径残留进程 0。完整证据：`.omo/ulw-loop/evidence/zhihu-qa-20260713.md`。
+  - 完整 `scripts\verify.ps1` 通过；隔离 `.incoming` 残留文件 0、精确 QA Node/Chrome 残留进程 0。开发 Profile 运行时复核 `loggedIn=true`；开发安装 `2026-07-13 15:19:15`，EXE SHA-256 前 16 位 `15F9241E21A76490`，真实启动后停止，精确同路径残留进程 0。完整证据：`.omo/ulw-loop/evidence/zhihu-qa-20260713.md`。
 - [x] Podcast 与知乎各一个活动任务并行测试。
   - 2026-07-13 新增并通过 `control::tests::podcast_and_zhihu_active_snapshots_can_coexist`：同一 control.db 同时保存 Podcast/Zhihu 两个 `Running` 快照并按 kind/id 验证；未启动外部真实账号任务。
 - [x] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
