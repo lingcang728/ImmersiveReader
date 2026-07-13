@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-13 15:20（Asia/Shanghai）
+更新时间：2026-07-13 15:56（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`9fab2c6 fix(zhihu): open managed login in Chrome`
+- 当前产品 commit：`6aa79dc fix(podcast): wire managed credentials and cache roots`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-13 15:19:15`
-- 最新开发 EXE SHA-256：`15F9241E21A76490A5FCE18DB71B0F9EE5E783A7A93EB6CDECDB85AF60DE4BF8`
+- 最新开发 EXE 时间：`2026-07-13 15:54:23`
+- 最新开发 EXE SHA-256：`D307F6F1FCF5696DFAFEBEC12A057645156A45692101D535A39CEA770D7F2576`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、桌面 Rust 88、知乎 32、Podcast 27；quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、桌面 Rust 89、知乎 32、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -391,6 +391,14 @@
 - [x] 验证清理任务历史后知乎书目、作者导航和 archive catalog 仍存在。
   - 现有 `tools\zhihu-packer\tests\archive-catalog.test.ts` 覆盖删除任务后作者 catalog、成功条目和 revision 仍可查询；`generateAuthorIndex` 使用持久 archive catalog 重建导航。
   - `npm.cmd --prefix .\tools\zhihu-packer test` 通过（25 项），未接触正式数据库或 Library。
+
+### 37. Podcast 受管凭据与 Data/Cache 根修正
+
+- [x] 将 Credential Manager 中的 DeepSeek Key 仅以内存环境变量传给 Podcast sidecar/worker，并把 sidecar 配置与缓存根彻底分离。
+  - 实现 commit：`6aa79dc fix(podcast): wire managed credentials and cache roots`；Key 不写入 TaskSpec、JSON、数据库或日志。
+  - sidecar 配置固定到 `Data\Podcast\config.json`，input/output/work 固定到 `Cache\Podcast`；legacy 临时 Markdown 只从 `Data\Podcast\LegacyOutput` 暴露。
+  - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、Rust 89、知乎 32、Podcast 27、quick validation。
+  - `ship:dev` 通过；开发 EXE `2026-07-13 15:54:23`，SHA-256 `D307F6F1FCF5696DFAFEBEC12A057645156A45692101D535A39CEA770D7F2576`；PID `122740` 精确路径启动，标题为 `沉浸阅读 · 开发版`，停止后残留精确进程 0。
 
 ## 未完成
 
