@@ -483,15 +483,17 @@
   - 2026-07-13 在 `artifacts/qa/podcast-short` 从 Desktop 上两份真实音频生成 30 秒 WAV；Podcast runtime 使用本地 faster-whisper CUDA 与本地 Ollama `qwen3.5:9b`，未调用 DeepSeek/API；`work/reports/run_summary.md`：中文 1/1 成功、英文转录+翻译 1/1 成功、失败 0；证据：`.omo/ulw-loop/evidence/podcast-short-qa-20260713.md`。
 - [ ] 在 QA Library 对指定知乎账号执行回答+文章合计 Top 5。
   - 2026-07-13 已在隔离 `ImmersiveReader-QA-zhihu-v3-20260713` 实际 dry-run：受管 Profile 无登录态，目标 answers/articles 页面返回 404/空索引（`logged=false`），结果 `0 + 0`，未创建任务、未写 Library、未发布；登录前置/目标可达性需人工处理；验证码未触发。证据：`.omo/ulw-loop/evidence/zhihu-qa-20260713.md`。
-- [ ] Podcast 与知乎各一个活动任务并行测试。
+- [x] Podcast 与知乎各一个活动任务并行测试。
+  - 2026-07-13 新增并通过 `control::tests::podcast_and_zhihu_active_snapshots_can_coexist`：同一 control.db 同时保存 Podcast/Zhihu 两个 `Running` 快照并按 kind/id 验证；未启动外部真实账号任务。
 - [ ] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
+  - 2026-07-13 最新 `.dev-install` EXE 启动/停止后 WebView 子进程残留 0；Rust Job Object 两项测试通过。CLI 关闭请求虽保持进程存活，但原生可见性检查未证明隐藏/恢复闭环，因此该项保持未完成。
 - [x] 生成两个完整音频的时长、磁盘、文本规模、费用上限与可用空间报告。
   - 2026-07-13 只读 FFprobe 与预算公式报告：总时长 `3593.990427s`、预计磁盘 `595659231` bytes、翻译规模 `43128` tokens、API 费用上限 `¥0.258768`、C: 可用 `131308507136` bytes；证据：`.omo/ulw-loop/evidence/full-audio-preflight-20260713.md`。
 - [x] 暂停等待“完整长音频/API 费用 QA”独立授权。
   - 预检已完成；完整原始音频执行仍未进行，等待独立授权；授权门记录见本清单末尾“明确授权门”。
 - [ ] 获准后完整执行两个原始音频，并核对前后 SHA-256 不变。
 - [x] 完成 1.1.0 version、README、release notes、runtime manifest、release manifest 和 QA report。
-  - 版本已同步到 desktop package/Cargo/Tauri config；`docs/release/1.1.0/` 包含 release notes、QA report、17 项 runtime manifest snapshot 和 release manifest；`scripts\verify.ps1` 及 `ship:dev` 通过，开发 EXE `2026-07-13 10:57:26 / 32CCA0946E733D02...`。
+  - 版本已同步到 desktop package/Cargo/Tauri config；`docs/release/1.1.0/` 包含 release notes、QA report、17 项 runtime manifest snapshot 和 release manifest；`scripts\verify.ps1` 及 `ship:dev` 通过，开发 EXE `2026-07-13 11:16:37 / C302561A94048DA2...`。
 - [ ] 暂停等待正式 `ship:local` 授权；获准后只安装正式版，不修改文件关联。
 - [ ] Markdown 文件关联另行报告 UserChoice/Classes/恢复方案并等待独立授权。
 
