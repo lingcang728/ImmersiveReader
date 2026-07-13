@@ -412,6 +412,16 @@
   - 受管 Profile：复制 203 个非缓存文件、9,964,812 bytes 到 `Data\Private\ZhihuProfile`，tree SHA-256 `2E820A32EC03641966E2753A30DB99B1D9FFAF783AE08122352F432F5B57866C`；Cache/Code Cache/GPUCache/GrShaderCache/ShaderCache 未进入 Data/Documents/Backups。legacy trash 2 项保持原位只读，未伪造原路径。
   - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、Rust 90、知乎 33、Podcast 27、quick validation；`ship:dev` EXE `2026-07-13 16:19:47`，SHA-256 `8AD074B64E13B6AB16B26F72B3BB9E6D9589ADD315E70A04B54CD2CD73DAA3F2`，PID `110312` 精确路径启动响应正常，退出后残留 0。
 
+### 39. 旧 Podcast/知乎前端与打包入口移除
+
+- [x] 删除 Podcast 旧 Web GUI、PowerShell/托盘/初始化启动层及知乎旧 Web/CLI 控制台打包入口，只保留桌面工作流需要的受管 sidecar。
+  - 实现 commit：`e77bf11 refactor(runtime): remove legacy companion frontends`；删除 Podcast HTML、GUI Python、PowerShell launcher/tray/setup 和旧图标，删除知乎 `public/index.html`、CLI/doctor、`一键启动`，并移除根 `scripts\start.ps1` 的旧工具 action。
+  - 桌面端移除“回退旧版”按钮和 `launch_companion_tool` Tauri 命令；知乎 sidecar 移除静态控制台、token config、SSE 和旧页面专用的重爬/打开目录/下载接口，登录错误统一引导到沉浸阅读知乎获取面板。
+  - 修复 runtime 增量刷新：先受控清理 `runtime\*\app` 再复制，并把共享 `packages\contracts` 同时纳入完整准备和 `-RefreshApps`；运行时旧入口残留 0。
+  - 受管知乎与 Podcast sidecar 均实际启动：READY protocol 1，`/health=200`、鉴权 `/api/status=200`、根路径 `404`；知乎共享 contracts 存在，两个进程均已停止。
+  - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、Rust 90、知乎 34、Podcast 27、quick validation。
+  - `ship:dev` 通过；开发 EXE `2026-07-13 16:41:04`、19,151,360 bytes、SHA-256 `9E15810DD5C23D2604013A252A6144CA520836F59B2F8F89027C36CC0C01E7D7`；PID `118996` 精确路径启动响应正常，标题 `沉浸阅读 · 开发版`，退出后残留 0。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -480,8 +490,6 @@
 
 - [x] 新 Podcast/知乎流程自动测试与短样本 QA 全部通过后，暂停等待“删除旧前端”独立授权。
   - 2026-07-13 `scripts\verify.ps1` 通过（contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、Rust 88、Podcast 27、Zhihu 32）；两份真实音频短样本和指定知乎账号真实 Top 5 均通过；旧 Podcast/知乎入口不删除，等待清单末尾独立授权门。
-- [ ] 获准后删除 Podcast 旧 GUI/PowerShell 托盘打包入口。
-- [ ] 获准后删除知乎旧控制台打包入口。
 - [x] 收紧 Tauri CSP、capabilities、通用 `fs:default` 和 `opener:default`。
   - 实现 commit：`08332d5 security(desktop): tighten runtime capabilities and csp`。
   - `tauri.conf.json` 设置显式 CSP，允许受控 Tauri IPC、loopback Reader、asset/data/blob 图片和显式外链；main capability 移除 `fs:default`/`opener:default`，只保留 `dialog:allow-open` 与 `opener:allow-open-url`。
