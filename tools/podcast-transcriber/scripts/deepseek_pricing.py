@@ -233,3 +233,9 @@ def normalize_deepseek_model(model: Any) -> str:
     if value in DEEPSEEK_MODEL_PRICING_PER_MILLION:
         return value
     return DEEPSEEK_DEFAULT_MODEL
+
+
+def deepseek_thinking_config(config: dict[str, Any]) -> dict[str, str]:
+    raw = config.get("think", False)
+    enabled = raw if isinstance(raw, bool) else str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    return {"type": "enabled" if enabled else "disabled"}

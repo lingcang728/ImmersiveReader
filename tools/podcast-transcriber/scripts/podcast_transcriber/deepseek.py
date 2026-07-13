@@ -17,6 +17,7 @@ from deepseek_pricing import (
     PromptBudgetError,
     classify_upstream_error,
     deepseek_chat_completions_url,
+    deepseek_thinking_config,
     is_retryable_http_error,
     normalize_deepseek_model,
     reserve_budget,
@@ -273,6 +274,7 @@ def deepseek_chat_completion(
             "messages": [{"role": "user", "content": prompt}],
             "temperature": float(config.get("temperature", 0)),
             "stream": False,
+            "thinking": deepseek_thinking_config(config),
         }
         max_tokens = config.get("max_tokens", config.get("num_predict"))
         if max_tokens is not None:

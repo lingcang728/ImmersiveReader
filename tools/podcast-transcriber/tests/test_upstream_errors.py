@@ -13,10 +13,17 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from deepseek_pricing import (  # noqa: E402
     PodcastBudgetExceededError,
     classify_upstream_error,
+    deepseek_thinking_config,
     parse_retry_after,
     reserve_budget,
     settle_budget,
 )
+
+
+def test_deepseek_v4_thinking_mode_follows_config() -> None:
+    assert deepseek_thinking_config({"think": False}) == {"type": "disabled"}
+    assert deepseek_thinking_config({"think": "false"}) == {"type": "disabled"}
+    assert deepseek_thinking_config({"think": True}) == {"type": "enabled"}
 
 
 def http_error(status: int, headers: dict[str, str] | None = None) -> urllib.error.HTTPError:
