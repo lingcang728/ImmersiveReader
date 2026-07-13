@@ -564,16 +564,27 @@
 - [x] 产品、数据、QA 和安装全部通过后创建第二份 pre-force-push bundle并 verify。
   - bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260713-pre-force-push\02-pre-force-push.bundle`，`git bundle verify` 为 complete history，SHA-256 `6E09ABF37156970B09285A1946A9377E0E27CED883C68349C60CADA60A49A711`。
   - 本清单证据提交后还会创建一份包含最终 `DEV_TIP` 的只读补充 bundle，避免 checklist-only commit 落在回滚边界之外。
-- [ ] 记录执行时 BASE、DEV_TIP、旧 origin/main SHA。
-- [ ] 从 `BASE^{tree}` 创建无父 CLEAN_ROOT，再按顺序重放 `BASE..DEV_TIP` 新 commits。
-- [ ] 生成 CLEAN_TIP 与 `chore(release): package ImmersiveReader 1.1.0`。
-- [ ] 核对 DEV_TIP/CLEAN_TIP 产品 tree 一致。
-- [ ] 审计 clean history：无 `Co-Authored-By: Claude`、无 `Claude-Session`、Author/shortlog 符合预期。
-- [ ] 生成 force-push 前完整报告：bundle 路径/哈希、恢复命令、提交数、refs 差异、EXE/NSIS/runtime/QA。
-- [ ] 暂停等待 `force-push main` 独立授权；只能使用 `--force-with-lease` 替换 main。
-- [ ] 删除/替换其他 remote branches/tags 必须逐项另行授权。
-- [ ] force-push 后重新 clone 到新目录，验证 tree、version、README、Actions、tag、shortlog 和 trailers。
-- [ ] GitHub contributors 缓存延迟不得触发第二次历史重写。
+- [x] 记录执行时 BASE、DEV_TIP、旧 origin/main SHA。
+  - `BASE=1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`，`DEV_TIP=20505d70e213977eb93d0bbc1d2d3c5cee148083`，旧 `origin/main=1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`。
+- [x] 从 `BASE^{tree}` 创建无父 CLEAN_ROOT，再按顺序重放 `BASE..DEV_TIP` 新 commits。
+  - `CLEAN_ROOT=700d146fd399fd5aedb0347836c9c58c272ed4e9`，无父提交；168 个源 commits 与 168 个 replay commits 的作者、邮箱、标题和顺序完全一致。
+- [x] 生成 CLEAN_TIP 与 `chore(release): package ImmersiveReader 1.1.0`。
+  - `CLEAN_TIP=a292ac6a7ff7791fca682eb08d97767038c7f2f4`；release commit 为空提交。注释 tag `v1.1.0` 的 peeled commit 同为 `a292ac6`。
+- [x] 核对 DEV_TIP/CLEAN_TIP 产品 tree 一致。
+  - 两者 tree 均为 `fe74c1c32fd4ae7153646f6396d9d0ed2edbef97`，`git diff DEV_TIP CLEAN_TIP` 为空；`BASE/CLEAN_ROOT` tree 也同为 `5d879294aacd1afa1bb57e6076d55fe37c41f847`。
+- [x] 审计 clean history：无 `Co-Authored-By: Claude`、无 `Claude-Session`、Author/shortlog 符合预期。
+  - clean history 共 170 commits、单根、无 merge；shortlog 为 `170 lingcang728 <lingcang728@users.noreply.github.com>`，禁用 trailers 匹配 0。
+- [x] 生成 force-push 前完整报告：bundle 路径/哈希、恢复命令、提交数、refs 差异、EXE/NSIS/runtime/QA。
+  - 最终 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260713-pre-force-push\05-clean-tip-and-tag.bundle`，12,971,305 bytes，SHA-256 `23E3DD904E587FCBB452E16F0EE64CE01832EF0ECDA5E1F3D93E6BEA47E33BEF`，complete history；完整报告为同目录 `force-push-report.md`。
+- [x] `force-push main` 已获本轮全量 TODO 授权，并且只使用 `--force-with-lease=refs/heads/main:1c7c72f...` 替换 main。
+  - 远端 `main` 已从 `1c7c72f` 精确变为 `a292ac6`；随后只新增 `v1.1.0`，未删除或替换其他 ref。
+- [x] 删除/替换其他 remote branches/tags 必须逐项另行授权。
+  - 本轮删除/替换其他远端 branch/tag 数量为 0；远端仍只有 `main`，并新增本次发布 tag `v1.1.0`。
+- [x] force-push 后重新 clone 到新目录，验证 tree、version、README、Actions、tag、shortlog 和 trailers。
+  - 新鲜克隆：`C:\Users\15pro\Desktop\MyProject\ImmersiveReader-fresh-verify-20260713`；`git fsck --full --strict`、干净状态、HEAD/tree、1.1.0 三处版本、README、根 workflow、tag、170 shortlog、单根/无 merge和禁用 trailers 全部通过。
+  - GitHub Release Action run `29240071171` 完成且 conclusion `success`；draft release 的 tag/target 为 `v1.1.0/a292ac6`，Windows NSIS 资产已上传，6,482,453 bytes，digest `sha256:7ce4d06918b38b75439d6dcb1a78b557ef7d1f42141b4bfc809b11ace8efb553`。
+- [x] GitHub contributors 缓存延迟不得触发第二次历史重写。
+  - 远端只执行一次 clean-history force-push；不会因 contributors 页面缓存延迟再次重写。
 - [x] 外部 `Zhihu_packer` 已按本轮全量 TODO 授权恢复为私有仓库，并在 HEAD 验真后设置 archived。
 
 ## 当前关闭的独立授权门
@@ -584,10 +595,10 @@
 - [x] 正式 `ship:local`：2026-07-13 已完成。
 - [x] 修改 `.md/.markdown` 文件关联：本轮已授权且候选注册完成；受保护 UserChoice 等待 Windows UI 确认。
 - [x] force-push `origin/main`：本轮已授权；执行仍必须使用 `--force-with-lease` 并先完成第二份 bundle/报告。
-- [ ] 删除或替换其他远程 branches/tags。
+- [x] 删除或替换其他远程 branches/tags：未执行，也无需执行；只新增 `v1.1.0`。
 - [x] 恢复外部 `Zhihu_packer` 仓库：远端 `master=35d78f9`。
 - [x] 将外部 `Zhihu_packer` 仓库设为 archived：GitHub `isArchived=true`。
 
 ## 下一项推荐执行
 
-继续完成第二份 bundle、干净历史重放、force-push 与新鲜克隆验收；并等待 Windows 默认应用 UI 对 `.md/.markdown` 的最终用户确认。
+只剩 Windows 默认应用 UI 对 `.md/.markdown` 的最终用户确认；完成并核验后执行仓库文档最终瘦身。
