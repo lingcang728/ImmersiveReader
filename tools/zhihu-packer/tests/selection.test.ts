@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as indexerModule from '../src/indexer.js';
 import { selectIndexItems, type ScrapedIndexItem } from '../src/indexer.js';
 
 function item(
@@ -55,4 +56,18 @@ test('time ordering uses vote count and id as deterministic tie breakers', () =>
 
   assert.deepEqual(selected.map((entry) => entry.id), ['article:1', 'answer:2', 'answer:3']);
   assert.deepEqual(items.map((entry) => entry.id), ['answer:2', 'article:1', 'answer:3']);
+});
+
+test('time Top N limits each source scan while vote ordering keeps a full scan', () => {
+  const candidate = (indexerModule as unknown as { scanLimitForSelection?: unknown })
+    .scanLimitForSelection;
+  assert.equal(typeof candidate, 'function');
+  const scanLimitForSelection = candidate as (
+    topN: number | null,
+    sortBy: 'time' | 'vote'
+  ) => number | null;
+
+  assert.equal(scanLimitForSelection(5, 'time'), 5);
+  assert.equal(scanLimitForSelection(5, 'vote'), null);
+  assert.equal(scanLimitForSelection(null, 'time'), null);
 });

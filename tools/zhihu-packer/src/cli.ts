@@ -8,7 +8,7 @@ import { logger, sanitizeFilename } from './utils.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import { createTask, runTask } from './scheduler.js';
-import { scrapePeopleIndex, selectIndexItems } from './indexer.js';
+import { scanLimitForSelection, scrapePeopleIndex, selectIndexItems } from './indexer.js';
 import { startServer } from './server.js';
 import { resolveArchiveOutputDir } from './runtime-paths.js';
 
@@ -182,12 +182,13 @@ taskCmd
           context = await getBrowserContext(true);
           const page = await context.newPage();
           const scrapedIndexes = [];
+          const scanLimit = scanLimitForSelection(options.topN, options.sort);
           if (options.types === 'answers' || options.types === 'all') {
-            const answers = await scrapePeopleIndex(page, peopleId, 'answers', null);
+            const answers = await scrapePeopleIndex(page, peopleId, 'answers', scanLimit);
             scrapedIndexes.push(...answers);
           }
           if (options.types === 'articles' || options.types === 'all') {
-            const articles = await scrapePeopleIndex(page, peopleId, 'articles', null);
+            const articles = await scrapePeopleIndex(page, peopleId, 'articles', scanLimit);
             scrapedIndexes.push(...articles);
           }
 

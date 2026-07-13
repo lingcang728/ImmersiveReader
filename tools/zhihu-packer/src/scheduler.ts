@@ -1,5 +1,5 @@
 import { getBrowserContext, closeBrowserContext, syncCookiesToObscuraStorage } from './browser.js';
-import { scrapePeopleIndex, ScrapedIndexItem, selectIndexItems } from './indexer.js';
+import { scanLimitForSelection, scrapePeopleIndex, ScrapedIndexItem, selectIndexItems } from './indexer.js';
 import { scrapeAnswer, scrapeArticle, writeMarkdownFile } from './extractor.js';
 import { 
   saveTask, 
@@ -219,9 +219,10 @@ async function runTaskInternal(taskId: string) {
       saveTask({ id: taskId, index_status: 'running' });
       
       const scrapedIndexes: ScrapedIndexItem[] = [];
+      const scanLimit = scanLimitForSelection(task.top_n, task.sort_by);
 
       if (task.item_types === 'answers' || task.item_types === 'all') {
-        const answers = await scrapePeopleIndex(page, task.author_id, 'answers', null);
+        const answers = await scrapePeopleIndex(page, task.author_id, 'answers', scanLimit);
         scrapedIndexes.push(...answers);
       }
 
@@ -229,7 +230,7 @@ async function runTaskInternal(taskId: string) {
       if (checkIsPaused(taskId)) return;
 
       if (task.item_types === 'articles' || task.item_types === 'all') {
-        const articles = await scrapePeopleIndex(page, task.author_id, 'articles', null);
+        const articles = await scrapePeopleIndex(page, task.author_id, 'articles', scanLimit);
         scrapedIndexes.push(...articles);
       }
 

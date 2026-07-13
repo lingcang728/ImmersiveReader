@@ -15,7 +15,7 @@ let currentBackend: 'obscura' | 'playwright' | null = null;
 let obscuraPort = process.env.OBSCURA_PORT ? Number(process.env.OBSCURA_PORT) : 0;
 const chromeProfileDir = resolveProfileDir({ cwd: process.cwd(), environment: process.env });
 const browserCacheDir = resolveBrowserCacheDir({ cwd: process.cwd(), environment: process.env });
-const obscuraStorageDir = path.resolve(process.cwd(), '.obscura-profile');
+const obscuraStorageDir = path.join(chromeProfileDir, '.obscura-profile');
 // 兜底 UA（探测失败时使用）。正常路径下 UA 会与本机浏览器真实版本对齐，见 resolveUserAgent。
 const fallbackUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 let cachedUserAgent: string | null = null;

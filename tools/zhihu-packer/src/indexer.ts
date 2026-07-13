@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './utils.js';
 import { normalizeUrl } from './extractor.js';
+import { resolveBrowserCacheDir } from './runtime-paths.js';
 
 export interface ScrapedIndexItem {
   id: string; // answer:12345 或 article:67890
@@ -35,6 +36,13 @@ export function selectIndexItems(
     return a.id.localeCompare(b.id);
   });
   return topN === null ? sorted : sorted.slice(0, Math.max(0, topN));
+}
+
+export function scanLimitForSelection(
+  topN: number | null,
+  sortBy: 'time' | 'vote'
+): number | null {
+  return sortBy === 'time' && topN !== null ? Math.max(0, topN) : null;
 }
 
 /**
@@ -201,7 +209,8 @@ export async function scrapePeopleIndex(
   itemType: 'answers' | 'articles',
   topN: number | null = null
 ): Promise<ScrapedIndexItem[]> {
-  const targetUrl = `https://www.zhihu.com/people/${peopleId}/${itemType}`;
+  const indexPath = itemType === 'articles' ? 'posts' : itemType;
+  const targetUrl = `https://www.zhihu.com/people/${peopleId}/${indexPath}`;
   logger.info(`开始扫描答主 ${peopleId} 的 ${itemType} 列表, 目标 URL: ${targetUrl}`);
 
   const collected: Map<string, ScrapedIndexItem> = new Map();
@@ -440,13 +449,45 @@ export async function scrapePeopleIndex(
   // 若三种来源（首屏 Hydration / API 拦截 / DOM）都没拿到任何条目，
   // 保存当前页面 HTML 快照以便排查（通常意味着登录态失效的登录墙，或风控返回的空页）。
   if (result.length === 0) {
+    const accessState = await page.evaluate((type) => {
+      const bodyText = document.body.textContent || '';
+      const emptyTexts = type === 'answers'
+        ? ['还没有回答', '暂无回答']
+        : ['还没有文章', '暂无文章'];
+      return {
+        hasLoginWall: !!document.querySelector('.signFlowModal, .SignFlow, input[name="username"], button.SignFlow-submitButton')
+          || bodyText.includes('立即登录/注册')
+          || bodyText.includes('登录知乎，您可以享受'),
+        hasChallenge: !!document.querySelector('#zh-zse-ck, script[src*="zse-ck"]')
+          || window.location.href.includes('unhuman')
+          || window.location.href.includes('captcha'),
+        hasExplicitEmpty: emptyTexts.some(text => bodyText.includes(text))
+      };
+    }, itemType);
+    if (accessState.hasLoginWall) {
+      throw new Error('LOGIN_REQUIRED: 当前知乎会话显示登录页面，登录态缺失或已过期。请重新运行 npm run login 后重试。');
+    }
+    const cookies = await page.context().cookies();
+    const loggedIn = cookies.some(cookie => cookie.name === 'z_c0');
+    if (!loggedIn) {
+      throw new Error('LOGIN_REQUIRED: 无头浏览器未登录（缺少 z_c0 cookie），知乎未返回任何可归档内容。请先运行 npm run login 完成扫码登录后重试。');
+    }
+    if (accessState.hasExplicitEmpty) {
+      logger.info(`知乎明确返回 ${itemType} 空状态。`);
+      return [];
+    }
     try {
-      const debugPath = path.resolve(process.cwd(), `debug-people-${itemType}.html`);
+      const debugRoot = resolveBrowserCacheDir({ cwd: process.cwd(), environment: process.env });
+      fs.mkdirSync(debugRoot, { recursive: true });
+      const debugPath = path.join(debugRoot, `debug-people-${itemType}.html`);
       fs.writeFileSync(debugPath, await page.content(), 'utf-8');
       logger.error(`未发现任何条目，已保存调试页面快照至: ${debugPath}（可据此判断是否为登录墙 / 风控空页）`);
     } catch {
       // ignore
     }
+    throw new Error(accessState.hasChallenge
+      ? 'CAPTCHA_REQUIRED: 知乎返回了人机验证页面，请重新运行 npm run login 完成验证后重试。'
+      : 'CAPTCHA_REQUIRED: 登录态存在，但知乎未返回可验证的内容索引；请运行 npm run login 在有头浏览器中确认页面后重试。');
   }
 
   logger.info(`扫描答主 ${peopleId} 列表结束，共发现 ${result.length} 条有效内容`);
