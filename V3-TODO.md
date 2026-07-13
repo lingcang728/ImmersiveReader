@@ -465,7 +465,7 @@
 ### F. 安全收紧与旧前端移除
 
 - [x] 新 Podcast/知乎流程自动测试与短样本 QA 全部通过后，暂停等待“删除旧前端”独立授权。
-  - 2026-07-13 `scripts\verify.ps1` 通过（Podcast 27、Zhihu 25）；两份真实音频短样本本地回归通过；旧 Podcast/知乎入口不删除，等待清单末尾独立授权门。
+  - 2026-07-13 `scripts\verify.ps1` 通过（Rust 88、Podcast 27、Zhihu 25）；两份真实音频短样本本地回归通过；旧 Podcast/知乎入口不删除，等待清单末尾独立授权门。
 - [ ] 获准后删除 Podcast 旧 GUI/PowerShell 托盘打包入口。
 - [ ] 获准后删除知乎旧控制台打包入口。
 - [x] 收紧 Tauri CSP、capabilities、通用 `fs:default` 和 `opener:default`。
