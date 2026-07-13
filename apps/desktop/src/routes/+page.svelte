@@ -40,6 +40,7 @@
 		readingLineHeight,
 		readingWidth,
 		readingFontFamily,
+		autoFocusMode,
 	} from "$lib/stores/app";
 	import SearchBar from "$lib/components/SearchBar.svelte";
 	import TocPanel from "$lib/components/TocPanel.svelte";
@@ -2220,6 +2221,12 @@
 						if (currentLoadToken === loadToken) {
 							enterFocusMode();
 						}
+					} else if ($autoFocusMode) {
+						$focusMode = true;
+						await tick();
+						if (currentLoadToken === loadToken) {
+							enterFocusMode();
+						}
 					}
 				}
 			}
@@ -4280,7 +4287,11 @@
 		flex-direction: column;
 		flex: none;
 		z-index: 55;
-		background: var(--bg);
+		background: color-mix(in srgb, var(--bg) 86%, var(--link) 14%);
+		border-bottom: 1px solid color-mix(in srgb, var(--hr) 92%, var(--text-secondary) 8%);
+		box-shadow:
+			0 1px 0 color-mix(in srgb, var(--hr) 60%, transparent),
+			0 2px 8px color-mix(in srgb, var(--bg-secondary) 60%, transparent);
 		transition:
 			transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1),
 			opacity 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -4327,9 +4338,9 @@
 		justify-content: space-between;
 		height: 40px;
 		padding: 0 16px;
-		border-bottom: 1px solid var(--hr);
+		border-bottom: 1px solid color-mix(in srgb, var(--hr) 92%, var(--text-secondary) 8%);
 		user-select: none;
-		background: var(--bg);
+		background: transparent;
 	}
 
 	.chrome-extra-actions {
@@ -4470,7 +4481,7 @@
 	}
 	.icon-btn::after {
 		content: ''; position: absolute; inset: 0;
-		background: linear-gradient(135deg, rgba(255, 255, 255, 0.4) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.1) 100%);
+		background: linear-gradient(135deg, color-mix(in srgb, var(--text) 10%, transparent) 0%, transparent 50%, color-mix(in srgb, var(--text) 4%, transparent) 100%);
 		opacity: 0; transition: opacity 0.3s ease;
 		pointer-events: none;
 	}
@@ -4479,7 +4490,10 @@
 		border-color: var(--hr);
 		color: var(--text);
 		transform: translateY(-2px);
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1), inset 0 1px 1px rgba(255, 255, 255, 0.2);
+		box-shadow:
+			0 3px 10px color-mix(in srgb, var(--bg-secondary) 80%, transparent),
+			0 1px 2px color-mix(in srgb, var(--text) 6%, transparent),
+			inset 0 1px 1px color-mix(in srgb, var(--text) 8%, transparent);
 		backdrop-filter: blur(8px);
 		-webkit-backdrop-filter: blur(8px);
 	}
@@ -4488,7 +4502,9 @@
 	}
 	.icon-btn:active {
 		transform: translateY(0);
-		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+		box-shadow:
+			0 1px 3px color-mix(in srgb, var(--bg-secondary) 80%, transparent),
+			0 1px 1px color-mix(in srgb, var(--text) 4%, transparent);
 	}
 	.icon-btn.active {
 		color: var(--link);

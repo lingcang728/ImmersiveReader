@@ -89,7 +89,27 @@
 	on:dblclick={onTitlebarDblClick}
 >
 	<div class="chrome-leading" data-no-drag>
-		<img class="app-icon" src="/favicon.png" alt="" width="16" height="16" draggable="false" />
+		<svg class="app-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true" width="16" height="16">
+			<path
+				d="M4 5.5c2.2-1.2 4.3-1.5 6.5-.4V18c-2.2-1.1-4.3-.9-6.5.3V5.5Z"
+				stroke="currentColor"
+				stroke-width="1.6"
+				stroke-linejoin="round"
+			/>
+			<path
+				d="M20 5.5c-2.2-1.2-4.3-1.5-6.5-.4V18c2.2-1.1 4.3-.9 6.5.3V5.5Z"
+				stroke="currentColor"
+				stroke-width="1.6"
+				stroke-linejoin="round"
+			/>
+			<path
+				d="M12 5.2v12.6"
+				stroke="currentColor"
+				stroke-width="1.4"
+				stroke-linecap="round"
+				opacity="0.9"
+			/>
+		</svg>
 		<span class="chrome-title">{title || '沉浸阅读'}</span>
 	</div>
 	<div class="chrome-controls" data-no-drag>
@@ -163,8 +183,8 @@
 		height: var(--chrome-h);
 		min-height: var(--chrome-h);
 		padding: 0 6px 0 12px;
-		border-bottom: 1px solid var(--hr);
-		background: color-mix(in srgb, var(--bg) 92%, var(--link) 8%);
+		border-bottom: 1px solid color-mix(in srgb, var(--hr) 92%, var(--text-secondary) 8%);
+		background: color-mix(in srgb, var(--bg) 86%, var(--link) 14%);
 		color: var(--text);
 		user-select: none;
 		flex: none;
@@ -207,14 +227,15 @@
 		width: 16px;
 		height: 16px;
 		flex: none;
+		color: var(--link);
 		border-radius: 3px;
 	}
 
 	.chrome-title {
-		font-size: 12px;
-		font-weight: 500;
-		letter-spacing: 0.01em;
-		color: var(--text-secondary);
+		font-size: 12.5px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		color: var(--text);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -231,10 +252,10 @@
 	.chrome-btn {
 		display: grid;
 		place-items: center;
-		width: 40px;
-		height: 28px;
+		width: 38px;
+		height: 26px;
 		border: 0;
-		border-radius: 6px;
+		border-radius: 5px;
 		background: transparent;
 		color: var(--text-secondary);
 		cursor: pointer;
@@ -244,7 +265,7 @@
 	}
 
 	.chrome-btn:hover {
-		background: color-mix(in srgb, var(--link) 14%, transparent);
+		background: color-mix(in srgb, var(--link) 12%, transparent);
 		color: var(--text);
 	}
 

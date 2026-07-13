@@ -126,7 +126,43 @@ readingFontFamily.subscribe((v) =>
 );
 
 // Focus mode
-export const focusMode = writable<boolean>(false);
+let savedFocusMode = false;
+try {
+	const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('mmbook-focus-mode') : null;
+	if (raw !== null) savedFocusMode = raw === 'true';
+} catch {
+	// localStorage may be disabled — fall back to default
+}
+
+export const focusMode = writable<boolean>(savedFocusMode);
+
+focusMode.subscribe((value) => {
+	try {
+		localStorage.setItem('mmbook-focus-mode', String(value));
+	} catch {
+		// localStorage may be disabled — silently skip
+	}
+});
+
+// Auto-focus: automatically enter focus mode when opening an article.
+let savedAutoFocusMode = false;
+try {
+	const raw =
+		typeof localStorage !== 'undefined' ? localStorage.getItem('mmbook-auto-focus') : null;
+	if (raw !== null) savedAutoFocusMode = raw === 'true';
+} catch {
+	// localStorage may be disabled — fall back to default
+}
+
+export const autoFocusMode = writable<boolean>(savedAutoFocusMode);
+
+autoFocusMode.subscribe((value) => {
+	try {
+		localStorage.setItem('mmbook-auto-focus', String(value));
+	} catch {
+		// localStorage may be disabled — silently skip
+	}
+});
 
 // Search
 export const searchOpen = writable<boolean>(false);

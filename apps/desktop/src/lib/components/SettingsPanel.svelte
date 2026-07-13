@@ -10,6 +10,7 @@
 		readingLineHeight,
 		readingWidth,
 		readingFontFamily,
+		autoFocusMode,
 		READING_LINE_HEIGHTS,
 		READING_WIDTHS,
 	} from "$lib/stores/app";
@@ -330,6 +331,17 @@
 							宋体
 						</button>
 					</div>
+				</div>
+				<div class="typo-row">
+					<span class="typo-label">自动沉浸</span>
+					<label class="toggle-switch" title="打开文章后自动进入沉浸模式">
+						<input
+							type="checkbox"
+							checked={$autoFocusMode}
+							on:change={() => ($autoFocusMode = !$autoFocusMode)}
+						/>
+						<span class="toggle-slider" aria-hidden="true"></span>
+					</label>
 				</div>
 			</div>
 
@@ -676,6 +688,48 @@
 		text-align: center;
 		font-size: 12px;
 		color: var(--text);
+	}
+
+	.toggle-switch {
+		position: relative;
+		display: inline-block;
+		width: 40px;
+		height: 22px;
+		cursor: pointer;
+	}
+	.toggle-switch input {
+		position: absolute;
+		opacity: 0;
+		width: 0;
+		height: 0;
+	}
+	.toggle-slider {
+		position: absolute;
+		inset: 0;
+		border-radius: 999px;
+		background: var(--hr);
+		transition: background 0.2s ease;
+	}
+	.toggle-slider::before {
+		content: '';
+		position: absolute;
+		left: 2px;
+		top: 2px;
+		width: 18px;
+		height: 18px;
+		border-radius: 50%;
+		background: var(--bg);
+		transition: transform 0.2s ease;
+	}
+	.toggle-switch input:checked + .toggle-slider {
+		background: var(--link);
+	}
+	.toggle-switch input:checked + .toggle-slider::before {
+		transform: translateX(18px);
+	}
+	.toggle-switch input:focus-visible + .toggle-slider {
+		outline: 2px solid var(--link);
+		outline-offset: 2px;
 	}
 
 	@keyframes fadeIn {
