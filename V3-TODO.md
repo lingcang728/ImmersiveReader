@@ -451,6 +451,14 @@
   - 恢复前扫描无数据库、Profile、日志、本地配置或密钥形态匹配；只推送原始对象链，没有推送 ImmersiveReader 整合历史。
   - GitHub 仓库：`https://github.com/lingcang728/Zhihu_packer`；私有，默认分支 `master`，远端 HEAD 精确为 `35d78f9ea83f4ebc48c269dfc07075f53f35c5da`，`isArchived=true`。
 
+### 43. 根级 Windows Release Action
+
+- [x] 将失效的 subtree 内 workflow 修正为 GitHub 可发现的根级 Windows x64 发布流程。
+  - 实现 commit：`831a6b5 ci(release): activate Windows desktop workflow`；删除 `apps/desktop/.github/workflows/release.yml`，新增 `.github/workflows/release.yml`。
+  - 流程只构建当前支持的 `windows-latest`，Node 22、Rust stable、npm/Rust cache 均指向 `apps/desktop`；Tauri 官方 action 使用 `projectPath: apps/desktop` 与 `--no-sign --bundles nsis`，tag 推送创建 draft release。
+  - PyYAML 6.0.3 解析通过，workflow contract 检查通过；本地完整 `scripts\verify.ps1` 已通过。
+  - `ship:dev` 通过；开发 EXE `2026-07-13 17:38:09`，SHA-256 `C34EDCBF3005C406AA69706E9879F49E2DB20203733B8E677F08ED0CF9088AFA`，未注册 Markdown 关联。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
