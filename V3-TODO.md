@@ -493,7 +493,7 @@
   - 预检已完成；完整原始音频执行仍未进行，等待独立授权；授权门记录见本清单末尾“明确授权门”。
 - [ ] 获准后完整执行两个原始音频，并核对前后 SHA-256 不变。
 - [x] 完成 1.1.0 version、README、release notes、runtime manifest、release manifest 和 QA report。
-  - 版本已同步到 desktop package/Cargo/Tauri config；`docs/release/1.1.0/` 包含 release notes、QA report、17 项 runtime manifest snapshot 和 release manifest；`scripts\verify.ps1` 及 `ship:dev` 通过，开发 EXE `2026-07-13 11:16:37 / C302561A94048DA2...`。
+  - 版本已同步到 desktop package/Cargo/Tauri config；`docs/release/1.1.0/` 包含 release notes、QA report、17 项 runtime manifest snapshot 和 release manifest；最终 `scripts\verify.ps1` 通过，`ship:dev` 产物为 `2026-07-13 12:56:36 / 3D27BF62BB98D6F8...`。
 - [ ] 暂停等待正式 `ship:local` 授权；获准后只安装正式版，不修改文件关联。
 - [ ] Markdown 文件关联另行报告 UserChoice/Classes/恢复方案并等待独立授权。
 
