@@ -422,7 +422,9 @@
 
 ### E. 统一 Shell、阅读保护与设置
 
-- [ ] 把现有阅读器整体封装为独立 `ReaderWorkspace`，不重写 Focus/滚动/viewport anchor 算法。
+- [x] 把现有阅读器整体封装为独立 `ReaderWorkspace`，不重写 Focus/滚动/viewport anchor 算法。
+  - `ReaderWorkspace.svelte` 现在拥有阅读工作区容器、连读时 overflow 策略和 Focus 键盘滚动的 `scroll-behavior` 选择器；`+page.svelte` 继续通过 `bind:element={contentEl}` 使用原有 Focus、滚动和 viewport-anchor 算法。实现 commit：`47ea4ba refactor(reader): isolate workspace shell`。
+  - `npm.cmd --prefix .\\apps\\desktop run check`、`scripts\\verify.ps1`、书架 Playwright 多视口/状态 QA 通过；`ship:dev` 时间 `2026-07-13 10:13:32`，开发 EXE SHA-256 前 16 位 `64FDD43D3C1FAF2B`；精确开发 EXE 启动存活 3 秒并停止后残留进程 0。
 - [x] 实现 NavigationGuard：保存并继续、放弃并继续、取消导航。
   - `+page.svelte` 增加原生 dialog 三选项 Guard；保存失败会取消导航，放弃会恢复编辑前 DOM，取消保持当前编辑；实现 commit：`9186eec fix(reader): add unsaved navigation guard`。
   - Guard 接入 Markdown 切换、书目/章节切换、返回书架、退出精读和退出应用；完整 `scripts\verify.ps1` 通过，Svelte 0 警告。
