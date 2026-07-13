@@ -400,6 +400,18 @@
   - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、Rust 89、知乎 32、Podcast 27、quick validation。
   - `ship:dev` 通过；开发 EXE `2026-07-13 15:54:23`，SHA-256 `D307F6F1FCF5696DFAFEBEC12A057645156A45692101D535A39CEA770D7F2576`；PID `122740` 精确路径启动，标题为 `沉浸阅读 · 开发版`，停止后残留精确进程 0。
 
+### 38. 正式 V3 数据迁移、凭据转存与完整对账
+
+- [x] 完成旧 MMbook、Podcast、知乎数据库/Profile/Library 元数据和 legacy trash 的正式迁移，并生成逐数据类回执与回滚记录。
+  - 实现 commits：`732c62b feat(migration): add verified production data import`、`c897de5 fix(migration): support single-file tree summaries`；脚本默认只读预演，只有 `-Apply` 才写入。
+  - 正式 run：`20260713-v3-production`；回执位于 `%LOCALAPPDATA%\ImmersiveReader\Data\Migrations\20260713-v3-production\receipt.json`，状态 `verified`；同时持久化 `reconciliation.json/.md`、`trash-report.json/.md`、`retry-history.json` 和 `rollback\actions.json`。
+  - 阅读状态：新增 159、复用相同项 1、保留冲突 1（`edfb9d8745579fb5.json`），Library 内 4 个 `.reading.json` 全部解析通过；生产 settings 指向 `C:\Users\15pro\Documents\沉浸阅读\Library`。
+  - Podcast：迁移非敏感配置和 legacy 输出索引，未完成任务 0；旧配置与 `Data\Podcast\config.json` 的 Key 字段均为 0。首次尝试已观察到旧明文 Key，并在清除 JSON 前完成两目标写入/读回；PowerShell 5.1 单文件兼容失败后精确回滚，再以用户本轮明确提供的 Key 完成 production/development 两个 Credential Manager 目标读回验证，重试历史不含密钥材料。
+  - 知乎 SQLite：WAL checkpoint `0|0|0`，源 `items/task_items/tasks=1969/0/0`，目标 schema 2 且 `archive_authors/items/revisions=3/1469/1469`，integrity `ok`、foreign key 0 项；目标 SHA-256 `473238365279373B04E7318390B1E7E8ACBE28915BA0A8BEBBD3F63ECAEEA757`。
+  - 知乎 Library：1469 篇正文迁移前后 tree SHA-256 均为 `D7D5964C011453D00FD26DF8A1A5BED6717DF30B18B401DA75A545ECA1CB4DC6`；生成 3 份 provenance，archive catalog 与 Markdown 一一对应，reconciliation unresolved 0。
+  - 受管 Profile：复制 203 个非缓存文件、9,964,812 bytes 到 `Data\Private\ZhihuProfile`，tree SHA-256 `2E820A32EC03641966E2753A30DB99B1D9FFAF783AE08122352F432F5B57866C`；Cache/Code Cache/GPUCache/GrShaderCache/ShaderCache 未进入 Data/Documents/Backups。legacy trash 2 项保持原位只读，未伪造原路径。
+  - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、Rust 90、知乎 33、Podcast 27、quick validation；`ship:dev` EXE `2026-07-13 16:19:47`，SHA-256 `8AD074B64E13B6AB16B26F72B3BB9E6D9589ADD315E70A04B54CD2CD73DAA3F2`，PID `110312` 精确路径启动响应正常，退出后残留 0。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -420,15 +432,6 @@
   - `preview_legacy_migration` 现在将旧 `mmbook\recent-files.json` 映射到当前 channel 的 Settings 状态目录，保持只读、敏感性标记和 preview hash 稳定；实现 commit：`792d1c3 feat(migration): preview legacy recent files`。
   - 定向 `migration::preview` 测试 1 项、完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 21:35:36`，EXE SHA-256 前 16 位 `D3D877E53F25310C`，PID `83716` 启动存活并已停止，残留匹配进程 0。
   - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。此项只完成 dry-run preview 覆盖，真实迁移仍受本节“完成 dry-run 后暂停”独立授权门约束。
-- [ ] 迁移单 Markdown 阅读状态、Library `.reading.json` 和临时内容记录。
-- [ ] 迁移旧 Podcast 未完成任务、非敏感配置与输出索引。
-- [ ] 旧明文 DeepSeek Key 写入 Credential Manager并读回验证后，清除新旧 JSON 中的 key 字段。
-- [ ] 迁移知乎 SQLite，执行完整 WAL/integrity/count/receipt 流程。
-- [ ] 迁移知乎 Profile 到 Data\Private；不得进入 Documents 或 Backups。
-- [ ] 迁移已有知乎 Markdown、manifest、provenance 和 archive catalog。
-- [ ] 为 legacy `.trash` 生成迁移报告；无法推断原路径的条目保持只读并要求人工选择。
-- [ ] 将 reconciliation.json / reconciliation.md 和 migration receipt 持久化到 Data\Migrations。
-- [ ] 为每个数据类记录旧位置、新位置、校验、冲突、回滚和敏感性。
 - [x] 完成 dry-run 后暂停，等待“真实数据迁移”独立授权，再执行正式数据迁移。
   - 2026-07-13 `cargo test ... migration::preview_tests` 通过（1 passed）；preview 对全量数据类只读、稳定、标记敏感 Profile 且不创建目标数据；证据：`.omo/ulw-loop/evidence/migration-preview-dry-run-20260713.md`。正式迁移未执行。
 
