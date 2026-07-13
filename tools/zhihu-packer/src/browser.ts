@@ -57,6 +57,21 @@ function shouldUseObscura(headless: boolean) {
   return headless && process.env.ZHIHU_PACKER_BROWSER === 'obscura';
 }
 
+type BrowserLaunchTarget =
+  | { executablePath: string }
+  | { channel: 'chrome' | 'msedge' };
+
+export function browserLaunchTargets(
+  headless: boolean,
+  environment: Readonly<Record<string, string | undefined>>
+): BrowserLaunchTarget[] {
+  const managedExecutable = headless ? resolveBrowserExecutable(environment) : undefined;
+  if (managedExecutable) {
+    return [{ executablePath: managedExecutable }];
+  }
+  return [{ channel: 'chrome' }, { channel: 'msedge' }];
+}
+
 function findObscuraExecutable(): string | null {
   const candidates: string[] = [];
 
@@ -317,12 +332,11 @@ export async function getBrowserContext(headless = true): Promise<BrowserContext
     return activeContext;
   }
 
-  const managedExecutable = resolveBrowserExecutable(process.env);
-  const channels = managedExecutable ? [undefined] : ['chrome', 'msedge'];
+  const launchTargets = browserLaunchTargets(headless, process.env);
   let lastError: any = null;
   const resolvedUserAgent = await resolveUserAgent();
 
-  for (const channel of channels) {
+  for (const target of launchTargets) {
     try {
       const options: any = {
         headless,
@@ -335,10 +349,10 @@ export async function getBrowserContext(headless = true): Promise<BrowserContext
           '--disk-cache-dir=' + browserCacheDir,
         ]
       };
-      if (managedExecutable) {
-        options.executablePath = managedExecutable;
-      } else if (channel) {
-        options.channel = channel;
+      if ('executablePath' in target) {
+        options.executablePath = target.executablePath;
+      } else {
+        options.channel = target.channel;
       }
       fs.mkdirSync(browserCacheDir, { recursive: true });
       activeContext = await chromium.launchPersistentContext(chromeProfileDir, options);
@@ -368,7 +382,10 @@ export async function getBrowserContext(headless = true): Promise<BrowserContext
         };
       });
 
-      logger.info(`成功使用浏览器 channel: ${channel || 'playwright-default'} 启动 Playwright Context (headless: ${headless})`);
+      const browserLabel = 'executablePath' in target
+        ? target.executablePath
+        : target.channel;
+      logger.info(`成功使用浏览器 ${browserLabel} 启动 Playwright Context (headless: ${headless})`);
       return activeContext;
     } catch (e: any) {
       lastError = e;

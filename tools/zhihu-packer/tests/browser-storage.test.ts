@@ -5,6 +5,21 @@ import path from 'node:path';
 import test from 'node:test';
 
 import type { BrowserContext } from 'playwright-core';
+import { browserLaunchTargets } from '../src/browser.js';
+
+test('uses system Chrome for headed authorization while retaining managed headless Chromium', () => {
+  const environment = {
+    IMMERSIVE_CHROMIUM_EXECUTABLE: 'G:/managed/chromium/msedge.exe'
+  };
+
+  assert.deepEqual(browserLaunchTargets(false, environment), [
+    { channel: 'chrome' },
+    { channel: 'msedge' }
+  ]);
+  assert.deepEqual(browserLaunchTargets(true, environment), [
+    { executablePath: environment.IMMERSIVE_CHROMIUM_EXECUTABLE }
+  ]);
+});
 
 test('stores Obscura login cookies beneath the managed Zhihu profile', async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'immersive-zhihu-browser-'));
