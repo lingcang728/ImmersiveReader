@@ -1,6 +1,6 @@
 # ImmersiveReader V3 To-Do List
 
-更新时间：2026-07-12 22:43（Asia/Shanghai）
+更新时间：2026-07-13 13:46（Asia/Shanghai）
 
 这份文件是 `ImmersiveReader 单窗口三合一整合、数据安全与干净历史实施计划 V3` 的持续交接清单，也是后续新对话的首要进度入口。实施者不需要读取旧聊天记录即可从这里继续。
 
@@ -15,13 +15,13 @@
 ## 当前交接快照
 
 - 分支：`codex/unified-immersive-reader`
-- 当前产品 commit：`e389914 feat(settings): add recovery center`
+- 当前产品 commit：`c85fc85 fix(desktop): guarantee tray exit fallback`
 - 基线 `origin/main`：`1c7c72f1b1ebceb7a77d0cb0e7051789d597fa1a`
 - 最新开发 EXE：`.dev-install\immersive-reader-dev.exe`
-- 最新开发 EXE 时间：`2026-07-12 22:38:31`
-- 最新开发 EXE SHA-256：`39CCA58AC8D00A7EE866A1F24B23B278E13A657119808646FA6A56A52372687A`
+- 最新开发 EXE 时间：`2026-07-13 13:41:30`
+- 最新开发 EXE SHA-256：`5350B8E9DF2EBFD5253F13A12B33335A9D39E8678A2C2E662AA5F7898BCB1602`
 - 最近全仓验证：`scripts\verify.ps1` 通过
-- 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 警告、桌面 Rust 87、知乎 25、Podcast 27；quick validation 通过
+- 当前测试：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、桌面 Rust 88、知乎 25、Podcast 27；quick validation 通过
 - 正式版、正式数据、`.md/.markdown` 文件关联均未改动
 - 预开发 bundle：`C:\Users\15pro\OneDrive\Documents\Codex\ImmersiveReader-Git-Backup\20260711-150053\01-pre-development.bundle`
 - bundle SHA-256：`AA990BC4727505DA4DA65F30FE076859659FC8C1CDF5E4DEEE83DA8108FFCAF4`
@@ -485,15 +485,15 @@
   - 2026-07-13 已在隔离 `ImmersiveReader-QA-zhihu-v3-20260713` 实际 dry-run：受管 Profile 无登录态，目标 answers/articles 页面返回 404/空索引（`logged=false`），结果 `0 + 0`，未创建任务、未写 Library、未发布；登录前置/目标可达性需人工处理；验证码未触发。证据：`.omo/ulw-loop/evidence/zhihu-qa-20260713.md`。
 - [x] Podcast 与知乎各一个活动任务并行测试。
   - 2026-07-13 新增并通过 `control::tests::podcast_and_zhihu_active_snapshots_can_coexist`：同一 control.db 同时保存 Podcast/Zhihu 两个 `Running` 快照并按 kind/id 验证；未启动外部真实账号任务。
-- [ ] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
-  - 2026-07-13 最终 `.dev-install` EXE `2026-07-13 12:56:36`、`19152896` bytes、SHA-256 `3D27BF62BB98D6F811B3B518DFCFCB06348A6854BE56AAF22257E8D4BB5A4C2F`；精确启动标题为 `沉浸阅读 · 开发版`，停止后精确 EXE 与开发 WebView 子进程均为 0。直接 Win32 隐藏/恢复有效，但 `CloseMainWindow()` 后 `visible_after_close=true` 且进程保持存活；当前 UIA/DPI 会话未形成可唯一归属的托盘隐藏/恢复证据，因此保持未完成。Rust Job Object 两项测试通过。
+- [x] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
+  - 2026-07-13 最新 `.dev-install` EXE `2026-07-13 13:41:30`、`19143680` bytes、SHA-256 `5350B8E9DF2EBFD5253F13A12B33335A9D39E8678A2C2E662AA5F7898BCB1602`；精确启动标题为 `沉浸阅读 · 开发版`，通过唯一 Dev 托盘提示 `沉浸阅读 Dev` 完成托盘隐藏、恢复和 `退出（保留任务）`，对应状态为 `hidden=true`、`visible=true`、退出后进程 `false`；退出后精确 EXE 与开发 WebView 子进程均为 0。Rust Job Object 两项测试和完整 `scripts\verify.ps1` 通过。`CloseMainWindow()` 的单独关闭按钮路径不作为托盘菜单证据。
 - [x] 生成两个完整音频的时长、磁盘、文本规模、费用上限与可用空间报告。
   - 2026-07-13 只读 FFprobe 与预算公式报告：总时长 `3593.990427s`、预计磁盘 `595659231` bytes、翻译规模 `43128` tokens、API 费用上限 `¥0.258768`、C: 可用 `131308507136` bytes；证据：`.omo/ulw-loop/evidence/full-audio-preflight-20260713.md`。
 - [x] 暂停等待“完整长音频/API 费用 QA”独立授权。
   - 预检已完成；完整原始音频执行仍未进行，等待独立授权；授权门记录见本清单末尾“明确授权门”。
 - [ ] 获准后完整执行两个原始音频，并核对前后 SHA-256 不变。
 - [x] 完成 1.1.0 version、README、release notes、runtime manifest、release manifest 和 QA report。
-  - 版本已同步到 desktop package/Cargo/Tauri config；`docs/release/1.1.0/` 包含 release notes、QA report、17 项 runtime manifest snapshot 和 release manifest；最终 `scripts\verify.ps1` 通过，`ship:dev` 产物为 `2026-07-13 12:56:36 / 3D27BF62BB98D6F8...`。
+  - 版本已同步到 desktop package/Cargo/Tauri config；`docs/release/1.1.0/` 包含 release notes、QA report、17 项 runtime manifest snapshot 和 release manifest；最终 `scripts\verify.ps1` 通过，`ship:dev` 产物为 `2026-07-13 13:41:30 / 5350B8E9DF2EBFD5...`。
 - [ ] 暂停等待正式 `ship:local` 授权；获准后只安装正式版，不修改文件关联。
 - [ ] Markdown 文件关联另行报告 UserChoice/Classes/恢复方案并等待独立授权。
 
