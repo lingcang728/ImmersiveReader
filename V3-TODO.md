@@ -418,7 +418,8 @@
 - [ ] 为 legacy `.trash` 生成迁移报告；无法推断原路径的条目保持只读并要求人工选择。
 - [ ] 将 reconciliation.json / reconciliation.md 和 migration receipt 持久化到 Data\Migrations。
 - [ ] 为每个数据类记录旧位置、新位置、校验、冲突、回滚和敏感性。
-- [ ] 完成 dry-run 后暂停，等待“真实数据迁移”独立授权，再执行正式数据迁移。
+- [x] 完成 dry-run 后暂停，等待“真实数据迁移”独立授权，再执行正式数据迁移。
+  - 2026-07-13 `cargo test ... migration::preview_tests` 通过（1 passed）；preview 对全量数据类只读、稳定、标记敏感 Profile 且不创建目标数据；证据：`.omo/ulw-loop/evidence/migration-preview-dry-run-20260713.md`。正式迁移未执行。
 
 ### E. 统一 Shell、阅读保护与设置
 
