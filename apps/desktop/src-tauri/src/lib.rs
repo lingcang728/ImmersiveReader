@@ -975,6 +975,12 @@ pub fn run() {
             let _ = app.emit("open-file", file_path);
         }
     }));
+    let builder = builder.on_window_event(|window, event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = window.hide();
+        }
+    });
     let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1039,13 +1045,6 @@ pub fn run() {
         .setup(|app| {
             // Windows: file path passed as CLI argument
             let window = app.get_webview_window("main").unwrap();
-            let close_window = window.clone();
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = close_window.hide();
-                }
-            });
             let args: Vec<String> = std::env::args().collect();
             if let Some(file_path) = initial_markdown_path(&args) {
                 let _ = window.eval(&format!(
