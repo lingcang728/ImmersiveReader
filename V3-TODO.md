@@ -439,10 +439,12 @@
   - 书架任务 rail 保留 Podcast/知乎开始、暂停、恢复、取消、重试、打开结果和可恢复字节显示；新增最近 60 条结构化事件缓存与最近 12 条展开面板；实现 commit：`b451822 feat(tasks): show structured event log`。
   - 完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 21:57:16`，EXE SHA-256 前 16 位 `07DA7EDCD1FFF7F6F`，PID `105744` 启动存活并已停止，残留匹配进程 0。
   - 正式 EXE 时间 `2026-07-11 09:49:40`、SHA-256 未变；`.md/.markdown` 仍指向正式 EXE。
-- [ ] 实现书目详情、provenance、revision、来源链接和任务记录。
-  - 书架“详情”对话框已展示 manifest 的 source/sourceId、生成/更新时间、章节列表和当前阅读状态；Rust `open_book` 已校验并返回匹配的 provenance.json（revision、任务 ID、engineVersion、manifest SHA-256）。来源链接与完整任务记录仍待对应数据契约和 UI 接入；实现 commit：`aa1016f feat(library): expose book provenance details`。
+- [x] 实现书目详情、provenance、revision、来源链接和任务记录。
+  - 书架“详情”对话框展示 manifest 的 source/sourceId、生成/更新时间、章节列表和当前阅读状态；Rust `open_book` 校验并返回匹配的 provenance.json（revision、任务 ID、engineVersion、manifest SHA-256）；实现基础 commit：`aa1016f feat(library): expose book provenance details`。
   - 知乎 sourceId 现在可通过受限 `https://www.zhihu.com/people/<id>` 来源按钮打开，并复用既有 HTTP/HTTPS 外链校验；实现 commit：`1d45a26 feat(library): add safe source links`。
-  - 书架 Playwright harness 于 `2026-07-12T22:24:19+0800` 通过，覆盖 900×700、1280×800、1440×900 与 ready/loading/empty/unwritable 状态；使用 mock Tauri 数据，未接触正式 Library。
+  - `BookDetail.taskRecords` 现在按 `bookId` 关联 control.db 的持久化任务快照，详情页展示任务类型、状态、revision、engineStage、时间和错误信息；实现 commit：`23f6c5e feat(library): show associated task records`。
+  - 书架 Playwright harness 于 `2026-07-13T10:22:28+0800` 通过，覆盖详情/provenance/来源按钮/任务记录、900×700、1280×800、1440×900 与 ready/loading/empty/unwritable 状态；使用 mock Tauri 数据，未接触正式 Library。
+  - `npm.cmd --prefix .\\apps\\desktop run check`、Rust 87 项、前端 38 项通过；`ship:dev` 时间 `2026-07-13 10:24:29`，EXE SHA-256 前 16 位 `711CDC0B900CB181`，精确开发 EXE 启动存活 3 秒并停止后残留进程 0。
 - [x] 完成设置页：Library/Data/Cache/Logs/Backups 路径、大小、打开目录、安全清理、备份、凭据、迁移和恢复状态。
   - Settings 已接入受管路径展示/大小/固定根目录打开/路径复制、安全缓存清理、只读迁移 preview、发布恢复检查、Credential Manager 状态、排除 Library/Cache/Logs/凭据/Profile 的状态备份和 migration run 状态；实现 commit：`9b1378d feat(settings): add state backup and migration status`。
   - 完整 `scripts\verify.ps1` 通过；`ship:dev` 时间 `2026-07-12 22:29:33`，EXE SHA-256 前 16 位 `5B9E03673723D583`，PID `96324` 启动存活并已停止，残留匹配进程 0；正式 EXE 与 Markdown 关联未变。完整 Library 备份与 migration recovery 操作页面仍归入第 453 项。
