@@ -486,7 +486,7 @@
 - [x] Podcast 与知乎各一个活动任务并行测试。
   - 2026-07-13 新增并通过 `control::tests::podcast_and_zhihu_active_snapshots_can_coexist`：同一 control.db 同时保存 Podcast/Zhihu 两个 `Running` 快照并按 kind/id 验证；未启动外部真实账号任务。
 - [ ] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
-  - 2026-07-13 最新 `.dev-install` EXE 启动/停止后 WebView 子进程残留 0；Rust Job Object 两项测试通过。CLI 关闭请求虽保持进程存活，但原生可见性检查未证明隐藏/恢复闭环，因此该项保持未完成。
+  - 2026-07-13 最终 `.dev-install` EXE `2026-07-13 12:56:36`、`19152896` bytes、SHA-256 `3D27BF62BB98D6F811B3B518DFCFCB06348A6854BE56AAF22257E8D4BB5A4C2F`；精确启动标题为 `沉浸阅读 · 开发版`，停止后精确 EXE 与开发 WebView 子进程均为 0。直接 Win32 隐藏/恢复有效，但 `CloseMainWindow()` 后 `visible_after_close=true` 且进程保持存活；当前 UIA/DPI 会话未形成可唯一归属的托盘隐藏/恢复证据，因此保持未完成。Rust Job Object 两项测试通过。
 - [x] 生成两个完整音频的时长、磁盘、文本规模、费用上限与可用空间报告。
   - 2026-07-13 只读 FFprobe 与预算公式报告：总时长 `3593.990427s`、预计磁盘 `595659231` bytes、翻译规模 `43128` tokens、API 费用上限 `¥0.258768`、C: 可用 `131308507136` bytes；证据：`.omo/ulw-loop/evidence/full-audio-preflight-20260713.md`。
 - [x] 暂停等待“完整长音频/API 费用 QA”独立授权。
