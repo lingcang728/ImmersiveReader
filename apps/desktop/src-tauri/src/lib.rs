@@ -975,15 +975,6 @@ pub fn run() {
             let _ = app.emit("open-file", file_path);
         }
     }));
-    let builder = builder.on_window_event(|window, event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            let close_window = window.clone();
-            let _ = window.run_on_main_thread(move || {
-                let _ = close_window.hide();
-            });
-        }
-    });
     let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1120,14 +1111,24 @@ pub fn run() {
         .expect("error while building tauri application");
 
     // macOS: file opened via Apple Event (double-click / Open With)
-    app.run(|_app_handle, event| match event {
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } => {
+            api.prevent_close();
+            if let Some(window) = app_handle.get_webview_window(&label) {
+                let _ = window.hide();
+            }
+        }
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         RunEvent::Opened { urls } => {
             for url in urls {
                 if let Ok(path) = url.to_file_path() {
                     let path_str = path.to_string_lossy().to_string();
                     if is_markdown_path(&path_str) {
-                        let _ = _app_handle.emit("open-file", path_str);
+                        let _ = app_handle.emit("open-file", path_str);
                     }
                 }
             }
