@@ -482,8 +482,10 @@
 - [ ] 在 QA Library 对指定知乎账号执行回答+文章合计 Top 5。
 - [ ] Podcast 与知乎各一个活动任务并行测试。
 - [ ] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
-- [ ] 生成两个完整音频的时长、磁盘、文本规模、费用上限与可用空间报告。
-- [ ] 暂停等待“完整长音频/API 费用 QA”独立授权。
+- [x] 生成两个完整音频的时长、磁盘、文本规模、费用上限与可用空间报告。
+  - 2026-07-13 只读 FFprobe 与预算公式报告：总时长 `3593.990427s`、预计磁盘 `595659231` bytes、翻译规模 `43128` tokens、API 费用上限 `¥0.258768`、C: 可用 `131308507136` bytes；证据：`.omo/ulw-loop/evidence/full-audio-preflight-20260713.md`。
+- [x] 暂停等待“完整长音频/API 费用 QA”独立授权。
+  - 预检已完成；完整原始音频执行仍未进行，等待独立授权；授权门记录见本清单末尾“明确授权门”。
 - [ ] 获准后完整执行两个原始音频，并核对前后 SHA-256 不变。
 - [ ] 完成 1.1.0 version、README、release notes、runtime manifest、release manifest 和 QA report。
 - [ ] 暂停等待正式 `ship:local` 授权；获准后只安装正式版，不修改文件关联。
