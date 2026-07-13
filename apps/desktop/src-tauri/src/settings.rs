@@ -126,12 +126,6 @@ pub fn runtime_root() -> Result<PathBuf, String> {
     Ok(parent.join("runtime"))
 }
 
-pub fn local_runtime_data() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(app_state_dir)
-        .join(AppChannel::current().local_data_directory_name())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{

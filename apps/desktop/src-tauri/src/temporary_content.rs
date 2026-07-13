@@ -13,10 +13,22 @@ pub struct TemporaryItem {
 
 pub fn items() -> Result<Vec<TemporaryItem>, String> {
     let mut items = Vec::new();
-    let path = crate::settings::local_runtime_data().join(r"podcast\output");
-    if !path.exists() {
-        return Ok(items);
+    let locations = crate::storage::StorageLocations::current()?;
+    let roots = [
+        locations.data_root.join(r"Podcast\LegacyOutput"),
+        locations.cache_root.join(r"Podcast\output"),
+    ];
+    for path in roots.into_iter().filter(|path| path.is_dir()) {
+        append_markdown_items(&mut items, &path)?;
     }
+    items.sort_by(|left, right| right.modified_at.cmp(&left.modified_at));
+    Ok(items)
+}
+
+fn append_markdown_items(
+    items: &mut Vec<TemporaryItem>,
+    path: &std::path::Path,
+) -> Result<(), String> {
     for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         if !entry
@@ -52,6 +64,5 @@ pub fn items() -> Result<Vec<TemporaryItem>, String> {
             modified_at,
         });
     }
-    items.sort_by(|left, right| right.modified_at.cmp(&left.modified_at));
-    Ok(items)
+    Ok(())
 }

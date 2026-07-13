@@ -88,6 +88,11 @@ fn podcast_worker_command(
             "PATH",
             std::env::join_paths(path_parts).map_err(|error| error.to_string())?,
         );
+    if let Some(api_key) =
+        crate::secrets::deepseek_api_key(&crate::settings::AppChannel::current())?
+    {
+        command.env("DEEPSEEK_API_KEY", api_key);
+    }
     Ok(command)
 }
 

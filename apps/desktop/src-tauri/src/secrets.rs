@@ -156,6 +156,16 @@ pub fn deepseek_status(channel: &AppChannel) -> Result<SecretStatus, String> {
     })
 }
 
+pub(crate) fn deepseek_api_key(channel: &AppChannel) -> Result<Option<String>, String> {
+    let Some(mut secret) = read_secret(deepseek_target(channel))? else {
+        return Ok(None);
+    };
+    let decoded = String::from_utf8(secret.clone())
+        .map_err(|_| "Credential value was not valid UTF-8".to_string());
+    secret.fill(0);
+    decoded.map(Some)
+}
+
 pub fn set_deepseek_api_key(channel: &AppChannel, api_key: &str) -> Result<SecretStatus, String> {
     let target = deepseek_target(channel);
     write_secret(target, api_key.as_bytes())?;
