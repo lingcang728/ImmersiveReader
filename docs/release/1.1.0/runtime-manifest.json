@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "version": "1.1.0",
+  "source": "runtime/manifest.json",
+  "entryCount": 17,
+  "entries": [
+    {"path":"zhihu/node/node.exe","bytes":91694408,"sha256":"3331E1FFE19874215472217C5E94F5A0C6D8E18C4AC7111D3937AA0AD5E9B4A5"},
+    {"path":"zhihu/chromium/msedge.exe","bytes":4970824,"sha256":"D17F5AB0779E0A763CD70752833793A9E7073FCBDD1FBA2C0E6AD13FCD135D91"},
+    {"path":"podcast/python/python.exe","bytes":103704,"sha256":"CA60CF785B2314A6D6599ECED15BDF094E6DB171BEC996B97A70B995942C3C37"},
+    {"path":"podcast/ffmpeg/ffmpeg.exe","bytes":101457920,"sha256":"228D7A8556258DE907FDB55F36850078EBC7680B84EC30D84EA02E99BEC1D1EB"},
+    {"path":"podcast/ffmpeg/ffprobe.exe","bytes":101251072,"sha256":"0FDE260F5ABD35C9CAFD96F594CC76365A780C1B73A90E35B6A3409EA1DB1BF0"},
+    {"path":"podcast/models/CACHEDIR.TAG","bytes":195,"sha256":"E8893E2DC3B3F4545EF67A0A5B7B769113D38EEF1AA61C7C7BA14659B02AF955F"},
+    {"path":"podcast/models/faster-whisper-large-v3-turbo-local/config.json","bytes":2263,"sha256":"B0253EA6C0D3BEA6B1E19E91A02ACFD3B53F4467362EFCB5A3E6B16C9B3A9B7E"},
+    {"path":"podcast/models/faster-whisper-large-v3-turbo-local/model.bin","bytes":1617884929,"sha256":"E76620F83D5F5B69EFD3D87E3DC180C1BD21DF9FBEBACFD4335E5E1EFCC018DA"},
+    {"path":"podcast/models/faster-whisper-large-v3-turbo-local/preprocessor_config.json","bytes":340,"sha256":"7CCC62C6F2765AF1F3B46C00C9B5894426835A05021C8B9C01EECB6DFB542711"},
+    {"path":"podcast/models/faster-whisper-large-v3-turbo-local/tokenizer.json","bytes":2710337,"sha256":"297B13372AC43916285644FB9687ADD3CC62EE2A1ADB60DA3DC25CC94C1871FD"},
+    {"path":"podcast/models/faster-whisper-large-v3-turbo-local/vocabulary.json","bytes":1068114,"sha256":"C69260F2AB26D659B7C398F9A2B2B48ED0DF16C3B47D7326782FD9CBA71690C1"},
+    {"path":"podcast/models/models--Systran--faster-whisper-large-v3/refs/main","bytes":40,"sha256":"02327F60E1723B7B947A879563D3721444D308349CDB0BC52F490FE186043266"},
+    {"path":"podcast/models/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/config.json","bytes":2394,"sha256":"A9306624F5EC14270A014B647E5C316B6E03A662C369758D1B90697A7B0655B9"},
+    {"path":"podcast/models/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/model.bin","bytes":3087284237,"sha256":"69F74147E3334731BC3A76048724833325D2EC74642FB52620EDA87352E3D4F1"},
+    {"path":"podcast/models/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/preprocessor_config.json","bytes":340,"sha256":"7CCC62C6F2765AF1F3B46C00C9B5894426835A05021C8B9C01EECB6DFB542711"},
+    {"path":"podcast/models/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/tokenizer.json","bytes":2480617,"sha256":"6D8CBD7CD0D8D5815E478DAC67B85A26BBE77C1F5E0C6D76D1CE2ABC0E5F21CA"},
+    {"path":"podcast/models/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/vocabulary.json","bytes":1068114,"sha256":"C69260F2AB26D659B7C398F9A2B2B48ED0DF16C3B47D7326782FD9CBA71690C1"}
+  ]
+}

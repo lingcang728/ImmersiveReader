@@ -1,6 +1,6 @@
 [package]
 name = "immersive-reader"
-version = "1.0.0"
+version = "1.1.0"
 description = "A local-first immersive reading library"
 authors = ["you"]
 edition = "2021"

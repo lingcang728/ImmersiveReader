@@ -2,6 +2,8 @@
 
 沉浸阅读是一个面向 Windows 长文阅读的本地系统，将知乎归档、播客转写和 Markdown 精读统一到同一座书库中。
 
+当前发布版本：1.1.0。
+
 ## 使用方式
 
 安装后从桌面或开始菜单打开“沉浸阅读”。可执行文件默认装在本仓库根目录（`immersive-reader.exe`）。知乎与播客所需的 Node、Chromium、Python、FFmpeg 和 Whisper 模型统一放在同目录的 `runtime/` 中，不再引用三个旧项目。源码工作区也提供统一入口：
@@ -41,8 +43,8 @@ Library\
 ## 数据与隐私
 
 - 正文、图片、进度和应用设置均保存在本机。
-- 知乎登录态和数据库保存在 `%LOCALAPPDATA%\ImmersiveReader\zhihu`，不进入书库或 Git。
-- 播客配置和临时工作区保存在 `%LOCALAPPDATA%\ImmersiveReader\podcast`；密钥不会写入 Git 或验证日志。
+- 知乎登录态保存在 `%LOCALAPPDATA%\ImmersiveReader\Data\Private\ZhihuProfile`，数据库保存在 `%LOCALAPPDATA%\ImmersiveReader\Data\Zhihu\zhihu-packer.db`，不进入书库或 Git。
+- 播客配置和任务数据保存在 `%LOCALAPPDATA%\ImmersiveReader\Data\Podcast`，临时工作区保存在 `%LOCALAPPDATA%\ImmersiveReader\Cache\Podcast`；密钥不会写入 Git 或验证日志。
 - 应用设置保存在 `%APPDATA%\immersive-reader\settings.json`。
 - 播客输入、输出和工作目录仍遵循阅后即焚语义，不会删除书库。
 - 浏览器连读服务只绑定随机的 `127.0.0.1` 端口，并使用一次性高熵会话令牌；桌面应用退出时服务随之停止。
