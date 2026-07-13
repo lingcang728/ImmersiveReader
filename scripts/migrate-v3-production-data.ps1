@@ -97,10 +97,10 @@ function Get-TreeSummary {
         [string]$Filter = '*'
     )
     $files = @(Get-TreeFiles -Root $Root -ExcludedDirectories $ExcludedDirectories -ExcludedFileNames $ExcludedFileNames -Filter $Filter)
-    $lines = foreach ($file in $files | Sort-Object FullName) {
+    $lines = @(foreach ($file in $files | Sort-Object FullName) {
         $relative = (Get-RelativePath -Root $Root -Path $file.FullName).Replace('\', '/')
         "$relative|$($file.Length)|$(Get-Sha256 -Path $file.FullName)"
-    }
+    })
     $fingerprint = if ($lines.Count -eq 0) {
         Get-ByteArraySha256 -Bytes ([byte[]]@())
     } else {
