@@ -2,7 +2,7 @@ use crate::settings::AppChannel;
 use serde::Serialize;
 
 const PRODUCTION_TARGET: &str = "com.lingcang.immersivereading/deepseek-api-key";
-const DEVELOPMENT_TARGET: &str = "com.lingcang.immersivereading.dev/deepseek-api-key";
+const QA_TARGET: &str = "com.lingcang.immersivereading.qa/deepseek-api-key";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,7 +15,7 @@ pub struct SecretStatus {
 pub fn deepseek_target(channel: &AppChannel) -> &'static str {
     match channel {
         AppChannel::Production => PRODUCTION_TARGET,
-        AppChannel::Development | AppChannel::Qa(_) => DEVELOPMENT_TARGET,
+        AppChannel::Qa(_) => QA_TARGET,
     }
 }
 
@@ -179,28 +179,24 @@ pub fn delete_deepseek_api_key(channel: &AppChannel) -> Result<SecretStatus, Str
 
 #[cfg(test)]
 mod tests {
-    use super::{deepseek_target, SecretStatus, DEVELOPMENT_TARGET, PRODUCTION_TARGET};
+    use super::{deepseek_target, SecretStatus, PRODUCTION_TARGET, QA_TARGET};
     use crate::settings::AppChannel;
 
     #[test]
-    fn production_and_development_targets_are_isolated() {
+    fn production_and_qa_targets_are_isolated() {
         assert_eq!(deepseek_target(&AppChannel::Production), PRODUCTION_TARGET);
         assert_eq!(
-            deepseek_target(&AppChannel::Development),
-            DEVELOPMENT_TARGET
-        );
-        assert_eq!(
             deepseek_target(&AppChannel::Qa("run-1".to_string())),
-            DEVELOPMENT_TARGET
+            QA_TARGET
         );
-        assert_ne!(PRODUCTION_TARGET, DEVELOPMENT_TARGET);
+        assert_ne!(PRODUCTION_TARGET, QA_TARGET);
     }
 
     #[test]
     fn secret_status_serialization_never_has_a_secret_field() {
         let status = SecretStatus {
             configured: true,
-            target: DEVELOPMENT_TARGET.to_string(),
+            target: QA_TARGET.to_string(),
             last_verified_at: None,
         };
         let json = serde_json::to_string(&status).expect("status must serialize");

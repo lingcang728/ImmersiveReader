@@ -38,16 +38,6 @@ impl StorageLocations {
                     documents_root.join("Backups"),
                 )
             }
-            AppChannel::Development => {
-                let app_root = local.join("ImmersiveReader-Dev");
-                (
-                    "development".to_string(),
-                    roaming.join(r"immersive-reader-dev\settings.json"),
-                    app_root.clone(),
-                    app_root.join("Library"),
-                    app_root.join("Backups"),
-                )
-            }
             AppChannel::Qa(run_id) => {
                 let app_root = local.join("ImmersiveReader-QA").join(run_id);
                 (
@@ -86,7 +76,7 @@ impl StorageLocations {
             .ok_or_else(|| "Documents directory is unavailable".to_string())?;
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let qa_run_id = std::env::var("IMMERSIVE_QA_RUN_ID").ok();
-        let channel = AppChannel::detect(&executable, qa_run_id.as_deref())?;
+        let channel = AppChannel::detect(qa_run_id.as_deref())?;
         let runtime_root = if let Some(configured) = std::env::var_os("IMMERSIVE_RUNTIME_ROOT") {
             PathBuf::from(configured)
         } else {
@@ -140,50 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn development_roots_do_not_overlap_production() {
-        let production = StorageLocations::resolve_for(
-            &AppChannel::Production,
-            Path::new(r"C:\Users\reader\AppData\Roaming"),
-            Path::new(r"C:\Users\reader\AppData\Local"),
-            Path::new(r"C:\Users\reader\Documents"),
-            Path::new(r"C:\repo\runtime"),
-        );
-        let development = StorageLocations::resolve_for(
-            &AppChannel::Development,
-            Path::new(r"C:\Users\reader\AppData\Roaming"),
-            Path::new(r"C:\Users\reader\AppData\Local"),
-            Path::new(r"C:\Users\reader\Documents"),
-            Path::new(r"C:\repo\runtime"),
-        );
-
-        assert_eq!(
-            development.settings_path,
-            Path::new(r"C:\Users\reader\AppData\Roaming\immersive-reader-dev\settings.json")
-        );
-        assert_eq!(
-            development.library_root,
-            Path::new(r"C:\Users\reader\AppData\Local\ImmersiveReader-Dev\Library")
-        );
-        let production_roots = [
-            &production.data_root,
-            &production.library_root,
-            &production.backups_root,
-        ];
-        let development_roots = [
-            &development.data_root,
-            &development.library_root,
-            &development.backups_root,
-        ];
-        for dev_root in development_roots {
-            assert!(
-                !production_roots.contains(&dev_root),
-                "development root must not equal production root: {}",
-                dev_root.display()
-            );
-        }
-    }
-
-    #[test]
     fn qa_roots_are_scoped_by_safe_run_id() {
         let locations = StorageLocations::resolve_for(
             &AppChannel::Qa("run-20260711".to_string()),
@@ -208,7 +154,7 @@ mod tests {
     #[test]
     fn library_path_rejects_managed_roots_and_their_parents() {
         let locations = StorageLocations::resolve_for(
-            &AppChannel::Development,
+            &AppChannel::Production,
             Path::new(r"C:\Users\reader\AppData\Roaming"),
             Path::new(r"C:\Users\reader\AppData\Local"),
             Path::new(r"C:\Users\reader\Documents"),
@@ -218,7 +164,7 @@ mod tests {
         for unsafe_path in [
             locations.data_root.as_path(),
             locations.cache_root.as_path(),
-            Path::new(r"C:\Users\reader\AppData\Local\ImmersiveReader-Dev"),
+            Path::new(r"C:\Users\reader\AppData\Local\ImmersiveReader"),
             Path::new(r"C:\"),
         ] {
             assert!(

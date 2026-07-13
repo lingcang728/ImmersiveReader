@@ -42,11 +42,10 @@ pub fn default_settings() -> AppSettings {
     let documents = dirs::document_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
         .unwrap_or_else(|| PathBuf::from("."));
-    let local = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     AppSettings {
         schema_version: 3,
         library_root: AppChannel::current()
-            .default_library(&local, &documents)
+            .default_library(&documents)
             .to_string_lossy()
             .into_owned(),
     }
@@ -136,35 +135,33 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn detects_development_channel_from_executable_name() {
-        let channel = AppChannel::detect(Path::new(r"C:\app\immersive-reader-dev.exe"), None)
-            .expect("development executable must parse");
+    fn detect_without_qa_run_id_is_production() {
+        let channel = AppChannel::detect(None).expect("production channel must parse");
 
-        assert_eq!(channel, AppChannel::Development);
-        assert_eq!(channel.settings_directory_name(), "immersive-reader-dev");
-        assert_eq!(channel.local_data_directory_name(), "ImmersiveReader-Dev");
+        assert_eq!(channel, AppChannel::Production);
+        assert_eq!(channel.settings_directory_name(), "immersive-reader");
+        assert_eq!(channel.local_data_directory_name(), "ImmersiveReader");
     }
 
     #[test]
-    fn keeps_production_and_development_default_libraries_separate() {
-        let local = Path::new(r"C:\Users\reader\AppData\Local");
+    fn keeps_production_and_qa_default_libraries_separate() {
         let documents = Path::new(r"C:\Users\reader\Documents");
 
-        let production = AppChannel::Production.default_library(local, documents);
-        let development = AppChannel::Development.default_library(local, documents);
+        let production = AppChannel::Production.default_library(documents);
+        let qa = AppChannel::Qa("run-1".to_string()).default_library(documents);
 
         assert_eq!(production, documents.join(r"沉浸阅读\Library"));
-        assert_eq!(development, local.join(r"ImmersiveReader-Dev\Library"));
-        assert_ne!(production, development);
+        assert_eq!(
+            qa,
+            documents.join(r"Codex\ImmersiveReader-QA\run-1\Library")
+        );
+        assert_ne!(production, qa);
     }
 
     #[test]
     fn qa_channel_rejects_unsafe_run_ids() {
-        let error = AppChannel::detect(
-            Path::new(r"C:\app\immersive-reader-dev.exe"),
-            Some(r"..\production"),
-        )
-        .expect_err("unsafe QA run id must be rejected");
+        let error =
+            AppChannel::detect(Some(r"..\production")).expect_err("unsafe QA run id must be rejected");
 
         assert!(error.contains("QA run id"));
     }

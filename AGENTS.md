@@ -9,12 +9,12 @@
 ## Change close-out
 
 - Make one logical change per commit and keep its verification evidence in the same commit or the release QA report.
-- Any desktop app, UI, Rust backend, Tauri configuration, capability or install-script change requires a commit and:
+- Any desktop app, UI, Rust backend, Tauri configuration, capability or install-script change requires a commit and a production install:
 
   ```powershell
-  npm.cmd --prefix .\apps\desktop run ship:dev
+  npm.cmd --prefix .\apps\desktop run ship:local
   ```
 
-  Report the commit, development EXE timestamp and SHA-256. Documentation-only changes do not require a new install.
-- `ship:local` is a production-install gate. Markdown association registration is a separate Windows UI gate.
-- Keep production, development and QA data roots separate. Never use a real user database, profile, credential, audio or output as a test fixture.
+  `ship:local` builds the production NSIS installer, installs it, and refreshes the Markdown handler so `.md`/`.markdown` open with the latest build. Report the commit, production EXE timestamp and SHA-256. Documentation-only changes do not require a new install.
+- The protected Windows `UserChoice` hash is never forged; the final default-app selection stays a Windows UI gate (`register:markdown` opens Default Apps for first-time confirmation).
+- Keep production and QA data roots separate. Never use a real user database, profile, credential, audio or output as a test fixture.

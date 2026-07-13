@@ -3,12 +3,16 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppChannel {
     Production,
-    Development,
     Qa(String),
 }
 
 impl AppChannel {
-    pub fn detect(executable: &Path, qa_run_id: Option<&str>) -> Result<Self, String> {
+    /// Detects the runtime channel. Only `qa_run_id` selects a non-production
+    /// channel now that the standalone development build has been removed: the
+    /// production executable is the only thing that ships. The QA channel runs
+    /// that same production executable with `IMMERSIVE_QA_RUN_ID` set so its
+    /// data roots stay isolated from real user data.
+    pub fn detect(qa_run_id: Option<&str>) -> Result<Self, String> {
         if let Some(run_id) = qa_run_id {
             if run_id.is_empty()
                 || !run_id
@@ -19,24 +23,11 @@ impl AppChannel {
             }
             return Ok(Self::Qa(run_id.to_string()));
         }
-
-        let stem = executable
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
-        if stem.eq_ignore_ascii_case("immersive-reader-dev") {
-            Ok(Self::Development)
-        } else {
-            Ok(Self::Production)
-        }
+        Ok(Self::Production)
     }
 
     pub fn current() -> Self {
-        let executable = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(_) => return Self::Production,
-        };
-        match Self::detect(&executable, None) {
+        match Self::detect(None) {
             Ok(channel) => channel,
             Err(_) => Self::Production,
         }
@@ -45,7 +36,6 @@ impl AppChannel {
     pub fn settings_directory_name(&self) -> String {
         match self {
             Self::Production => "immersive-reader".to_string(),
-            Self::Development => "immersive-reader-dev".to_string(),
             Self::Qa(run_id) => format!("ImmersiveReader-QA-{run_id}"),
         }
     }
@@ -53,15 +43,13 @@ impl AppChannel {
     pub fn local_data_directory_name(&self) -> String {
         match self {
             Self::Production => "ImmersiveReader".to_string(),
-            Self::Development => "ImmersiveReader-Dev".to_string(),
             Self::Qa(run_id) => format!(r"ImmersiveReader-QA\{run_id}"),
         }
     }
 
-    pub fn default_library(&self, local: &Path, documents: &Path) -> PathBuf {
+    pub fn default_library(&self, documents: &Path) -> PathBuf {
         match self {
             Self::Production => documents.join(r"沉浸阅读\Library"),
-            Self::Development => local.join(r"ImmersiveReader-Dev\Library"),
             Self::Qa(run_id) => documents
                 .join(r"Codex\ImmersiveReader-QA")
                 .join(run_id)
