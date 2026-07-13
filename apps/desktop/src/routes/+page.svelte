@@ -44,6 +44,7 @@
 	import SearchBar from "$lib/components/SearchBar.svelte";
 	import TocPanel from "$lib/components/TocPanel.svelte";
 	import SettingsPanel from "$lib/components/SettingsPanel.svelte";
+	import ReaderWorkspace from "$lib/components/ReaderWorkspace.svelte";
 	import Bookshelf from "$lib/components/Bookshelf.svelte";
 	import PodcastWorkflow from "$lib/components/PodcastWorkflow.svelte";
 	import ZhihuWorkflow from "$lib/components/ZhihuWorkflow.svelte";
@@ -3832,7 +3833,7 @@
 	{/if}
 
 	<!-- Main content -->
-	<main class="content" class:flow-active={!!flowReaderSession} bind:this={contentEl}>
+	<ReaderWorkspace flowActive={!!flowReaderSession} bind:element={contentEl}>
 		{#if flowReaderSession}
 			<section class="flow-reader-workspace" aria-label="连续阅读">
 				<header>
@@ -3955,7 +3956,7 @@
 			{/if}
 		{/if}
 		{/if}
-	</main>
+	</ReaderWorkspace>
 
 	<!-- Spotlight overlays for focus mode -->
 	{#if $focusMode && $renderedHtml}
@@ -4302,15 +4303,6 @@
 	}
 
 	/* ========== Main content ========== */
-	.content {
-		flex: 1;
-		overflow-y: auto;
-		overflow-x: hidden;
-		scroll-behavior: smooth;
-	}
-	.content.flow-active {
-		overflow: hidden;
-	}
 	.flow-reader-workspace {
 		height: 100%;
 		display: grid;
@@ -4351,9 +4343,6 @@
 		height: 100%;
 		border: 0;
 		background: var(--bg);
-	}
-	.app.focus-key-scroll-active .content {
-		scroll-behavior: auto;
 	}
 
 	.article {
