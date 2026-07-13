@@ -3,13 +3,13 @@
   "product": "ImmersiveReader",
   "version": "1.1.0",
   "platform": "windows-x64",
-  "buildInputCommit": "7e2f539",
+  "buildInputCommit": "bba0518",
   "configuration": "development-isolated",
   "executable": {
     "path": ".dev-install/immersive-reader-dev.exe",
-    "timestamp": "2026-07-13 11:16:37",
-    "bytes": 19151872,
-    "sha256": "C302561A94048DA27C8937E4F5D23036BCE5A75093BE16988F2D2D1D748E4F97",
+    "timestamp": "2026-07-13 12:56:36",
+    "bytes": 19152896,
+    "sha256": "3D27BF62BB98D6F811B3B518DFCFCB06348A6854BE56AAF22257E8D4BB5A4C2F",
     "markdownAssociationsRegistered": false
   },
   "runtime": {
@@ -27,7 +27,7 @@
     "zhihuTop5": "blocked_no_login_and_target_404",
     "fullAudio": "not_run_authorization_gate",
     "productionShipLocal": "not_run_authorization_gate",
-    "trayHideRestore": "not_confirmed_native_visibility"
+    "trayHideRestore": "not_confirmed_after_exact_close_and_ui_automation"
   },
   "reports": [
     "docs/release/1.1.0/QA_REPORT.md",

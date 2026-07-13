@@ -17,4 +17,4 @@ Full original-audio execution and possible API charges were not performed. Real 
 
 ## Installed artifact
 
-The isolated development EXE was built by `ship:dev` at `2026-07-13 11:16:37`, size `19151872` bytes, SHA-256 `C302561A94048DA27C8937E4F5D23036BCE5A75093BE16988F2D2D1D748E4F97`; Markdown associations were not registered. The exact EXE started and stopped; its WebView child was gone afterward. A CLI close request kept the process alive, but the native visibility check did not prove the expected hidden state, so tray hide/restore remains open in `V3-TODO.md`.
+The isolated development EXE was built by `ship:dev` at `2026-07-13 12:56:36`, size `19152896` bytes, SHA-256 `3D27BF62BB98D6F811B3B518DFCFCB06348A6854BE56AAF22257E8D4BB5A4C2F`; Markdown associations were not registered. The exact EXE started with title `沉浸阅读 · 开发版`, and its WebView child was gone after the exact process was stopped. Direct Win32 hide/restore worked, but a CLI close request kept the process alive and the native visibility check remained `true`; the current UIA/DPI session did not yield a trustworthy, uniquely attributable tray hide/restore result, so that TODO remains open.
