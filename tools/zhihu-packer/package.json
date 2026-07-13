@@ -13,6 +13,7 @@
     "cli": "tsx src/cli.ts",
     "web": "tsx src/server.ts",
     "build-manifests": "tsx src/generate-manifests.ts",
+    "migrate-legacy": "tsx src/migrate-legacy-archive.ts",
     "build-reader": "npm run compile-reader && npm run build-manifests && tsx src/build-html.ts",
     "build-reader:from-manifests": "npm run compile-reader && tsx src/build-html.ts",
     "compile-reader": "tsx src/compile-reader.ts",

@@ -3,9 +3,16 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
 fn root() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("immersive-reconcile-{}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "immersive-reconcile-{}-{}",
+        std::process::id(),
+        NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).expect("test root must exist");
     path
@@ -75,5 +82,35 @@ fn reconciliation_classifies_every_non_destructive_conflict() {
         assert!(kinds.contains(expected), "missing category: {expected}");
     }
     assert!(report.unresolved_count >= 9);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn reconciliation_prefers_archive_catalog_and_ignores_generated_index() {
+    let root = root();
+    let database = root.join("zhihu.db");
+    let output = root.join("知乎");
+    let author = output.join("Author");
+    fs::create_dir_all(&author).expect("author directory must exist");
+    fs::write(author.join("ok.md"), "# ok").expect("valid markdown must write");
+    fs::write(author.join("index.md"), "# generated index").expect("index must write");
+    fs::write(author.join("manifest.json"), "{}").expect("manifest marker must write");
+    fs::write(author.join("provenance.json"), "{}").expect("provenance marker must write");
+    sqlite(
+        &database,
+        r#"
+        CREATE TABLE archive_items(item_id TEXT PRIMARY KEY, source_url TEXT, current_revision INTEGER);
+        CREATE TABLE archive_revisions(item_id TEXT, revision INTEGER, output_path TEXT);
+        INSERT INTO archive_items VALUES ('ok','https://example/ok',1);
+        INSERT INTO archive_revisions VALUES ('ok',1,'Author/ok.md');
+        "#,
+    );
+
+    let report = reconcile_zhihu_archive(Path::new("sqlite3"), &database, &output)
+        .expect("archive reconciliation must succeed");
+
+    assert_eq!(report.database_success_rows, 1);
+    assert_eq!(report.markdown_files, 1);
+    assert_eq!(report.unresolved_count, 0);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

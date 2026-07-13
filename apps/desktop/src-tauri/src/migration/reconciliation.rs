@@ -36,7 +36,25 @@ struct SuccessRow {
 }
 
 fn success_rows(executable: &Path, database: &Path) -> Result<Vec<SuccessRow>, String> {
-    let sql = "SELECT ti.item_id, i.url, ti.output_path FROM task_items ti JOIN items i ON i.id = ti.item_id WHERE ti.status = 'success' ORDER BY ti.item_id, ti.updated_at;";
+    let archive_check = Command::new(executable)
+        .arg("-batch")
+        .arg("-noheader")
+        .arg(database)
+        .arg("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='archive_revisions';")
+        .output()
+        .map_err(|error| format!("SQLite executable failed to start: {error}"))?;
+    if !archive_check.status.success() {
+        return Err(format!(
+            "SQLite catalog check failed: {}",
+            String::from_utf8_lossy(&archive_check.stderr).trim()
+        ));
+    }
+    let has_archive = String::from_utf8_lossy(&archive_check.stdout).trim() == "1";
+    let sql = if has_archive {
+        "SELECT ai.item_id, ai.source_url AS url, ar.output_path FROM archive_items ai JOIN archive_revisions ar ON ar.item_id = ai.item_id AND ar.revision = ai.current_revision ORDER BY ai.item_id;"
+    } else {
+        "SELECT ti.item_id, i.url, ti.output_path FROM task_items ti JOIN items i ON i.id = ti.item_id WHERE ti.status = 'success' ORDER BY ti.item_id, ti.updated_at;"
+    };
     let result = Command::new(executable)
         .arg("-batch")
         .arg("-json")
@@ -70,6 +88,10 @@ fn markdown_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
             .extension()
             .and_then(|value| value.to_str())
             .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+            && !root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("index.md"))
         {
             files.push(root.to_path_buf());
         }
