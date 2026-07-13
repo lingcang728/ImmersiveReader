@@ -30,5 +30,4 @@ output/*
 # Local configurations and Agent instructions
 config.json
 AGENTS.md
-AGENT_HANDOFF.md
 CODE_REVIEW.md
