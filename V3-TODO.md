@@ -422,6 +422,16 @@
   - `scripts\verify.ps1` 通过：contracts 5、桌面 TypeScript 38、Svelte 0 错误/警告、Rust 90、知乎 34、Podcast 27、quick validation。
   - `ship:dev` 通过；开发 EXE `2026-07-13 16:41:04`、19,151,360 bytes、SHA-256 `9E15810DD5C23D2604013A252A6144CA520836F59B2F8F89027C36CC0C01E7D7`；PID `118996` 精确路径启动响应正常，标题 `沉浸阅读 · 开发版`，退出后残留 0。
 
+### 40. 两份完整原始音频与 DeepSeek API 验收
+
+- [x] 完整执行中文与英文原始音频，验证本地 ASR、DeepSeek API、预算、输出质量和源文件前后哈希。
+  - DeepSeek V4 兼容 commits：`5048101 fix(podcast): honor DeepSeek thinking mode`、`3907d12 fix(podcast): accept managed default key environment`；`think=false` 明确进入 `thinking.type=disabled`，迁移配置即使 `api_key_env` 为空也能使用受管默认环境。真实最小 API 冒烟 9/2 tokens、约 1.003s；定向 14 tests 通过。
+  - 中文原始音频：`1460.792s`、检测 `zh`、796 segments，本地 faster-whisper CUDA `int8_float16` 成功，API 请求 0；最终 Markdown `26809` bytes、264 lines、SHA-256 `E8DACA5B949633FC62738404E62AD23040236E3E269F7948FBDABAE760E45BBC`。
+  - 英文原始音频：`2133.211438s`、检测 `en`、753/753 segments 翻译成功；DeepSeek 翻译 47 requests、40606 prompt / 24554 completion / 65160 total tokens，后处理另 6 requests、80 turns。预算账本共 53 requests，实付上限计 `¥0.1063272`、reserved 0，低于 `¥0.30` 硬上限。
+  - 英文最终 Markdown `67816` bytes、300 lines、SHA-256 `05D32D7EBA3426019A62926EA2ADB8BAE4629B12720598BAB4E09B57C801B95C`，含 9134 CJK chars 与 5994 Latin words，替换字符 0；日志无 traceback/ERROR/真实 HTTP 401/429/截断/预算拒绝，QA 文本文件密钥形态匹配 0，受管 Podcast/FFmpeg 残留进程 0。
+  - 两份源文件与 QA 副本均保持预检哈希：英文 `DADA107A8123F1F8D80F08906449FD0C8B662F1CD876BFE75991522DFE16F3D1`，中文 `BA363A786CDD6B2A36F01E4153F5388B3317B77E022448B4F860F3B9C9BE9300`。完整证据：`.omo/ulw-loop/evidence/full-audio-qa-20260713.md`。
+  - 本步前完整 `scripts\verify.ps1` 通过；最新 `ship:dev` 对应 commit `3907d12`，开发 EXE `2026-07-13 16:57:31`、SHA-256 `1EA0E7B54D3309D87A4B0596E07FD23E14470580C7133E52B1B787CA0CF8ACA6`，未注册 Markdown 关联。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -516,7 +526,6 @@
   - 2026-07-13 只读 FFprobe 与预算公式报告：总时长 `3593.990427s`、预计磁盘 `595659231` bytes、翻译规模 `43128` tokens、API 费用上限 `¥0.258768`、C: 可用 `131308507136` bytes；证据：`.omo/ulw-loop/evidence/full-audio-preflight-20260713.md`。
 - [x] 暂停等待“完整长音频/API 费用 QA”独立授权。
   - 预检已完成；完整原始音频执行仍未进行，等待独立授权；授权门记录见本清单末尾“明确授权门”。
-- [ ] 获准后完整执行两个原始音频，并核对前后 SHA-256 不变。
 - [x] 完成 1.1.0 version、README、release notes、runtime manifest、release manifest 和 QA report。
   - 版本已同步到 desktop package/Cargo/Tauri config；`docs/release/1.1.0/` 包含 release notes、QA report、17 项 runtime manifest snapshot 和 release manifest；最终 `scripts\verify.ps1` 通过，`ship:dev` 产物为 `2026-07-13 13:41:30 / 5350B8E9DF2EBFD5...`。
 - [ ] 暂停等待正式 `ship:local` 授权；获准后只安装正式版，不修改文件关联。
@@ -541,7 +550,7 @@
 
 - [ ] 真实生产数据迁移。
 - [ ] 删除旧 Podcast/Zhihu 前端。
-- [ ] 完整长音频及可能产生 API 费用的 QA。
+- [x] 完整长音频及可能产生 API 费用的 QA：2026-07-13 已完成，两份源文件前后哈希不变，API 预算账本 `¥0.1063272`。
 - [ ] 正式 `ship:local`。
 - [ ] 修改 `.md/.markdown` 文件关联。
 - [ ] force-push `origin/main`。
