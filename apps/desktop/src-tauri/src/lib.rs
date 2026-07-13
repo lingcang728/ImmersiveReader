@@ -6,6 +6,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 #[cfg(desktop)]
 use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::{Emitter, Manager};
@@ -773,6 +774,15 @@ fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+#[cfg(desktop)]
+fn schedule_tray_exit_fallback(app: &tauri::AppHandle, delay: Duration) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        app.exit(0);
+    });
+}
+
 #[tauri::command]
 fn cancel_and_discard(app: tauri::AppHandle) -> Result<(), String> {
     tools::stop_all()?;
@@ -1093,6 +1103,7 @@ pub fn run() {
                                 "mode": "preserve"
                             }),
                         );
+                        schedule_tray_exit_fallback(app, Duration::from_secs(2));
                     }
                     "tray_exit_cleanup" => {
                         let _ = app.emit(
@@ -1101,6 +1112,7 @@ pub fn run() {
                                 "mode": "cancel_and_discard"
                             }),
                         );
+                        schedule_tray_exit_fallback(app, Duration::from_secs(4));
                     }
                     _ => {}
                 });
