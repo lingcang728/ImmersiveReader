@@ -141,7 +141,7 @@ fn task_event(sequence: u64, revision: u64) -> TaskEvent {
         can_resume: false,
         can_retry: false,
         can_cancel: true,
-        book_id: None,
+        book_id: Some("book-1".to_string()),
         source_id: Some("sha256".to_string()),
         cache_lease_bytes: 42,
         created_at: now.clone(),
@@ -188,6 +188,16 @@ fn task_snapshot_and_events_survive_reopen() {
         .task_events("podcast-1", 1, 100)
         .expect("event gap must load");
     assert_eq!(events, vec![task_event(2, 2)]);
+    assert_eq!(
+        reopened
+            .task_snapshots_for_book("book-1")
+            .expect("book task records must load"),
+        vec![snapshot.clone()]
+    );
+    assert!(reopened
+        .task_snapshots_for_book("other-book")
+        .expect("unrelated book task records must load")
+        .is_empty());
     assert_eq!(
         reopened
             .task_snapshots(Some(TaskKind::Podcast))

@@ -514,11 +514,36 @@
 							<p class="book-detail-note">此书目没有 provenance.json；manifest 与阅读状态仍来自当前 Library。</p>
 						{/if}
 						<ol class="chapter-list">
-							{#each selectedBookDetail.manifest.chapters.slice(0, 20) as chapter}
-								<li><span>{chapter.title}</span><small>{chapter.date ?? ''}</small></li>
-							{/each}
-						</ol>
-					</div>
+						{#each selectedBookDetail.manifest.chapters.slice(0, 20) as chapter}
+							<li><span>{chapter.title}</span><small>{chapter.date ?? ''}</small></li>
+						{/each}
+					</ol>
+					<section class="task-history" aria-label="任务记录">
+						<header class="task-history-header">
+							<h3>任务记录</h3>
+							<span>{selectedBookDetail.taskRecords.length} 条</span>
+						</header>
+						{#if selectedBookDetail.taskRecords.length > 0}
+							<div class="task-history-list">
+								{#each selectedBookDetail.taskRecords as task (task.id)}
+									<article class="task-history-item">
+										<div class="task-history-main">
+											<strong>{taskKindLabel(task.kind)}</strong>
+											<span>{taskStateLabel(task)}</span>
+										</div>
+										<div class="task-history-meta">任务 {task.id} · revision {task.revision}</div>
+										<div class="task-history-meta">{task.engineStage || '未记录'} · {task.updatedAt}</div>
+										{#if task.errorMessage}
+											<p class="task-history-error">{task.errorMessage}</p>
+										{/if}
+									</article>
+								{/each}
+							</div>
+						{:else}
+							<p class="book-detail-note">此书目暂时没有关联的获取任务记录。</p>
+						{/if}
+					</section>
+				</div>
 				</dialog>
 			</div>
 		{/if}

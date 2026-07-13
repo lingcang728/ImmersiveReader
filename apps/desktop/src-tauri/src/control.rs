@@ -304,7 +304,8 @@ impl ControlDb {
                 })
             })
             .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
     }
 
     pub fn persist_task_event(&mut self, event: &TaskEvent) -> Result<(), String> {
@@ -415,6 +416,17 @@ impl ControlDb {
             serde_json::from_str(&json).map_err(|error| error.to_string())
         })
         .collect()
+    }
+
+    pub fn task_snapshots_for_book(&self, book_id: &str) -> Result<Vec<TaskSnapshot>, String> {
+        if book_id.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .task_snapshots(None)?
+            .into_iter()
+            .filter(|snapshot| snapshot.book_id.as_deref() == Some(book_id))
+            .collect())
     }
 
     pub fn record_engine_instance(

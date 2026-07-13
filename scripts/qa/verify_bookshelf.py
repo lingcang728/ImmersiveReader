@@ -73,6 +73,19 @@ def main() -> int:
             assert page.locator(".book-card").count() == 1
             page.get_by_role("searchbox", name="搜索书架").fill("")
 
+            page.get_by_role("button", name="详情").first.click()
+            page.wait_for_selector(".book-detail-dialog")
+            assert page.locator(".book-detail-dialog h2").inner_text() == "你的ZombieMan · 知乎归档"
+            assert page.get_by_role("button", name="打开知乎主页").count() == 1
+            assert "revision" in page.locator(".provenance-grid").inner_text()
+            assert page.locator(".task-history-item").count() == 1
+            assert "revision 2" in page.locator(".task-history-item").inner_text()
+            assert "已完成" in page.locator(".task-history-item").inner_text()
+            detail_target = QA_DIR / "bookshelf-detail-900x700.png"
+            page.screenshot(path=str(detail_target), full_page=False)
+            screenshots.append(str(detail_target))
+            page.get_by_role("button", name="关闭详情").click()
+
             for width, height in ((900, 700), (1280, 800), (1440, 900)):
                 page.set_viewport_size({"width": width, "height": height})
                 page.wait_for_timeout(150)

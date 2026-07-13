@@ -1,4 +1,5 @@
 import type { TocItem } from '$lib/render/markdown';
+import type { TaskSnapshot } from '$lib/tasks/sync';
 
 export type BookSource = 'zhihu' | 'manual' | 'podcast';
 
@@ -64,6 +65,7 @@ export interface BookDetail {
 	manifest: BookManifest;
 	progress: ReadingState;
 	provenance?: BookProvenance | null;
+	taskRecords: readonly TaskSnapshot[];
 }
 
 export interface BookProvenance {

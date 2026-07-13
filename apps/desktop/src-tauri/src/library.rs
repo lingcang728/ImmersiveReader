@@ -1,5 +1,6 @@
 use crate::contracts::{validate_manifest, Manifest, ReadingProgress};
 use crate::progress::load_progress;
+use crate::tasks::TaskSnapshot;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,7 @@ pub struct BookDetail {
     pub manifest: Manifest,
     pub progress: ReadingProgress,
     pub provenance: Option<BookProvenance>,
+    pub task_records: Vec<TaskSnapshot>,
 }
 
 fn collect_manifests(dir: &Path, depth: usize, manifests: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -122,13 +124,17 @@ fn read_manifest(path: &Path) -> Result<Manifest, String> {
     Ok(manifest)
 }
 
-fn read_provenance(book_root: &Path, expected_book_id: &str) -> Result<Option<BookProvenance>, String> {
+fn read_provenance(
+    book_root: &Path,
+    expected_book_id: &str,
+) -> Result<Option<BookProvenance>, String> {
     let path = book_root.join("provenance.json");
     if !path.exists() {
         return Ok(None);
     }
     let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let provenance: BookProvenance = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    let provenance: BookProvenance =
+        serde_json::from_str(&raw).map_err(|error| error.to_string())?;
     if provenance.schema_version != 1 || provenance.book_id != expected_book_id {
         return Err("Book provenance does not match its manifest".to_string());
     }
@@ -242,6 +248,7 @@ pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
         manifest,
         progress,
         provenance,
+        task_records: Vec::new(),
     })
 }
 

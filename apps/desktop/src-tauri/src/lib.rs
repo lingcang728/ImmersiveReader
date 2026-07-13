@@ -653,8 +653,15 @@ fn scan_library() -> Result<library::LibraryScan, String> {
 
 #[tauri::command]
 fn open_book(book_id: String) -> Result<library::BookDetail, String> {
+    open_book_detail(&book_id)
+}
+
+fn open_book_detail(book_id: &str) -> Result<library::BookDetail, String> {
     let value = settings::load_settings()?;
-    library::open_book(Path::new(&value.library_root), &book_id)
+    let mut detail = library::open_book(Path::new(&value.library_root), book_id)?;
+    detail.task_records =
+        control::ControlDb::open_current()?.task_snapshots_for_book(&detail.manifest.book_id)?;
+    Ok(detail)
 }
 
 #[tauri::command]
@@ -873,8 +880,7 @@ fn open_task_result(task_id: String) -> Result<library::BookDetail, String> {
     let book_id = snapshot
         .book_id
         .ok_or_else(|| "TASK_RESULT_BOOK_MISSING".to_string())?;
-    let settings = settings::load_settings()?;
-    library::open_book(Path::new(&settings.library_root), &book_id)
+    open_book_detail(&book_id)
 }
 
 #[tauri::command]
