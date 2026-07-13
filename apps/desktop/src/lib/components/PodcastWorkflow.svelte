@@ -4,6 +4,7 @@
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 	import { open } from '@tauri-apps/plugin-dialog';
 	import type { TaskSnapshot } from '$lib/tasks/sync';
+	import WorkflowDialogShell from './WorkflowDialogShell.svelte';
 
 	type DuplicatePolicy = 'reuse_existing' | 'new_revision';
 
@@ -156,9 +157,9 @@
 		noticeText = '';
 		const approval: PodcastBudgetApproval | null = approvalRequired
 			? {
-				estimatedDiskBytes: preview.budget.estimatedDiskBytes,
-				estimatedApiCostUpperCny: preview.budget.estimatedApiCostUpperCny
-			}
+					estimatedDiskBytes: preview.budget.estimatedDiskBytes,
+					estimatedApiCostUpperCny: preview.budget.estimatedApiCostUpperCny
+				}
 			: null;
 		try {
 			const result = await invoke<PodcastAddResult>('add_podcast_files', {
@@ -169,7 +170,8 @@
 			});
 			createdTaskIds = result.tasks.map((task) => task.id);
 			existingBooks = result.existingBooks;
-			noticeText = result.tasks.length > 0 ? '任务已加入队列；可逐项开始。' : '已复用书架中的相同播客。';
+			noticeText =
+				result.tasks.length > 0 ? '任务已加入队列；可逐项开始。' : '已复用书架中的相同播客。';
 			onRefreshTasks();
 		} catch (error) {
 			errorText = `创建任务失败：${String(error)}`;
@@ -198,142 +200,415 @@
 	});
 </script>
 
-<div class="podcast-modal" role="presentation" on:click|self={onClose}>
-	<dialog open class="podcast-panel" aria-labelledby="podcast-title">
-		<header class="podcast-header">
-			<div>
-				<span class="eyebrow">PODCAST WORKFLOW</span>
-				<h1 id="podcast-title">转写播客</h1>
-				<p>音频先进入受管缓存，预检通过后再加入统一任务队列。</p>
-			</div>
-			<button type="button" class="close-button" aria-label="关闭" on:click={onClose}>×</button>
-		</header>
+<WorkflowDialogShell
+	titleId="podcast-title"
+	descriptionId="podcast-description"
+	eyebrow="PODCAST WORKFLOW"
+	title="转写播客"
+	description="音频先进入受管缓存，预检通过后再加入统一任务队列。"
+	maxWidth="720px"
+	{onClose}
+>
+	<div
+		class:active={dragActive}
+		class="drop-zone"
+		role="button"
+		tabindex="0"
+		aria-label={selectedPaths.length > 0 ? '继续添加音频文件' : '拖放或选择音频文件'}
+		on:click={() => void chooseFiles()}
+		on:keydown={(event) => {
+			if (event.key === 'Enter' || event.key === ' ') void chooseFiles();
+		}}
+	>
+		<span class="drop-icon" aria-hidden="true">
+			<svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+				<path
+					d="M8 18v2.5A2.5 2.5 0 0 0 10.5 23h7A2.5 2.5 0 0 0 20 20.5V18"
+					stroke="currentColor"
+					stroke-width="1.5"
+					stroke-linecap="round"
+				/>
+				<path
+					d="M14 5v12M14 5l-4 4M14 5l4 4"
+					stroke="currentColor"
+					stroke-width="1.5"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				/>
+				<path
+					d="M6 12.5c0-1.2.7-2.2 1.7-2.6A5 5 0 0 1 17.2 8a3.8 3.8 0 0 1 4.3 3.7"
+					stroke="currentColor"
+					stroke-width="1.35"
+					stroke-linecap="round"
+					opacity="0.55"
+				/>
+			</svg>
+		</span>
+		<strong class="drop-title"
+			>{selectedPaths.length > 0 ? '继续添加音频' : '拖放音频文件到这里'}</strong
+		>
+		<span class="drop-hint">支持 MP3、M4A、WAV；也可以点击选择文件</span>
+	</div>
 
-		<div class="podcast-body">
-			<div
-				class:active={dragActive}
-				class="drop-zone"
-				role="button"
-				tabindex="0"
-				on:click={() => void chooseFiles()}
-				on:keydown={(event) => {
-					if (event.key === 'Enter' || event.key === ' ') void chooseFiles();
-				}}
-			>
-				<strong>{selectedPaths.length > 0 ? '继续添加音频' : '拖放音频文件到这里'}</strong>
-				<span>支持 MP3、M4A、WAV；也可以点击选择文件</span>
-			</div>
-
-			{#if selectedPaths.length > 0}
-				<div class="file-list" aria-label="待预检音频">
-					{#each selectedPaths as path (path)}
-						<div class="file-row">
-							<span>{fileName(path)}</span>
-							<button type="button" aria-label={`移除 ${fileName(path)}`} on:click={() => removePath(path)}>移除</button>
-						</div>
-					{/each}
+	{#if selectedPaths.length > 0}
+		<div class="file-list wf-card" aria-label="待预检音频">
+			{#each selectedPaths as path (path)}
+				<div class="file-row">
+					<span class="file-name">
+						<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+							<path
+								d="M4 2.5h4.2L11 5.3V11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-7.5a1 1 0 0 1 1-1z"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.1"
+							/>
+							<path d="M8 2.5V5h2.8" fill="none" stroke="currentColor" stroke-width="1.1" />
+						</svg>
+						{fileName(path)}
+					</span>
+					<button
+						type="button"
+						class="remove-btn"
+						aria-label={`移除 ${fileName(path)}`}
+						on:click={() => removePath(path)}>移除</button
+					>
 				</div>
-			{/if}
-
-			<div class="options-grid">
-				<label class="check-row"><input type="checkbox" bind:checked={translate} on:change={resetPreview} />生成中文翻译</label>
-				<label class="field-row">
-					<span>本次预算上限（元）</span>
-					<input type="number" min="0" step="0.01" bind:value={maxApiCostCny} on:input={resetPreview} />
-				</label>
-			</div>
-
-			<fieldset class="duplicate-field">
-				<legend>重复播客处理</legend>
-				<label><input type="radio" bind:group={duplicatePolicy} value="reuse_existing" on:change={resetPreview} />复用书架已有版本</label>
-				<label><input type="radio" bind:group={duplicatePolicy} value="new_revision" on:change={resetPreview} />创建新的 revision</label>
-			</fieldset>
-
-			{#if preview}
-				<section class="preview-card" aria-label="播客预检结果">
-					<div class="preview-title"><strong>预检通过</strong><span>{preview.files.length} 个文件 · {formatDuration(preview.files.reduce((sum, file) => sum + file.durationSeconds, 0))}</span></div>
-					<div class="metric-grid">
-						<div><span>预计缓存</span><strong>{formatBytes(preview.budget.estimatedDiskBytes)}</strong></div>
-						<div><span>可用空间</span><strong>{formatBytes(preview.budget.availableDiskBytes)}</strong></div>
-						<div><span>API 费用上限</span><strong>¥{preview.budget.estimatedApiCostUpperCny.toFixed(2)}</strong></div>
-					</div>
-					{#if preview.files.some((file) => file.duplicateBookId)}
-						<p class="warning-copy">检测到已有同源内容；当前策略：{duplicatePolicy === 'reuse_existing' ? '复用已有版本' : '创建新 revision'}。</p>
-					{/if}
-					{#if approvalRequired}
-						<label class="approval-row"><input type="checkbox" bind:checked={budgetConfirmed} />我确认本次最高可能产生 ¥{preview.budget.estimatedApiCostUpperCny.toFixed(2)} 的费用</label>
-					{/if}
-				</section>
-			{/if}
-
-			{#if errorText}<p class="message error" role="alert">{errorText}</p>{/if}
-			{#if noticeText}<p class="message success" role="status">{noticeText}</p>{/if}
-
-			{#if createdTasks.length > 0}
-				<section class="created-card" aria-label="新建播客任务">
-					<strong>任务队列</strong>
-					{#each createdTasks as task (task.id)}
-						<div class="created-row">
-							<span>{task.id.slice(0, 8)} · {taskStateLabel(task)}</span>
-							{#if task.lifecycleState === 'queued'}<button type="button" on:click={() => onStartTask(task.id)}>开始</button>{/if}
-							{#if task.lifecycleState === 'terminal' && task.outcome === 'success'}<button type="button" on:click={() => onOpenResult(task.id)}>打开结果</button>{/if}
-						</div>
-					{/each}
-				</section>
-			{/if}
-			{#if existingBooks.length > 0}<p class="existing-copy">已复用 {existingBooks.length} 个书架条目。</p>{/if}
+			{/each}
 		</div>
+	{/if}
 
-		<footer class="podcast-footer">
-			<div class="footer-actions">
-				<button type="button" class="quiet-button" on:click={onClose}>稍后处理</button>
-				<button type="button" class="secondary-button" disabled={busy || selectedPaths.length === 0} on:click={() => void runPreview()}>{busy && !preview ? '预检中…' : '运行预检'}</button>
-				<button type="button" class="primary-button" disabled={!canAdd} on:click={() => void addTasks()}>{busy && preview ? '加入中…' : approvalRequired && !budgetConfirmed ? '确认预算后加入' : '加入任务队列'}</button>
+	<div class="options-grid">
+		<label class="check-row">
+			<input type="checkbox" bind:checked={translate} on:change={resetPreview} />
+			<span>生成中文翻译</span>
+		</label>
+		<label class="wf-field">
+			<span class="wf-label">本次预算上限（元）</span>
+			<input type="number" min="0" step="0.01" bind:value={maxApiCostCny} on:input={resetPreview} />
+		</label>
+	</div>
+
+	<fieldset class="duplicate-field">
+		<legend class="wf-label">重复播客处理</legend>
+		<label
+			><input
+				type="radio"
+				bind:group={duplicatePolicy}
+				value="reuse_existing"
+				on:change={resetPreview}
+			/>复用书架已有版本</label
+		>
+		<label
+			><input
+				type="radio"
+				bind:group={duplicatePolicy}
+				value="new_revision"
+				on:change={resetPreview}
+			/>创建新的 revision</label
+		>
+	</fieldset>
+
+	{#if preview}
+		<section class="preview-card wf-card" aria-label="播客预检结果">
+			<div class="preview-title">
+				<strong>预检通过</strong>
+				<span
+					>{preview.files.length} 个文件 · {formatDuration(
+						preview.files.reduce((sum, file) => sum + file.durationSeconds, 0)
+					)}</span
+				>
 			</div>
-		</footer>
-	</dialog>
-</div>
+			<div class="metric-grid">
+				<div>
+					<span class="wf-label">预计缓存</span>
+					<strong>{formatBytes(preview.budget.estimatedDiskBytes)}</strong>
+				</div>
+				<div>
+					<span class="wf-label">可用空间</span>
+					<strong>{formatBytes(preview.budget.availableDiskBytes)}</strong>
+				</div>
+				<div>
+					<span class="wf-label">API 费用上限</span>
+					<strong>¥{preview.budget.estimatedApiCostUpperCny.toFixed(2)}</strong>
+				</div>
+			</div>
+			{#if preview.files.some((file) => file.duplicateBookId)}
+				<p class="warning-copy">
+					检测到已有同源内容；当前策略：{duplicatePolicy === 'reuse_existing'
+						? '复用已有版本'
+						: '创建新 revision'}。
+				</p>
+			{/if}
+			{#if approvalRequired}
+				<label class="approval-row">
+					<input type="checkbox" bind:checked={budgetConfirmed} />
+					我确认本次最高可能产生 ¥{preview.budget.estimatedApiCostUpperCny.toFixed(2)} 的费用
+				</label>
+			{/if}
+		</section>
+	{/if}
+
+	{#if errorText}<p class="wf-msg-error" role="alert">{errorText}</p>{/if}
+	{#if noticeText}<p class="wf-msg-success" role="status">{noticeText}</p>{/if}
+
+	{#if createdTasks.length > 0}
+		<section class="created-card wf-card" aria-label="新建播客任务">
+			<strong class="section-title">任务队列</strong>
+			{#each createdTasks as task (task.id)}
+				<div class="created-row">
+					<span>{task.id.slice(0, 8)} · {taskStateLabel(task)}</span>
+					{#if task.lifecycleState === 'queued'}
+						<button type="button" class="link-btn" on:click={() => onStartTask(task.id)}>开始</button>
+					{/if}
+					{#if task.lifecycleState === 'terminal' && task.outcome === 'success'}
+						<button type="button" class="link-btn" on:click={() => onOpenResult(task.id)}
+							>打开结果</button
+						>
+					{/if}
+				</div>
+			{/each}
+		</section>
+	{/if}
+	{#if existingBooks.length > 0}
+		<p class="existing-copy">已复用 {existingBooks.length} 个书架条目。</p>
+	{/if}
+
+	<div slot="footer" class="footer-actions">
+		<button type="button" class="wf-quiet" on:click={onClose}>稍后处理</button>
+		<button
+			type="button"
+			class="wf-secondary"
+			disabled={busy || selectedPaths.length === 0}
+			on:click={() => void runPreview()}>{busy && !preview ? '预检中…' : '运行预检'}</button
+		>
+		<button type="button" class="wf-primary" disabled={!canAdd} on:click={() => void addTasks()}
+			>{busy && preview
+				? '加入中…'
+				: approvalRequired && !budgetConfirmed
+					? '确认预算后加入'
+					: '加入任务队列'}</button
+		>
+	</div>
+</WorkflowDialogShell>
 
 <style>
-	.podcast-modal { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; background: rgba(5, 12, 24, 0.68); backdrop-filter: blur(8px); color: var(--text); }
-	.podcast-panel { width: min(720px, 100%); max-height: min(760px, 92vh); overflow: auto; border: 1px solid color-mix(in srgb, var(--link) 45%, var(--hr)); border-radius: 20px; background: var(--bg-secondary); box-shadow: 0 28px 90px rgba(0, 0, 0, 0.45); }
-	.podcast-header { display: flex; justify-content: space-between; gap: 20px; padding: 28px 30px 22px; border-bottom: 1px solid var(--hr); }
-	.eyebrow { color: var(--link); font-size: 10px; letter-spacing: .16em; }
-	h1 { margin: 8px 0 6px; font-size: 26px; }
-	.podcast-header p { margin: 0; color: var(--text-secondary); font-size: 13px; }
-	.close-button { width: 34px; height: 34px; border: 1px solid var(--hr); border-radius: 50%; background: transparent; color: var(--text-secondary); font-size: 22px; cursor: pointer; }
-	.podcast-body { display: grid; gap: 16px; padding: 24px 30px; }
-	.drop-zone { display: grid; gap: 7px; place-items: center; min-height: 112px; border: 1px dashed color-mix(in srgb, var(--link) 58%, var(--hr)); border-radius: 14px; background: color-mix(in srgb, var(--link) 8%, transparent); cursor: pointer; text-align: center; }
-	.drop-zone.active, .drop-zone:hover { border-color: var(--link); background: color-mix(in srgb, var(--link) 16%, transparent); }
-	.drop-zone span { color: var(--text-secondary); font-size: 12px; }
-	.file-list, .preview-card, .created-card { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--hr); border-radius: 12px; background: color-mix(in srgb, var(--bg) 45%, transparent); }
-	.file-row, .created-row, .preview-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
-	.file-row span, .created-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.file-row button, .created-row button { flex: none; border: 0; background: transparent; color: var(--link); cursor: pointer; font: inherit; }
-	.options-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-	.check-row, .field-row, .duplicate-field, .approval-row { color: var(--text-secondary); font-size: 13px; }
-	.check-row, .approval-row { display: flex; align-items: center; gap: 8px; }
-	.field-row { display: grid; gap: 6px; }
-	.field-row input { min-width: 0; border: 1px solid var(--hr); border-radius: 8px; padding: 8px 10px; background: var(--bg); color: var(--text); }
-	.duplicate-field { display: flex; flex-wrap: wrap; gap: 14px; border: 1px solid var(--hr); border-radius: 10px; padding: 10px 12px; }
-	.duplicate-field legend { padding: 0 5px; color: var(--text-faded); font-size: 11px; }
-	.duplicate-field label { display: flex; align-items: center; gap: 6px; }
-	.metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
-	.metric-grid div { display: grid; gap: 4px; padding: 9px; border-radius: 9px; background: color-mix(in srgb, var(--link) 8%, transparent); }
-	.metric-grid span { color: var(--text-faded); font-size: 11px; }
-	.metric-grid strong { font-size: 14px; }
-	.warning-copy, .existing-copy, .message { margin: 0; font-size: 12px; line-height: 1.5; }
-	.warning-copy { color: #d6a84f; }
-	.approval-row { margin-top: 10px; color: var(--text); }
-	.message.error { color: #ef8b8b; }
-	.message.success { color: #82d3a4; }
-	.podcast-footer { display: flex; justify-content: space-between; gap: 12px; padding: 18px 30px 24px; border-top: 1px solid var(--hr); }
-	.footer-actions { display: flex; gap: 8px; }
-	.quiet-button, .secondary-button, .primary-button { border: 1px solid var(--hr); border-radius: 9px; padding: 9px 13px; cursor: pointer; font: inherit; font-size: 12px; }
-	.quiet-button { background: transparent; color: var(--text-secondary); }
-	.secondary-button { background: var(--bg); color: var(--text); }
-	.primary-button { border-color: var(--link); background: var(--link); color: white; }
-	.quiet-button:hover, .secondary-button:hover { border-color: var(--link); color: var(--text); }
-	.primary-button:disabled, .secondary-button:disabled { cursor: not-allowed; opacity: .45; }
-	@media (max-width: 620px) { .options-grid, .metric-grid { grid-template-columns: 1fr; } .podcast-header, .podcast-body, .podcast-footer { padding-left: 18px; padding-right: 18px; } .podcast-footer { flex-direction: column; } .footer-actions { justify-content: flex-end; } }
+	.drop-zone {
+		display: grid;
+		gap: 8px;
+		place-items: center;
+		min-height: 120px;
+		padding: 18px 16px;
+		border: 1px dashed color-mix(in srgb, var(--wf-accent, var(--link)) 58%, var(--wf-border, var(--hr)));
+		border-radius: 14px;
+		background:
+			linear-gradient(
+				180deg,
+				color-mix(in srgb, var(--wf-accent, var(--link)) 12%, transparent),
+				color-mix(in srgb, var(--wf-panel-raised, var(--bg-secondary)) 80%, transparent)
+			);
+		cursor: pointer;
+		text-align: center;
+		color: var(--wf-body, var(--text));
+		transition:
+			border-color 160ms ease,
+			background 160ms ease,
+			transform 120ms ease,
+			box-shadow 160ms ease;
+	}
+
+	.drop-zone:hover,
+	.drop-zone:focus-visible,
+	.drop-zone.active {
+		border-color: var(--wf-accent, var(--link));
+		background:
+			linear-gradient(
+				180deg,
+				color-mix(in srgb, var(--wf-accent, var(--link)) 18%, transparent),
+				color-mix(in srgb, var(--wf-panel-raised, var(--bg-secondary)) 70%, transparent)
+			);
+		box-shadow: 0 0 0 1px color-mix(in srgb, var(--wf-accent, var(--link)) 28%, transparent);
+		transform: translateY(-1px);
+		outline: none;
+	}
+
+	.drop-zone:active {
+		transform: translateY(0);
+	}
+
+	.drop-icon {
+		display: grid;
+		place-items: center;
+		width: 44px;
+		height: 44px;
+		border-radius: 12px;
+		color: var(--wf-accent, var(--link));
+		background: color-mix(in srgb, var(--wf-accent, var(--link)) 14%, transparent);
+		border: 1px solid color-mix(in srgb, var(--wf-accent, var(--link)) 30%, transparent);
+	}
+
+	.drop-title {
+		font-size: 15px;
+		font-weight: 650;
+		color: var(--wf-title, var(--heading, var(--text)));
+	}
+
+	.drop-hint {
+		color: var(--wf-muted, var(--text-secondary));
+		font-size: 12px;
+		line-height: 1.45;
+	}
+
+	.file-list,
+	.preview-card,
+	.created-card {
+		display: grid;
+		gap: 8px;
+	}
+
+	.file-row,
+	.created-row,
+	.preview-title {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		font-size: 13px;
+		color: var(--wf-body, var(--text));
+	}
+
+	.file-name {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--wf-title, var(--text));
+	}
+
+	.file-name svg {
+		flex: none;
+		color: var(--wf-accent, var(--link));
+	}
+
+	.remove-btn,
+	.link-btn {
+		flex: none;
+		border: 0;
+		background: transparent;
+		color: var(--wf-accent, var(--link));
+		cursor: pointer;
+		font: inherit;
+		font-size: 12px;
+	}
+
+	.remove-btn:hover,
+	.link-btn:hover {
+		color: var(--wf-accent-hover, var(--link-hover));
+		text-decoration: underline;
+	}
+
+	.options-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 14px;
+		align-items: end;
+	}
+
+	.check-row,
+	.duplicate-field,
+	.approval-row {
+		color: var(--wf-body, var(--text));
+		font-size: 13px;
+	}
+
+	.check-row,
+	.approval-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.duplicate-field {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 14px;
+		border: 1px solid var(--wf-border, var(--hr));
+		border-radius: 10px;
+		padding: 10px 12px;
+	}
+
+	.duplicate-field legend {
+		padding: 0 5px;
+	}
+
+	.duplicate-field label {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.metric-grid {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 8px;
+		margin-top: 4px;
+	}
+
+	.metric-grid div {
+		display: grid;
+		gap: 4px;
+		padding: 9px;
+		border-radius: 9px;
+		background: color-mix(in srgb, var(--wf-accent, var(--link)) 10%, transparent);
+		border: 1px solid color-mix(in srgb, var(--wf-accent, var(--link)) 18%, transparent);
+	}
+
+	.metric-grid strong {
+		font-size: 14px;
+		color: var(--wf-title, var(--text));
+	}
+
+	.warning-copy,
+	.existing-copy {
+		margin: 0;
+		font-size: 12px;
+		line-height: 1.5;
+		color: var(--wf-muted, var(--text-secondary));
+	}
+
+	.warning-copy {
+		color: #c9922e;
+	}
+
+	.approval-row {
+		margin-top: 6px;
+		color: var(--wf-title, var(--text));
+	}
+
+	.section-title {
+		color: var(--wf-title, var(--text));
+		font-size: 13px;
+	}
+
+	.footer-actions {
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+
+	@media (max-width: 620px) {
+		.options-grid,
+		.metric-grid {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.drop-zone {
+			transition: none;
+		}
+	}
 </style>
