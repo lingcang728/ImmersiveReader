@@ -1,58 +1,31 @@
-# Contributing to ImmersiveReader
+# 开发与验证
 
-ImmersiveReader integrates the Markdown reader, Podcast Transcriber, and Zhihu
-Packer into one Windows desktop product. Keep changes reviewable: one logical
-change per commit, with its tests and rollback boundary in the same commit.
+ImmersiveReader 是一个 Windows 单仓库产品：`apps/desktop` 是 Svelte 5 + Tauri 2 桌面端，`tools/zhihu-packer` 和 `tools/podcast-transcriber` 是由受管运行时调用的生产工具，`packages/contracts` 保存共享契约。
 
-## Development channel
+## 本机依赖
 
-Desktop changes are exercised through the isolated development channel:
+优先复用本机已有 Node、Rust、Python、FFmpeg、系统 Chrome 和全局 Playwright，不在仓库安装第二套浏览器或运行时。
+
+## 常用命令
 
 ```powershell
+.\scripts\start.ps1 desktop
+.\scripts\verify.ps1
 npm.cmd --prefix .\apps\desktop run ship:dev
 ```
 
-The development executable, shortcuts, application identifier, AppData, cache,
-logs, task data, and default Library are separate from production. Development and
-QA builds must not read production stores or register Markdown associations.
+跨包或共享契约变更必须通过 `scripts\verify.ps1`。桌面变更还要提交 Git，并报告开发 EXE 的时间和 SHA-256。测试不得读写正式 Library、数据库、Profile、Credential Manager 以外的密钥材料或生产缓存。
 
-Production installation is intentionally separate:
+## 安装门
+
+`ship:dev` 使用独立的开发 EXE、快捷方式、Data、Cache、Logs 和 Library。正式安装使用：
 
 ```powershell
 npm.cmd --prefix .\apps\desktop run ship:local
 ```
 
-Run it only after an explicit production-install approval. Registering `.md` or
-`.markdown` is another independent approval and must not be bundled into routine
-build or installation commands.
+正式安装、真实数据迁移、付费长音频、删除旧入口、Markdown 关联和远端历史修改都必须在对应 QA 证据完成后单独执行。`.md` / `.markdown` 的最终选择由 Windows 默认应用 UI 管理，不能通过伪造 `UserChoice` 哈希静默修改。
 
-## Verification
+## 代码边界
 
-Write a failing test first for path protection, atomic replacement, SQLite
-migration, publication transactions, cache cleanup, task state and idempotency,
-Windows Job Objects, single-instance behavior, association restoration, and
-archive/task-history separation.
-
-Use the narrowest package checks while iterating, then run the repository gate for
-cross-package or shared-contract changes:
-
-```powershell
-.\scripts\verify.ps1
-```
-
-Every desktop commit must finish with `ship:dev` and report the commit, installed
-development EXE timestamp, and SHA-256. Documentation-only commits do not require
-an install.
-
-## Data safety
-
-Never commit or copy into the repository any Library content, database, browser
-profile, local settings, credentials, model, audio input, generated output, cache,
-or log. Persistent Data, disposable Cache, Logs, user-visible Library content, and
-Backups are distinct stores. A cache-cleaning implementation must accept only
-managed categories and must never accept an arbitrary path.
-
-Formal data migration, legacy frontend removal, paid or long-audio QA, production
-installation, Markdown association changes, remote history rewriting, remote ref
-changes, and restoration or archival of external repositories remain independent
-authorization gates.
+UI 文案使用中文，代码标识使用英文。不要修改锁定的 Focus Mode 视觉、滚动或 viewport-anchor 算法；外部链接只允许显式 HTTP/HTTPS；所有文件访问必须走受控 Rust 命令。

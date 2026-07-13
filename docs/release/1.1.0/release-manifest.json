@@ -3,14 +3,26 @@
   "product": "ImmersiveReader",
   "version": "1.1.0",
   "platform": "windows-x64",
-  "buildInputCommit": "c85fc85",
-  "configuration": "development-isolated",
+  "buildInputCommit": "a292ac6a7ff7791fca682eb08d97767038c7f2f4",
+  "configuration": "production-verified",
   "executable": {
+    "path": "immersive-reader.exe",
+    "timestamp": "2026-07-13 17:14:32",
+    "bytes": 19151360,
+    "sha256": "0F9787EBD4D0B44ED0DD0E685CB9BD448BD344896B5A17BD3F1B697DB9503870",
+    "markdownAssociationsRegistered": true
+  },
+  "developmentExecutable": {
     "path": ".dev-install/immersive-reader-dev.exe",
-    "timestamp": "2026-07-13 13:41:30",
-    "bytes": 19143680,
-    "sha256": "5350B8E9DF2EBFD5253F13A12B33335A9D39E8678A2C2E662AA5F7898BCB1602",
+    "timestamp": "2026-07-13 17:38:09",
+    "bytes": 19151360,
+    "sha256": "C34EDCBF3005C406AA69706E9879F49E2DB20203733B8E677F08ED0CF9088AFA",
     "markdownAssociationsRegistered": false
+  },
+  "installer": {
+    "path": "沉浸阅读_1.1.0_x64-setup.exe",
+    "bytes": 6523771,
+    "sha256": "589012A11C547E58329FA04F47EA3C085A33B50C456100A279AB738DC96364BC"
   },
   "runtime": {
     "manifestPath": "runtime/manifest.json",
@@ -20,22 +32,19 @@
   },
   "verification": {
     "scripts/verify.ps1": "passed",
-    "bookshelfDetailPlaywright": "passed",
-    "migrationPreview": "passed_read_only",
-    "podcastShortSamples": "passed_local_only",
-    "parallelTaskControlPlane": "passed_podcast_and_zhihu_running_snapshots",
-    "zhihuTop5": "blocked_no_login_and_target_404",
-    "fullAudio": "not_run_authorization_gate",
-    "productionShipLocal": "not_run_authorization_gate",
-    "trayHideRestore": "passed_unique_dev_tray_menu_and_exact_cleanup"
+    "bookshelfPlaywright": "passed",
+    "productionMigration": "verified",
+    "zhihuTop5": "passed_5_of_5",
+    "fullAudioLocalAndDeepSeek": "passed",
+    "productionShipLocal": "passed",
+    "markdownAssociationShellOpen": "passed",
+    "cleanHistory": "passed_single_root_no_merges",
+    "freshClone": "passed",
+    "githubReleaseAction": "passed_run_29240071171"
   },
   "reports": [
     "docs/release/1.1.0/QA_REPORT.md",
-    ".omo/ulw-loop/evidence/podcast-short-qa-20260713.md",
-    ".omo/ulw-loop/evidence/zhihu-qa-20260713.md",
-    ".omo/ulw-loop/evidence/migration-preview-dry-run-20260713.md",
-    ".omo/ulw-loop/evidence/full-audio-preflight-20260713.md",
-    ".omo/ulw-loop/evidence/final-dev-install-20260713.md",
-    ".omo/ulw-loop/evidence/final-v3-todo-audit-20260713.md"
+    "docs/release/1.1.0/RELEASE_NOTES.md",
+    "docs/release/1.1.0/runtime-manifest.json"
   ]
 }

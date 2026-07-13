@@ -1,82 +1,21 @@
-# 沉浸阅读 — Design System
+# 沉浸阅读设计系统
 
-**Reading this as:** desktop product UI for a single power reader, with an editorial night-study language, leaning toward native CSS + hybrid Chinese serif (body) / sans (chrome) — a crafted reading instrument, not SaaS.
+沉浸阅读是一个专注长文阅读的 Windows 桌面工具，不是 SaaS 仪表盘。产品 chrome 采用克制的 MMbook 单色结构，主题变量统一来自 `apps/desktop/src/lib/theme/themes.ts`；链接蓝用于焦点环、状态、次级操作和进度，不使用金色、铜色或紫色渐变。
 
-## Dials
+## 不可回归的阅读行为
 
-| Dial | Value | Why |
-|------|-------|-----|
-| `DESIGN_VARIANCE` | 4 | Calm, readable structure; subtle offset in resume card only |
-| `MOTION_INTENSITY` | 2 | Hover/active only; motion would compete with long-form attention |
-| `VISUAL_DENSITY` | 3 | Gallery-air for night reading; chrome recedes |
+- Focus Mode 的聚光灯、渐进模糊、粒子和窗口化样式保持现有视觉。
+- 进入/退出 Focus Mode 或字号重排时，使用 viewport anchor 恢复位置，不直接复用原始 `scrollTop`。
+- 长跳转使用瞬时滚动；只有短距离操作允许平滑滚动。
+- 连读、目录、搜索、编辑和来源详情共享同一阅读语义，不创建第二套阅读核心。
 
-## Direction: MMbook monochrome shell + blue link accent
+## 界面原则
 
-**Product chrome (bookshelf, top bar, menus)** follows the active MMbook theme tokens (`--bg`, `--bg-secondary`, `--text`, `--heading`, `--hr` from `apps/desktop/src/lib/theme/themes.ts`). Neutrals carry most of the surface.
+- 书架是单一入口：继续阅读、书目、获取内容、临时内容和设置保持同一工作台。
+- 精读是主操作，连读是轻量的外部流；两者不使用同权重的重复按钮。
+- UI chrome 使用无衬线字体，正文使用适合中文长文的衬线/无衬线主题组合；信息文字不得依赖低对比装饰色。
+- 保持 4px 间距节奏、适度圆角和低强度动效，避免玻璃拟态、统计卡片和装饰性 emoji。
 
-**Accent** is the theme **link blue** (`--link` / `--link-hover`, e.g. suzhi-dark `#7ba4d4`). Use for focus rings, badges, secondary actions, and progress fills. **No gold / brass / lamp yellow** on the production shelf.
+## 必须覆盖的状态
 
-**Reading body** keeps MMbook theme variables. Spotlight and long-form typography stay on the existing reading path.
-
-Legacy “夜灯” gold lives only in `docs/design/prototype` as historical reference.
-
-## Tokens
-
-### Color
-
-| Token | Value | Role |
-|-------|-------|------|
-| `--bg-void` | `#100f0d` | Title bar / deepest void |
-| `--bg-base` | `#161412` | App canvas |
-| `--bg-raised` | `#1c1916` | Cards, panels |
-| `--bg-elevated` | `#23201c` | Overlay panels, hover lift |
-| `--text-primary` | `#e4ddd0` | Body & titles (off-white, warm) |
-| `--text-secondary` | `#a39c8f` | Supporting |
-| `--text-tertiary` | `#6f695f` | Nonessential decoration only |
-| `--text-faint` | `#4d4942` | Disabled or purely decorative hints only |
-| `--accent` | `#c4a46a` | Single accent (lantern) |
-
-No pure `#000` / `#fff`. One accent locked across all three screens.
-
-Small readable metadata and keyboard instructions use `--text-secondary`; tertiary and faint values are never used for required 12–14px information.
-
-### Typography
-
-| Role | Family | Notes |
-|------|--------|-------|
-| UI chrome | Noto Sans SC | Labels, badges, buttons |
-| Reading body | Noto Serif SC | Long-form Chinese, 18px / 1.9 lh |
-| Numerals | Tabular / mono | Progress %, article index |
-
-Measure: `~38em` centered column. Paragraph spacing `1.65em`.
-
-### Radius
-
-`6 / 10 / 14 / 18` — one soft system, never mixed with full-pill cards.
-
-### Spacing
-
-4px base rhythm: 4 · 8 · 12 · 16 · 24 · 32 · 48 · 64.
-
-## Screens (1440×900)
-
-1. **书架** (`index.html`) — single entry: resume hero, collection grid, dual open modes (精读 primary / 连读 whisper), 临时内容.
-2. **连读** (`reading.html`) — flow column + TOC command palette open + edge progress rail + next-article seam.
-3. **聚光灯** (`focus.html`) — same article; graduated dim/blur; chrome gone; hair-thin rail.
-
-## Dual action pattern
-
-- **精读**: solid accent button (in-app)
-- **连读**: ghost text + external arrow (browser flow)
-
-Not two equal buttons.
-
-## Explicitly avoided
-
-AI purple gradients, decorative glass, emoji icons, stat widgets, equal-weight button rows, pure black/white, English lorem.
-
-## Challenge result and real states
-
-The three archive-room challenge drafts live in `docs/design/challenges`. Night Lamp remains the final direction; only its clearer brass overlay boundary and shorter spotlight hint were retained.
-
-Production surfaces include loading, empty library, corrupt manifest, unwritable library, missing chapter, missing production tool, and browser-local progress states. Prototype-only window controls and bottom screen navigation are not part of the product.
+书架和阅读器需要可解释地呈现 loading、empty、损坏 manifest、不可写 Library、缺失章节、缺失生产工具、外部变更和浏览器本地进度等状态。新 UI 变更应通过现有 Vitest、Rust 测试和隔离 Playwright harness 验证。

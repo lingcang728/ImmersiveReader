@@ -4,58 +4,37 @@
 
 当前发布版本：1.1.0。
 
-## 使用方式
+## 使用
 
-安装后从桌面或开始菜单打开“沉浸阅读”。可执行文件默认装在本仓库根目录（`immersive-reader.exe`）。知乎与播客所需的 Node、Chromium、Python、FFmpeg 和 Whisper 模型统一放在同目录的 `runtime/` 中，不再引用三个旧项目。源码工作区也提供统一入口：
+安装后从桌面或开始菜单打开“沉浸阅读”。源码工作区的开发入口是：
 
 ```powershell
 .\scripts\start.ps1 desktop
-.\scripts\start.ps1 zhihu
-.\scripts\start.ps1 podcast
 ```
 
-桌面书架顶部可以直接启动知乎归档、播客转写、导入 Markdown 文件夹、临时打开单个 Markdown，以及刷新书库。生产工具缺失时，应用只显示修复说明，不会执行任意外部命令。
+桌面书架可以启动知乎归档、播客转写、Markdown 文件夹导入、临时 Markdown 和阅读器。生产 Node、Chromium、Python、FFmpeg 与 Whisper 模型由受管 `runtime\` 提供，不再依赖已退休的旧项目目录。
 
 ## 书库与阅读
 
-默认书库位于：
+默认书库：
 
 ```text
 C:\Users\<用户名>\Documents\沉浸阅读\Library
 ```
 
-长期内容按来源分开保存：
-
-```text
-Library\
-  知乎\<书名>\
-  手动\<书名>\
-  <其他来源>\<书名>\
-```
-
-每本书都有 `manifest.json`。首次产生阅读进度时，会在书目录中创建 `.reading.json`。
-
-- “精读”在桌面端打开，保留单文件打开、编辑、外部变更重载、目录和聚光灯模式。
-- “连读”在系统浏览器打开，按书目顺序懒加载章节，并与桌面端共享进度。
-- “导入 Markdown”会复制文件夹到 `Library\手动`，源目录保持不变。
-- “临时打开”不会加入长期书架；播客转写也默认保持临时，只有主动导入后才成为长期书。
+长期内容按来源保存于 `Library\知乎`、`Library\手动` 等目录；每本书都有 `manifest.json`，阅读进度使用 `.reading.json`。精读保留 MMbook 的 Focus Mode、章节、搜索、编辑和 viewport-anchor 行为；连读使用受管的本地阅读服务。
 
 ## 数据与隐私
 
-- 正文、图片、进度和应用设置均保存在本机。
-- 知乎登录态保存在 `%LOCALAPPDATA%\ImmersiveReader\Data\Private\ZhihuProfile`，数据库保存在 `%LOCALAPPDATA%\ImmersiveReader\Data\Zhihu\zhihu-packer.db`，不进入书库或 Git。
-- 播客配置和任务数据保存在 `%LOCALAPPDATA%\ImmersiveReader\Data\Podcast`，临时工作区保存在 `%LOCALAPPDATA%\ImmersiveReader\Cache\Podcast`；密钥不会写入 Git 或验证日志。
-- 应用设置保存在 `%APPDATA%\immersive-reader\settings.json`。
-- 播客输入、输出和工作目录仍遵循阅后即焚语义，不会删除书库。
-- 浏览器连读服务只绑定随机的 `127.0.0.1` 端口，并使用一次性高熵会话令牌；桌面应用退出时服务随之停止。
+- 正文、图片、进度和设置均保存在本机，不进入 Git。
+- 知乎数据库位于 `%LOCALAPPDATA%\ImmersiveReader\Data\Zhihu`，登录 Profile 位于 `Data\Private\ZhihuProfile`。
+- Podcast 配置和任务位于 `Data\Podcast`，大文件和工作区位于 `Cache\Podcast`；DeepSeek 凭据只进入 Windows Credential Manager。
+- 输入音频、模型、缓存、输出正文、日志和真实 QA 数据不属于仓库内容。
 
-## 恢复与回滚
+## 默认应用
 
-- 备份整个 `Documents\沉浸阅读\Library` 即可保存书目、内容和整书进度。
-- 损坏的进度文件会先改名为带时间戳的 `.corrupt` 备份，再恢复默认进度。
-- 三个旧项目和旧 MMbook 安装均保留，可在需要时回滚；迁移只复制数据，不移动或删除源文件。
-- 浏览器直接双击离线 `reader.html` 时会显示“本地模式”，此时进度仅保存在该浏览器，不会伪装成桌面同步。
+正式安装已注册 `ImmersiveReader.Markdown`、`.md` 和 `.markdown` 的 Capabilities；Windows 默认应用页面已确认两种扩展均显示为“沉浸阅读”，真实 Shell 打开也已验证启动正式 EXE。
 
-项目当前只支持 Windows 桌面。真实书库、登录态、数据库、转写模型和本地配置不会提交到 Git。
+## 开发与验证
 
-开发与验证说明见 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)。
+开发、测试、生产安装和发布说明见 [CONTRIBUTING.md](CONTRIBUTING.md)、[DESIGN.md](DESIGN.md) 和 [docs/release/1.1.0/QA_REPORT.md](docs/release/1.1.0/QA_REPORT.md)。

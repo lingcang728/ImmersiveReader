@@ -1,20 +1,17 @@
 # 沉浸阅读 1.1.0
 
-1.1.0 将 MMbook 阅读体验、知乎归档和 Podcast 转写统一到同一座本地书库中，并补齐可恢复任务、来源溯源和安全收尾能力。
+1.1.0 将 Markdown 阅读、知乎归档和 Podcast 转写统一到同一座本地书库，并补齐任务恢复、来源溯源、数据迁移和安全收尾能力。
 
 ## 主要变化
 
-- 书架详情显示来源、版本、章节、溯源信息和关联任务记录。
-- 阅读器继续保留 MMbook 的聚光灯视觉、视口锚点和滚动恢复行为。
-- Podcast 与知乎任务使用统一的任务快照、事件、恢复和受管运行时路径。
-- Podcast 输入预检包含 SHA-256、时长、预计缓存、文本规模、费用上限和可用空间。
-- 迁移 preview 保持只读并为敏感 Profile、冲突和回滚材料提供明确记录。
-- 桌面端收紧 CSP、外链协议和 Tauri capability；运行时仍由 `runtime/` 统一管理。
+- 书架详情展示来源、revision、provenance、章节和关联任务记录。
+- 保留 MMbook 的 Focus Mode、章节导航、滚动恢复和 viewport-anchor 行为。
+- Podcast 与知乎使用统一任务快照、结构化事件、幂等控制和受管运行时路径。
+- Podcast 支持本地 faster-whisper ASR、DeepSeek/Ollama 翻译与预算预检；凭据只存 Windows Credential Manager。
+- 知乎支持受管登录、回答/文章合并 Top N、`.incoming` 发布事务和 archive revision。
+- 正式数据迁移提供 receipt、reconciliation、rollback 和 Profile/Library 路径隔离。
+- 桌面端收紧 CSP、外链协议、文件访问和 Tauri capabilities；Release Action 只构建 Windows x64 NSIS。
 
 ## 数据边界
 
-真实书库、登录态、数据库、临时音频、模型、输出和本地配置不属于 Git 发布内容。正式生产安装和 Markdown 文件关联由独立授权流程控制。
-
-## 验证
-
-完整验证、隔离开发安装、短音频 QA、迁移 preview 和当前 QA 限制见同目录的 `QA_REPORT.md` 与 `release-manifest.json`。
+真实书库、登录态、数据库、临时音频、模型、输出和本地配置不属于 Git 发布内容。生产安装、默认应用选择和远端历史均有独立 QA 证据，详见同目录 [QA_REPORT.md](QA_REPORT.md)。
