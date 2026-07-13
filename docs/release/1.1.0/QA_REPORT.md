@@ -2,7 +2,7 @@
 
 ## Automated and local QA
 
-- `scripts/verify.ps1`: passed on the 1.1.0 tree: contracts 5, desktop Vitest 38, Svelte 0 errors/0 warnings, Rust 87, Zhihu 25, Podcast 27, and Podcast quick validation.
+- `scripts/verify.ps1`: passed on the 1.1.0 tree: contracts 5, desktop Vitest 38, Svelte 0 errors/0 warnings, Rust 88, Zhihu 25, Podcast 27, and Podcast quick validation.
 - Bookshelf detail: Playwright isolated mock QA passed; source link, provenance revision, task status/revision, and detail screenshot were verified.
 - Migration preview: read-only deterministic Rust preview test passed; no target data was created.
 - Podcast short samples: two real 30-second clips completed locally; one Chinese transcription and one English transcription plus local Ollama translation succeeded, with no paid API request. Evidence: `.omo/ulw-loop/evidence/podcast-short-qa-20260713.md`.
