@@ -432,6 +432,18 @@
   - 两份源文件与 QA 副本均保持预检哈希：英文 `DADA107A8123F1F8D80F08906449FD0C8B662F1CD876BFE75991522DFE16F3D1`，中文 `BA363A786CDD6B2A36F01E4153F5388B3317B77E022448B4F860F3B9C9BE9300`。完整证据：`.omo/ulw-loop/evidence/full-audio-qa-20260713.md`。
   - 本步前完整 `scripts\verify.ps1` 通过；最新 `ship:dev` 对应 commit `3907d12`，开发 EXE `2026-07-13 16:57:31`、SHA-256 `1EA0E7B54D3309D87A4B0596E07FD23E14470580C7133E52B1B787CA0CF8ACA6`，未注册 Markdown 关联。
 
+### 41. 正式安装与 Windows 默认应用候选注册
+
+- [x] 在完整产品、数据和 API QA 通过后执行正式 `ship:local`，并完成精确正式 EXE 启停验证。
+  - NSIS：`G:\build_cache\cargo-target\release\bundle\nsis\沉浸阅读_1.1.0_x64-setup.exe`，SHA-256 `589012A11C547E58329FA04F47EA3C085A33B50C456100A279AB738DC96364BC`。
+  - 正式 EXE：`immersive-reader.exe`，时间 `2026-07-13 17:14:32`、`19151360` bytes、版本 `1.1.0`、SHA-256 `0F9787EBD4D0B44ED0DD0E685CB9BD448BD344896B5A17BD3F1B697DB9503870`；精确 PID `111748` 启动响应正常并停止，残留精确进程 0。
+  - Desktop 与 Start Menu 快捷方式均指向上述正式 EXE；runtime 文件缺失 0。安装过程明确未修改 Markdown `UserChoice`。
+- [x] 报告并注册 `.md/.markdown` 默认应用候选、Classes、Capabilities 与恢复边界。
+  - 实现 commit：`d11e964 fix(installer): register supported default app capabilities`；注册 `ImmersiveReader.Markdown`、OpenWithProgids、`Software\ImmersiveReader\Capabilities` 与 `Software\RegisteredApplications\沉浸阅读`，并可打开 Windows 默认应用页面。
+  - 关联前注册表备份位于忽略目录 `artifacts\qa\association-backup-20260713`；恢复时可导入其中 `.reg`，但受保护 `UserChoice` 仍只能由 Windows 设置 UI 确认。
+  - `register:markdown` 成功后，Classes open command 与 Capabilities 均指向正式 EXE；Windows 当前实际 `.md UserChoice=md`，`.markdown` 无 UserChoice，因此尚未把实际默认值伪报为沉浸阅读。
+  - 安装脚本变更后的 `ship:dev` 通过；开发 EXE 时间 `2026-07-13 17:19:08`，SHA-256 `AE45EB1968D3CB660B8F753FA24E96A2607DBF978EE0B8E543846AA3C830E13D`。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -528,8 +540,9 @@
   - 预检已完成；完整原始音频执行仍未进行，等待独立授权；授权门记录见本清单末尾“明确授权门”。
 - [x] 完成 1.1.0 version、README、release notes、runtime manifest、release manifest 和 QA report。
   - 版本已同步到 desktop package/Cargo/Tauri config；`docs/release/1.1.0/` 包含 release notes、QA report、17 项 runtime manifest snapshot 和 release manifest；最终 `scripts\verify.ps1` 通过，`ship:dev` 产物为 `2026-07-13 13:41:30 / 5350B8E9DF2EBFD5...`。
-- [ ] 暂停等待正式 `ship:local` 授权；获准后只安装正式版，不修改文件关联。
-- [ ] Markdown 文件关联另行报告 UserChoice/Classes/恢复方案并等待独立授权。
+- [x] 正式 `ship:local` 已获本轮全量 TODO 授权并完成；正式版安装时未修改文件关联。
+- [x] Markdown 文件关联报告、Classes/Capabilities 候选注册、恢复材料和授权已完成。
+- [ ] 在 Windows 默认应用 UI 中把 `.md` 与 `.markdown` 均确认选择为“沉浸阅读”，再核验受保护 UserChoice。
 
 ### H. 干净 Git 历史与远程
 
@@ -548,16 +561,16 @@
 
 ## 当前关闭的独立授权门
 
-- [ ] 真实生产数据迁移。
-- [ ] 删除旧 Podcast/Zhihu 前端。
+- [x] 真实生产数据迁移：2026-07-13 已完成并 verified。
+- [x] 删除旧 Podcast/Zhihu 前端：2026-07-13 已在真实新流程 QA 后完成。
 - [x] 完整长音频及可能产生 API 费用的 QA：2026-07-13 已完成，两份源文件前后哈希不变，API 预算账本 `¥0.1063272`。
-- [ ] 正式 `ship:local`。
-- [ ] 修改 `.md/.markdown` 文件关联。
-- [ ] force-push `origin/main`。
+- [x] 正式 `ship:local`：2026-07-13 已完成。
+- [x] 修改 `.md/.markdown` 文件关联：本轮已授权且候选注册完成；受保护 UserChoice 等待 Windows UI 确认。
+- [x] force-push `origin/main`：本轮已授权；执行仍必须使用 `--force-with-lease` 并先完成第二份 bundle/报告。
 - [ ] 删除或替换其他远程 branches/tags。
 - [ ] 恢复外部 `Zhihu_packer` 仓库。
 - [ ] 将外部 `Zhihu_packer` 仓库设为 archived。
 
 ## 下一项推荐执行
 
-本轮审查后，没有“不受关闭授权门阻挡”的未完成自动项。下一步等待用户明确选择一个独立授权门；若目标是日常直接使用，最小下一门是正式 `ship:local`（只安装正式版，不修改 `.md/.markdown` 文件关联）。
+继续完成第二份 bundle、干净历史重放、force-push 与新鲜克隆验收；并等待 Windows 默认应用 UI 对 `.md/.markdown` 的最终用户确认。
