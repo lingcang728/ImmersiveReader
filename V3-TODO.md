@@ -481,6 +481,7 @@
 - [x] 从两个真实音频制作短片段副本并完成免费/低成本回归。
   - 2026-07-13 在 `artifacts/qa/podcast-short` 从 Desktop 上两份真实音频生成 30 秒 WAV；Podcast runtime 使用本地 faster-whisper CUDA 与本地 Ollama `qwen3.5:9b`，未调用 DeepSeek/API；`work/reports/run_summary.md`：中文 1/1 成功、英文转录+翻译 1/1 成功、失败 0；证据：`.omo/ulw-loop/evidence/podcast-short-qa-20260713.md`。
 - [ ] 在 QA Library 对指定知乎账号执行回答+文章合计 Top 5。
+  - 2026-07-13 已在隔离 `ImmersiveReader-QA-zhihu-v3-20260713` 实际 dry-run：受管 Profile 无登录态，目标 answers/articles 页面返回 404/空索引（`logged=false`），结果 `0 + 0`，未创建任务、未写 Library、未发布；登录前置/目标可达性需人工处理；验证码未触发。证据：`.omo/ulw-loop/evidence/zhihu-qa-20260713.md`。
 - [ ] Podcast 与知乎各一个活动任务并行测试。
 - [ ] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
 - [x] 生成两个完整音频的时长、磁盘、文本规模、费用上限与可用空间报告。
