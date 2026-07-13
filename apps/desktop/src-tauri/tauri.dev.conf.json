@@ -4,6 +4,9 @@
   "version": "1.1.0",
   "identifier": "com.lingcang.immersivereading.dev",
   "app": {
+    "trayIcon": {
+      "tooltip": "沉浸阅读 Dev"
+    },
     "windows": [
       {
         "title": "沉浸阅读 · 开发版",
