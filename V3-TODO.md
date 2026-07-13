@@ -477,7 +477,8 @@
 
 ### G. QA、发布与安装
 
-- [ ] 从两个真实音频制作短片段副本并完成免费/低成本回归。
+- [x] 从两个真实音频制作短片段副本并完成免费/低成本回归。
+  - 2026-07-13 在 `artifacts/qa/podcast-short` 从 Desktop 上两份真实音频生成 30 秒 WAV；Podcast runtime 使用本地 faster-whisper CUDA 与本地 Ollama `qwen3.5:9b`，未调用 DeepSeek/API；`work/reports/run_summary.md`：中文 1/1 成功、英文转录+翻译 1/1 成功、失败 0；证据：`.omo/ulw-loop/evidence/podcast-short-qa-20260713.md`。
 - [ ] 在 QA Library 对指定知乎账号执行回答+文章合计 Top 5。
 - [ ] Podcast 与知乎各一个活动任务并行测试。
 - [ ] 验证托盘隐藏/恢复、退出和 Job Object 无遗留 Python/Node/FFmpeg/Chromium。
