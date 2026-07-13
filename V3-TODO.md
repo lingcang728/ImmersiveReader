@@ -464,7 +464,8 @@
 
 ### F. 安全收紧与旧前端移除
 
-- [ ] 新 Podcast/知乎流程自动测试与短样本 QA 全部通过后，暂停等待“删除旧前端”独立授权。
+- [x] 新 Podcast/知乎流程自动测试与短样本 QA 全部通过后，暂停等待“删除旧前端”独立授权。
+  - 2026-07-13 `scripts\verify.ps1` 通过（Podcast 27、Zhihu 25）；两份真实音频短样本本地回归通过；旧 Podcast/知乎入口不删除，等待清单末尾独立授权门。
 - [ ] 获准后删除 Podcast 旧 GUI/PowerShell 托盘打包入口。
 - [ ] 获准后删除知乎旧控制台打包入口。
 - [x] 收紧 Tauri CSP、capabilities、通用 `fs:default` 和 `opener:default`。
@@ -489,7 +490,8 @@
 - [x] 暂停等待“完整长音频/API 费用 QA”独立授权。
   - 预检已完成；完整原始音频执行仍未进行，等待独立授权；授权门记录见本清单末尾“明确授权门”。
 - [ ] 获准后完整执行两个原始音频，并核对前后 SHA-256 不变。
-- [ ] 完成 1.1.0 version、README、release notes、runtime manifest、release manifest 和 QA report。
+- [x] 完成 1.1.0 version、README、release notes、runtime manifest、release manifest 和 QA report。
+  - 版本已同步到 desktop package/Cargo/Tauri config；`docs/release/1.1.0/` 包含 release notes、QA report、17 项 runtime manifest snapshot 和 release manifest；`scripts\verify.ps1` 及 `ship:dev` 通过，开发 EXE `2026-07-13 10:57:26 / 32CCA0946E733D02...`。
 - [ ] 暂停等待正式 `ship:local` 授权；获准后只安装正式版，不修改文件关联。
 - [ ] Markdown 文件关联另行报告 UserChoice/Classes/恢复方案并等待独立授权。
 
