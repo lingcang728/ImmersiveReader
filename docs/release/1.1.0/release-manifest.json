@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "product": "ImmersiveReader",
+  "version": "1.1.0",
+  "platform": "windows-x64",
+  "buildInputCommit": "697c926",
+  "configuration": "development-isolated",
+  "executable": {
+    "path": ".dev-install/immersive-reader-dev.exe",
+    "timestamp": "2026-07-13 10:57:26",
+    "bytes": 19151872,
+    "sha256": "32CCA0946E733D0281FCFC92D2CEB6B0212B257DE6D8040299EC79F476EA27D5",
+    "markdownAssociationsRegistered": false
+  },
+  "runtime": {
+    "manifestPath": "runtime/manifest.json",
+    "manifestSha256": "C7F103D42902EB588A033B3F71D13CBBA4D0627CA90460AD791274AFCCEFEDD6",
+    "entryCount": 17,
+    "releaseSnapshot": "docs/release/1.1.0/runtime-manifest.json"
+  },
+  "verification": {
+    "scripts/verify.ps1": "passed",
+    "bookshelfDetailPlaywright": "passed",
+    "migrationPreview": "passed_read_only",
+    "podcastShortSamples": "passed_local_only",
+    "zhihuTop5": "blocked_no_login_and_target_404",
+    "fullAudio": "not_run_authorization_gate",
+    "productionShipLocal": "not_run_authorization_gate"
+  },
+  "reports": [
+    "docs/release/1.1.0/QA_REPORT.md",
+    ".omo/ulw-loop/evidence/podcast-short-qa-20260713.md",
+    ".omo/ulw-loop/evidence/zhihu-qa-20260713.md",
+    ".omo/ulw-loop/evidence/migration-preview-dry-run-20260713.md",
+    ".omo/ulw-loop/evidence/full-audio-preflight-20260713.md"
+  ]
+}

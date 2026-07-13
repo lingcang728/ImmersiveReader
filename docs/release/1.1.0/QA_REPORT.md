@@ -2,7 +2,7 @@
 
 ## Automated and local QA
 
-- `scripts/verify.ps1`: final result is recorded after the release-version build; it covers contracts, desktop tests/Svelte/Rust, Zhihu tests/build/reader compile, and Podcast tests/quick validation.
+- `scripts/verify.ps1`: passed on the 1.1.0 tree: contracts 5, desktop Vitest 38, Svelte 0 errors/0 warnings, Rust 87, Zhihu 25, Podcast 27, and Podcast quick validation.
 - Bookshelf detail: Playwright isolated mock QA passed; source link, provenance revision, task status/revision, and detail screenshot were verified.
 - Migration preview: read-only deterministic Rust preview test passed; no target data was created.
 - Podcast short samples: two real 30-second clips completed locally; one Chinese transcription and one English transcription plus local Ollama translation succeeded, with no paid API request. Evidence: `.omo/ulw-loop/evidence/podcast-short-qa-20260713.md`.
@@ -17,4 +17,4 @@ Full original-audio execution and possible API charges were not performed. Real 
 
 ## Installed artifact
 
-The final isolated development EXE timestamp, SHA-256, and process smoke result are recorded in `release-manifest.json` after `ship:dev`. Production installation remains a separate gate.
+The isolated development EXE was built by `ship:dev` at `2026-07-13 10:57:26`, size `19151872` bytes, SHA-256 `32CCA0946E733D0281FCFC92D2CEB6B0212B257DE6D8040299EC79F476EA27D5`; Markdown associations were not registered. The exact EXE started and stopped; its WebView child was gone afterward. A CLI close request kept the process alive, but the native visibility check did not prove the expected hidden state, so tray hide/restore remains open in `V3-TODO.md`.
