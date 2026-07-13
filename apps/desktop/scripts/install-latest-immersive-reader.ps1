@@ -103,6 +103,18 @@ if ($RegisterMarkdownAssociations) {
   Set-Item -Path "HKCU:\Software\Classes\$progId" -Value "Markdown Document"
   Set-Item -Path "HKCU:\Software\Classes\$progId\shell\open\command" -Value $openCommand
 
+  # Windows can retain a protected UserChoice that points to the old MMbook
+  # ProgId (`md`). Migrate that legacy command in place so existing defaults
+  # immediately open the current production executable without bypassing the
+  # UserChoice protection.
+  $legacyCommandPath = "HKCU:\Software\Classes\md\shell\open\command"
+  $legacyCommand = (Get-ItemProperty -LiteralPath $legacyCommandPath -Name "(default)" -ErrorAction SilentlyContinue).'(default)'
+  if ($legacyCommand -and $legacyCommand -match "(?i)mmbook") {
+    Set-Item -Path $legacyCommandPath -Value $openCommand
+    Set-Item -Path "HKCU:\Software\Classes\md" -Value $registeredName
+    Write-Host "Migrated the legacy md Markdown handler to $installedExe."
+  }
+
   New-Item -Path "$capabilitiesPath\FileAssociations" -Force | Out-Null
   New-ItemProperty -Path $capabilitiesPath -Name "ApplicationName" -Value $registeredName -PropertyType String -Force | Out-Null
   New-ItemProperty -Path $capabilitiesPath -Name "ApplicationDescription" -Value "本地长文阅读、知乎归档和播客转写工具。" -PropertyType String -Force | Out-Null

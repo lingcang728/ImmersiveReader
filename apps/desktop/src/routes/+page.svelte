@@ -1818,8 +1818,8 @@
 		};
 		window.addEventListener("beforeunload", handleBeforeUnload);
 
-		// Closing the window hides it; tray exit explicitly chooses lease-preserving
-		// quit or cancel_and_discard cleanup.
+		// Closing the window exits cleanly; the tray remains available for users who
+		// want to keep background tasks alive while the window is hidden.
 		let isClosing = false;
 		const finishExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
 			try {
@@ -1859,7 +1859,7 @@
 		const unlistenClose = appWindow.onCloseRequested((event) => {
 			if (isClosing) return;
 			event.preventDefault();
-			void requestExit("hide");
+			void requestExit("preserve");
 		});
 
 		void refreshLibrary();
