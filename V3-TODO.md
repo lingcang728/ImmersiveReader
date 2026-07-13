@@ -444,6 +444,13 @@
   - `register:markdown` 成功后，Classes open command 与 Capabilities 均指向正式 EXE；Windows 当前实际 `.md UserChoice=md`，`.markdown` 无 UserChoice，因此尚未把实际默认值伪报为沉浸阅读。
   - 安装脚本变更后的 `ship:dev` 通过；开发 EXE 时间 `2026-07-13 17:19:08`，SHA-256 `AE45EB1968D3CB660B8F753FA24E96A2607DBF978EE0B8E543846AA3C830E13D`。
 
+### 42. 外部 Zhihu_packer 原历史恢复与归档
+
+- [x] 从整合仓库保留的原生 Git 对象恢复外部 `Zhihu_packer`，验真后设置为 archived。
+  - `git-subtree-split` 与迁移报告共同确认原最终 HEAD 为 `35d78f9ea83f4ebc48c269dfc07075f53f35c5da`；对象链含 7 个原始提交、39 个跟踪文件，作者均为 `lingcang728`。
+  - 恢复前扫描无数据库、Profile、日志、本地配置或密钥形态匹配；只推送原始对象链，没有推送 ImmersiveReader 整合历史。
+  - GitHub 仓库：`https://github.com/lingcang728/Zhihu_packer`；私有，默认分支 `master`，远端 HEAD 精确为 `35d78f9ea83f4ebc48c269dfc07075f53f35c5da`，`isArchived=true`。
+
 ## 未完成
 
 以下顺序是建议的继续执行顺序。后续对话应从第一个未勾选且不受关闭授权门阻挡的条目开始。
@@ -557,7 +564,7 @@
 - [ ] 删除/替换其他 remote branches/tags 必须逐项另行授权。
 - [ ] force-push 后重新 clone 到新目录，验证 tree、version、README、Actions、tag、shortlog 和 trailers。
 - [ ] GitHub contributors 缓存延迟不得触发第二次历史重写。
-- [ ] 恢复外部 `Zhihu_packer` 仓库与设置 archive 分别等待两个独立授权。
+- [x] 外部 `Zhihu_packer` 已按本轮全量 TODO 授权恢复为私有仓库，并在 HEAD 验真后设置 archived。
 
 ## 当前关闭的独立授权门
 
@@ -568,8 +575,8 @@
 - [x] 修改 `.md/.markdown` 文件关联：本轮已授权且候选注册完成；受保护 UserChoice 等待 Windows UI 确认。
 - [x] force-push `origin/main`：本轮已授权；执行仍必须使用 `--force-with-lease` 并先完成第二份 bundle/报告。
 - [ ] 删除或替换其他远程 branches/tags。
-- [ ] 恢复外部 `Zhihu_packer` 仓库。
-- [ ] 将外部 `Zhihu_packer` 仓库设为 archived。
+- [x] 恢复外部 `Zhihu_packer` 仓库：远端 `master=35d78f9`。
+- [x] 将外部 `Zhihu_packer` 仓库设为 archived：GitHub `isArchived=true`。
 
 ## 下一项推荐执行
 
