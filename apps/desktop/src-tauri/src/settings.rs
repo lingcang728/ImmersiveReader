@@ -8,7 +8,7 @@ mod recovery;
 use recovery::load_status_from;
 pub use recovery::SettingsLoadState;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub schema_version: u32,
@@ -99,7 +99,11 @@ pub(crate) fn save_compatible_to(path: &Path, settings: &AppSettings) -> Result<
 pub fn load_settings() -> Result<AppSettings, String> {
     let path = crate::storage::StorageLocations::current()?.settings_path;
     match load_status_from(&path) {
-        SettingsLoadState::Active(settings) => Ok(settings),
+        SettingsLoadState::Active(settings) => {
+            // Always keep production library at Documents/沉浸阅读/Library.
+            // Repair any legacy project-path override silently.
+            Ok(normalize_production_library_root(settings)?)
+        }
         SettingsLoadState::Recovery(recovery) => Err(format!(
             "Settings recovery mode: {} ({})",
             recovery.error,
@@ -108,10 +112,33 @@ pub fn load_settings() -> Result<AppSettings, String> {
     }
 }
 
+/// Production library is fixed under Documents; only QA keeps its isolated path.
+fn normalize_production_library_root(mut settings: AppSettings) -> Result<AppSettings, String> {
+    let locations = crate::storage::StorageLocations::current()?;
+    if locations.channel != "production" {
+        return Ok(settings);
+    }
+    let canonical = locations.library_root.to_string_lossy().replace('/', "\\");
+    let current = settings.library_root.replace('/', "\\");
+    if current.eq_ignore_ascii_case(&canonical) {
+        return Ok(settings);
+    }
+    // Rewrite stale/custom roots (e.g. project-local Library) to the Documents default.
+    settings.library_root = locations.library_root.to_string_lossy().into_owned();
+    let path = locations.settings_path.clone();
+    let _ = save_compatible_to(&path, &settings);
+    Ok(settings)
+}
+
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
     let locations = crate::storage::StorageLocations::current()?;
+    let mut settings = settings.clone();
+    // Production always pins the library under Documents/沉浸阅读/Library.
+    if locations.channel == "production" {
+        settings.library_root = locations.library_root.to_string_lossy().into_owned();
+    }
     crate::storage::validate_library_root(Path::new(&settings.library_root), &locations)?;
-    save_compatible_to(&locations.settings_path, settings)
+    save_compatible_to(&locations.settings_path, &settings)
 }
 
 pub fn runtime_root() -> Result<PathBuf, String> {

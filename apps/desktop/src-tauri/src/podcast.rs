@@ -459,7 +459,7 @@ pub fn retry_task_at(
                 let event = control
                     .mark_terminal_task_success(
                         task_id,
-                        "已保存到 桌面/互动书架/播客",
+                        "已保存到 书库/播客",
                         Some(transaction.book_id),
                     )?
                     .ok_or_else(|| "TASK_ALREADY_SUCCEEDED".to_string())?;

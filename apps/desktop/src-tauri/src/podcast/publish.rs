@@ -32,7 +32,7 @@ fn safe_segment(value: &str) -> bool {
             .all(|item| item.is_ascii_alphanumeric() || matches!(item, '-' | '_' | ':'))
 }
 
-/// Folder name for a podcast book under `播客/` and Desktop `互动书架/播客/`.
+/// Folder name for a podcast book under Library/`播客/`.
 /// Strips Windows-illegal characters and trims length while keeping CJK titles readable.
 pub(crate) fn sanitize_podcast_folder_name(raw: &str) -> String {
     let mut name = raw
@@ -66,48 +66,6 @@ pub(crate) fn sanitize_podcast_folder_name(raw: &str) -> String {
 
 fn podcast_library_relative_path(display_name: &str) -> String {
     format!("播客/{}", sanitize_podcast_folder_name(display_name))
-}
-
-/// Durable user-facing shelf: Desktop/互动书架/播客/{文件名}/ — markdown only.
-fn desktop_podcast_export_dir(display_name: &str) -> Result<PathBuf, String> {
-    let desktop = dirs::desktop_dir().ok_or_else(|| "DESKTOP_UNAVAILABLE".to_string())?;
-    Ok(desktop
-        .join("互动书架")
-        .join("播客")
-        .join(sanitize_podcast_folder_name(display_name)))
-}
-
-/// Copy only Markdown chapters into the desktop shelf folder (no manifest / provenance).
-fn export_markdown_to_desktop_shelf(
-    display_name: &str,
-    chapter_files: &[(String, PathBuf)],
-) -> Result<PathBuf, String> {
-    let dest_dir = desktop_podcast_export_dir(display_name)?;
-    fs::create_dir_all(&dest_dir).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
-    // Clear previous markdown in this folder so re-publish stays tidy.
-    if dest_dir.is_dir() {
-        for entry in fs::read_dir(&dest_dir).map_err(|error| format!("PUBLISH_FAILED: {error}"))? {
-            let entry = entry.map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
-            let path = entry.path();
-            let is_md = path
-                .extension()
-                .and_then(|value| value.to_str())
-                .map(|value| matches!(value.to_ascii_lowercase().as_str(), "md" | "markdown"))
-                .unwrap_or(false);
-            if is_md {
-                let _ = fs::remove_file(&path);
-            }
-        }
-    }
-    for (relative, source) in chapter_files {
-        let file_name = Path::new(relative)
-            .file_name()
-            .map(|value| value.to_os_string())
-            .unwrap_or_else(|| std::ffi::OsString::from("transcript.md"));
-        let destination = dest_dir.join(file_name);
-        fs::copy(source, &destination).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
-    }
-    Ok(dest_dir)
 }
 
 fn collect_markdown(
@@ -373,7 +331,7 @@ pub fn publish_task_result_at(
         .and_then(|value| value.get("engineVersion"))
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let (chapters, markdown_sources) = match copy_outputs(&output_root, &incoming, &input_name) {
+    let (chapters, _markdown_sources) = match copy_outputs(&output_root, &incoming, &input_name) {
         Ok(value) => value,
         Err(error) => {
             let _ = fs::remove_dir_all(&incoming);
@@ -434,24 +392,8 @@ pub fn publish_task_result_at(
         "committed",
         &format!(".transactions/{}.json", task_id),
     )?;
-    // Durable markdown-only copy on the user's Desktop shelf (survives cache cleanup).
-    // Skip QA / test channels so unit tests do not touch the real Desktop.
-    // Sources must be taken from the committed final path — incoming/ was renamed away.
-    if locations.channel == "production" {
-        let final_root = locations
-            .library_root
-            .join(committed.final_relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let shelf_sources: Vec<(String, PathBuf)> = markdown_sources
-            .iter()
-            .filter_map(|(name, _)| {
-                let candidate = final_root.join(name);
-                candidate.is_file().then(|| (name.clone(), candidate))
-            })
-            .collect();
-        if let Err(error) = export_markdown_to_desktop_shelf(&input_name, &shelf_sources) {
-            eprintln!("Desktop podcast export warning: {error}");
-        }
-    }
+    // Canonical location is only Library/播客/{title}/ under the configured library root
+    // (production default: Documents/沉浸阅读/Library). No separate desktop shelf.
     release_podcast_cache_lease(locations, task_id, snapshot.cache_lease_bytes)?;
     Ok(committed)
 }

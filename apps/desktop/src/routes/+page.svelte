@@ -1120,7 +1120,7 @@
 				lifecycleState?: string;
 			}>("restart_podcast_task", { taskId });
 			if (snapshot.outcome === "success") {
-				showAppNotice("发布成功，文稿已保存到桌面/互动书架/播客");
+				showAppNotice("发布成功，文稿已保存到 书库/播客");
 			} else {
 				showAppNotice("已重新开始转写");
 			}
