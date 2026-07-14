@@ -45,6 +45,156 @@ export function scanLimitForSelection(
   return sortBy === 'time' && topN !== null ? Math.max(0, topN) : null;
 }
 
+/** Zhihu list API paging payload (snake_case as returned by the site). */
+export type ZhihuListPaging = {
+  is_end?: boolean;
+  next?: string | null;
+  totals?: number;
+};
+
+export type ListPagingState = {
+  isEnd: boolean;
+  next: string | null;
+  totals: number | null;
+  pagesSeen: number;
+  lastCursor: string | null;
+};
+
+export function emptyPagingState(): ListPagingState {
+  return { isEnd: false, next: null, totals: null, pagesSeen: 0, lastCursor: null };
+}
+
+/**
+ * Merge one authenticated list-API page into the collected index map and update paging.
+ * Returns how many *new* items were added. Detects repeated cursors as incomplete pagination.
+ */
+export function mergeListApiPage(
+  itemType: 'answers' | 'articles',
+  peopleId: string,
+  json: { data?: unknown[]; paging?: ZhihuListPaging } | null | undefined,
+  collected: Map<string, ScrapedIndexItem>,
+  paging: ListPagingState
+): { added: number; repeatedCursor: boolean } {
+  if (!json || !Array.isArray(json.data)) {
+    return { added: 0, repeatedCursor: false };
+  }
+
+  let added = 0;
+  for (const raw of json.data) {
+    const item = raw as Record<string, any>;
+    if (itemType === 'answers') {
+      if (item.type !== 'answer') continue;
+      const answerId = String(item.id);
+      const itemId = `answer:${answerId}`;
+      if (collected.has(itemId)) continue;
+      const questionId = String(item.question?.id || '');
+      collected.set(itemId, {
+        id: itemId,
+        type: 'answer',
+        title: item.question?.title || '未命名问题',
+        authorId: item.author?.id || peopleId,
+        authorName: item.author?.name || '未知作者',
+        url: `https://www.zhihu.com/question/${questionId}/answer/${answerId}`,
+        createdTime: item.created_time || 0,
+        updatedTime: item.updated_time || 0,
+        voteupCount: item.voteup_count || 0,
+        commentCount: item.comment_count || 0,
+        questionId,
+        questionUrl: `https://www.zhihu.com/question/${questionId}`
+      });
+      added++;
+    } else {
+      if (item.type !== 'article') continue;
+      const articleId = String(item.id);
+      const itemId = `article:${articleId}`;
+      if (collected.has(itemId)) continue;
+      collected.set(itemId, {
+        id: itemId,
+        type: 'article',
+        title: item.title || '未命名文章',
+        authorId: item.author?.id || peopleId,
+        authorName: item.author?.name || '未知作者',
+        url: `https://zhuanlan.zhihu.com/p/${articleId}`,
+        createdTime: item.created || item.created_time || 0,
+        updatedTime: item.updated || item.updated_time || 0,
+        voteupCount: item.voteup_count || item.likes_count || 0,
+        commentCount: item.comment_count || 0
+      });
+      added++;
+    }
+  }
+
+  const pagingPayload = json.paging || {};
+  const next =
+    typeof pagingPayload.next === 'string' && pagingPayload.next.trim()
+      ? pagingPayload.next.trim()
+      : null;
+  let repeatedCursor = false;
+  if (next && paging.lastCursor && next === paging.lastCursor) {
+    repeatedCursor = true;
+  }
+  if (next) {
+    paging.lastCursor = next;
+  }
+  paging.next = next;
+  paging.pagesSeen += 1;
+  if (typeof pagingPayload.totals === 'number' && Number.isFinite(pagingPayload.totals)) {
+    paging.totals = Math.max(0, Math.floor(pagingPayload.totals));
+  }
+  if (pagingPayload.is_end === true) {
+    paging.isEnd = true;
+  } else if (pagingPayload.is_end === false) {
+    paging.isEnd = false;
+  }
+
+  return { added, repeatedCursor };
+}
+
+/**
+ * Decide whether index scrolling should stop. Priority:
+ * 1) Top N reached  2) API is_end  3) API totals reached
+ * 4) DOM no-more text  5) repeated cursor  6) no-new streak  7) max scrolls
+ */
+export function shouldStopIndexScroll(input: {
+  topN: number | null;
+  collectedSize: number;
+  paging: ListPagingState;
+  hasDomNoMore: boolean;
+  noNewCount: number;
+  scrollCount: number;
+  maxScrolls: number;
+  repeatedCursor: boolean;
+  noNewLimit?: number;
+}): { stop: boolean; reason: string | null } {
+  const noNewLimit = input.noNewLimit ?? 8;
+  if (input.topN !== null && input.collectedSize >= input.topN) {
+    return { stop: true, reason: `top_n:${input.topN}` };
+  }
+  if (input.paging.isEnd) {
+    return { stop: true, reason: 'api_is_end' };
+  }
+  if (
+    input.paging.totals !== null &&
+    input.paging.totals > 0 &&
+    input.collectedSize >= input.paging.totals
+  ) {
+    return { stop: true, reason: `api_totals:${input.paging.totals}` };
+  }
+  if (input.hasDomNoMore) {
+    return { stop: true, reason: 'dom_no_more' };
+  }
+  if (input.repeatedCursor) {
+    return { stop: true, reason: 'repeated_cursor' };
+  }
+  if (input.noNewCount >= noNewLimit) {
+    return { stop: true, reason: `no_new:${noNewLimit}` };
+  }
+  if (input.scrollCount >= input.maxScrolls) {
+    return { stop: true, reason: `max_scrolls:${input.maxScrolls}` };
+  }
+  return { stop: false, reason: null };
+}
+
 /**
  * 从页面 SSR 注入的 #js-initialData (Hydration JSON) 中解析首屏的回答/文章索引。
  *
@@ -214,70 +364,34 @@ export async function scrapePeopleIndex(
   logger.info(`开始扫描答主 ${peopleId} 的 ${itemType} 列表, 目标 URL: ${targetUrl}`);
 
   const collected: Map<string, ScrapedIndexItem> = new Map();
+  const pagingState = emptyPagingState();
+  let repeatedCursor = false;
 
-  // 1. 监听 API 请求拦截
+  // 1. 监听 API 请求拦截 — 以 paging.is_end / next / totals 为完成主依据
   const handleResponse = async (response: any) => {
     const url = response.url();
-    // 拦截 answers API
-    if (itemType === 'answers' && url.includes(`/members/${peopleId}/answers`)) {
-      try {
-        const json = await response.json();
-        if (json && Array.isArray(json.data)) {
-          for (const item of json.data) {
-            if (item.type !== 'answer') continue;
-            const answerId = String(item.id);
-            const itemId = `answer:${answerId}`;
-            
-            const questionId = String(item.question?.id || '');
-            
-            collected.set(itemId, {
-              id: itemId,
-              type: 'answer',
-              title: item.question?.title || '未命名问题',
-              authorId: item.author?.id || peopleId,
-              authorName: item.author?.name || '未知作者',
-              url: `https://www.zhihu.com/question/${questionId}/answer/${answerId}`,
-              createdTime: item.created_time || 0,
-              updatedTime: item.updated_time || 0,
-              voteupCount: item.voteup_count || 0,
-              commentCount: item.comment_count || 0,
-              questionId,
-              questionUrl: `https://www.zhihu.com/question/${questionId}`
-            });
-          }
-        }
-      } catch (e) {
-        // ignore
+    const isAnswers =
+      itemType === 'answers' && url.includes(`/members/${peopleId}/answers`);
+    const isArticles =
+      itemType === 'articles' &&
+      (url.includes(`/members/${peopleId}/articles`) ||
+        url.includes(`/members/${peopleId}/posts`));
+    if (!isAnswers && !isArticles) return;
+    try {
+      const json = await response.json();
+      const merged = mergeListApiPage(itemType, peopleId, json, collected, pagingState);
+      if (merged.repeatedCursor) {
+        repeatedCursor = true;
       }
-    }
-
-    // 拦截 articles API
-    if (itemType === 'articles' && (url.includes(`/members/${peopleId}/articles`) || url.includes(`/members/${peopleId}/posts`))) {
-      try {
-        const json = await response.json();
-        if (json && Array.isArray(json.data)) {
-          for (const item of json.data) {
-            if (item.type !== 'article') continue;
-            const articleId = String(item.id);
-            const itemId = `article:${articleId}`;
-            
-            collected.set(itemId, {
-              id: itemId,
-              type: 'article',
-              title: item.title || '未命名文章',
-              authorId: item.author?.id || peopleId,
-              authorName: item.author?.name || '未知作者',
-              url: `https://zhuanlan.zhihu.com/p/${articleId}`,
-              createdTime: item.created || item.created_time || 0,
-              updatedTime: item.updated || item.updated_time || 0,
-              voteupCount: item.voteup_count || item.likes_count || 0,
-              commentCount: item.comment_count || 0
-            });
-          }
-        }
-      } catch (e) {
-        // ignore
+      if (merged.added > 0 || pagingState.isEnd) {
+        logger.info(
+          `列表 API 页 #${pagingState.pagesSeen}: +${merged.added} 条，累计 ${collected.size}` +
+            (pagingState.totals !== null ? ` / API total ${pagingState.totals}` : '') +
+            (pagingState.isEnd ? '，is_end=true' : '')
+        );
       }
+    } catch {
+      // ignore non-JSON or aborted responses
     }
   };
 
@@ -311,54 +425,106 @@ export async function scrapePeopleIndex(
     logger.info('首屏 js-initialData 未解析到索引，将依赖滚动分页拦截与 DOM 兜底。');
   }
 
-  // 2. 模拟向下滚动滚动，触发 API 列表拉取
-  let isEnd = false;
-  let lastSize = 0;
+  // 2. 滚动触发列表分页。完成依据优先 API paging.is_end / totals；
+  //    DOM「没有更多」与连续无新增仅作异常兜底，不再作为唯一完成信号。
+  let lastSize = collected.size;
   let noNewCount = 0;
-  const maxScrolls = 200; // 防死循环
+  const maxScrolls = 200;
   let scrollCount = 0;
+  let stopReason: string | null = null;
 
-  while (!isEnd && scrollCount < maxScrolls) {
-    // 滚动到底部
+  // 首屏 API 可能已在 goto 时拦截到 is_end / totals
+  {
+    const early = shouldStopIndexScroll({
+      topN,
+      collectedSize: collected.size,
+      paging: pagingState,
+      hasDomNoMore: false,
+      noNewCount: 0,
+      scrollCount: 0,
+      maxScrolls,
+      repeatedCursor
+    });
+    if (early.stop) {
+      stopReason = early.reason;
+      logger.info(`索引在首屏即满足结束条件: ${stopReason}`);
+    }
+  }
+
+  while (!stopReason && scrollCount < maxScrolls) {
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page.waitForTimeout(2000 + Math.random() * 1000); // 随机等待2~3秒
-
+    await page.waitForTimeout(2000 + Math.random() * 1000);
     scrollCount++;
 
-    // 检查是否有“没有更多”提示
     const hasNoMore = await page.evaluate(() => {
       const texts = ['没有更多了', '已加载完毕', '暂无内容', '没有更多内容'];
-      // 搜索页面文本
       const bodyText = document.body.textContent || '';
       return texts.some(t => bodyText.includes(t));
     });
 
-    if (hasNoMore) {
-      logger.info('触发页面“没有更多”占位符，停止滚动。');
-      break;
-    }
-
     const currentSize = collected.size;
-    logger.info(`已拉取到索引条目数: ${currentSize}`);
-
-    if (topN && currentSize >= topN) {
-      logger.info(`已达到设定的 Top N (${topN}) 数量，停止滚动。`);
-      break;
-    }
+    logger.info(
+      `滚动 #${scrollCount}: 已发现 ${currentSize}` +
+        (pagingState.totals !== null ? ` / API ${pagingState.totals}` : '') +
+        (pagingState.isEnd ? ' (is_end)' : '')
+    );
 
     if (currentSize === lastSize) {
       noNewCount++;
-      if (noNewCount >= 8) {
-        logger.info('连续 8 次滚动未拉取到新条目，停止滚动。');
-        break;
-      }
     } else {
       noNewCount = 0;
       lastSize = currentSize;
     }
+
+    const decision = shouldStopIndexScroll({
+      topN,
+      collectedSize: currentSize,
+      paging: pagingState,
+      hasDomNoMore: hasNoMore,
+      noNewCount,
+      scrollCount,
+      maxScrolls,
+      repeatedCursor
+    });
+    if (decision.stop) {
+      stopReason = decision.reason;
+      logger.info(`停止滚动: ${stopReason}`);
+      break;
+    }
+  }
+
+  if (!stopReason && scrollCount >= maxScrolls) {
+    stopReason = `max_scrolls:${maxScrolls}`;
   }
 
   page.off('response', handleResponse);
+
+  // Incomplete pagination: saw API pages, never got is_end, and stopped only on weak signals.
+  const weakStop =
+    stopReason?.startsWith('no_new:') ||
+    stopReason?.startsWith('max_scrolls:') ||
+    stopReason === 'repeated_cursor';
+  if (
+    pagingState.pagesSeen > 0 &&
+    !pagingState.isEnd &&
+    topN === null &&
+    weakStop &&
+    (pagingState.totals === null || collected.size < pagingState.totals)
+  ) {
+    throw new Error(
+      `PAGINATION_INCOMPLETE: 列表分页未明确结束（stop=${stopReason}, discovered=${collected.size}` +
+        (pagingState.totals !== null ? `, apiTotals=${pagingState.totals}` : '') +
+        ', pages=' +
+        pagingState.pagesSeen +
+        '）。请重试索引，勿将截断结果当作成功。'
+    );
+  }
+  if (pagingState.totals !== null && collected.size < pagingState.totals && topN === null) {
+    logger.warn(
+      `索引数量 ${collected.size} 少于 API totals ${pagingState.totals}（stop=${stopReason}）。` +
+        '主页展示数可能含删除/折叠/仅本人可见内容，将以 API 可见集合为准。'
+    );
+  }
 
   // 3. DOM 兜底/补充：把页面上已渲染（含滚动加载）的卡片再解析一遍。
   //    使用 Map 去重，因此即便与首屏 Hydration / API 拦截的结果重叠也不会重复计入。
