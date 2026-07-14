@@ -66,7 +66,10 @@ pub(crate) fn load_compatible_from(path: &Path) -> Result<AppSettings, String> {
         return Ok(default_settings());
     }
     let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    // PowerShell / some editors write UTF-8 with BOM; serde_json rejects it as
+    // "expected value at line 1 column 1".
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw.as_str());
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| error.to_string())?;
     let version = value
         .get("schemaVersion")
         .and_then(serde_json::Value::as_u64)
@@ -248,6 +251,26 @@ mod tests {
             fs::read_to_string(&path).expect("source settings must remain readable"),
             original
         );
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    #[test]
+    fn loads_utf8_bom_prefixed_settings() {
+        let root =
+            std::env::temp_dir().join(format!("immersive-settings-bom-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp directory must be created");
+        let path = root.join("settings.json");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(
+            br#"{"schemaVersion":3,"libraryRoot":"C:\\Users\\reader\\Documents\\Library"}"#,
+        );
+        fs::write(&path, bytes).expect("bom settings must write");
+
+        let loaded = load_compatible_from(&path).expect("bom settings must load");
+
+        assert_eq!(loaded.schema_version, 3);
+        assert_eq!(loaded.library_root, r"C:\Users\reader\Documents\Library");
         fs::remove_dir_all(root).expect("temp directory must be removed");
     }
 
