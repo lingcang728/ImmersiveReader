@@ -1,5 +1,12 @@
 <script lang="ts">
 	import type { TaskEvent, TaskSnapshot } from '$lib/tasks/sync';
+	import {
+		buildTaskQueueSignature,
+		canDismissTaskQueue,
+		readDismissedTaskQueueSignature,
+		shouldShowTaskQueue,
+		writeDismissedTaskQueueSignature
+	} from '$lib/tasks/queueVisibility';
 	import TaskRow from './TaskRow.svelte';
 
 	export let tasks: readonly TaskSnapshot[] = [];
@@ -21,6 +28,8 @@
 		revision: number
 	) => void;
 
+	let dismissedSignature: string | null = readDismissedTaskQueueSignature();
+
 	function formatBytes(bytes: number): string {
 		if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
 		if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -37,11 +46,20 @@
 		}).format(date);
 	}
 
+	function dismissQueue() {
+		if (!canDismissTaskQueue(tasks)) return;
+		const signature = buildTaskQueueSignature(tasks);
+		writeDismissedTaskQueueSignature(signature);
+		dismissedSignature = signature;
+	}
+
 	$: visible = tasks.slice(0, maxVisible);
 	$: hidden = Math.max(0, tasks.length - visible.length);
+	$: showQueue = shouldShowTaskQueue(tasks, dismissedSignature);
+	$: dismissible = canDismissTaskQueue(tasks);
 </script>
 
-{#if tasks.length > 0}
+{#if showQueue}
 	<section class="task-queue" aria-label="统一任务队列" aria-live="polite">
 		<div class="task-queue-shell">
 			<header class="task-queue-header">
@@ -49,7 +67,20 @@
 					<strong>任务队列</strong>
 					<span>{tasks.length} 项 · 可恢复材料 {formatBytes(recoverableBytes)}</span>
 				</div>
-				<span class="task-source">由沉浸阅读统一管理</span>
+				<div class="task-queue-header-actions">
+					<span class="task-source">由沉浸阅读统一管理</span>
+					{#if dismissible}
+						<button
+							type="button"
+							class="task-queue-dismiss"
+							aria-label="关闭任务队列"
+							title="关闭任务队列"
+							on:click={dismissQueue}
+						>
+							×
+						</button>
+					{/if}
+				</div>
 			</header>
 
 			<div class="task-list">
