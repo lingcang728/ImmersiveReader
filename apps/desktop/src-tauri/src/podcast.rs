@@ -665,6 +665,9 @@ mod tests {
                 completed_units: None,
                 total_units: None,
                 label: None,
+                unit: None,
+                source_total_units: None,
+                skipped_units: None,
             },
             error_code: Some(TaskErrorCode::PipelineIncompatible),
             error_message: Some("incompatible".to_string()),
@@ -681,6 +684,8 @@ mod tests {
             cache_lease_bytes: input.len() as u64,
             created_at: now.clone(),
             updated_at: now.clone(),
+            last_heartbeat_at: None,
+            checkpoint_at: None,
         };
         let event = TaskEvent {
             schema_version: 1,

@@ -37,6 +37,9 @@ pub(crate) fn queued_event(
             completed_units: None,
             total_units: None,
             label: Some("等待转写".to_string()),
+            unit: None,
+            source_total_units: None,
+            skipped_units: None,
         },
         error_code: None,
         error_message: None,
@@ -53,6 +56,8 @@ pub(crate) fn queued_event(
         cache_lease_bytes: cache_bytes,
         created_at: now.clone(),
         updated_at: now.clone(),
+        last_heartbeat_at: None,
+        checkpoint_at: None,
     };
     TaskEvent {
         schema_version: 1,

@@ -6,11 +6,21 @@ use crate::tasks::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const TASK_EVENT_NAME: &str = "acquisition://task-event";
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const HEARTBEAT_EMIT_INTERVAL: Duration = Duration::from_secs(5);
+
+static ACTIVE_POLLERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn active_pollers() -> &'static Mutex<HashSet<String>> {
+    ACTIVE_POLLERS.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +112,9 @@ fn initial_snapshot(task_id: &str, request: &CreateZhihuTaskRequest) -> TaskSnap
             completed_units: None,
             total_units: None,
             label: Some("等待开始".to_string()),
+            unit: Some("篇".to_string()),
+            source_total_units: None,
+            skipped_units: None,
         },
         error_code: None,
         error_message: None,
@@ -118,6 +131,8 @@ fn initial_snapshot(task_id: &str, request: &CreateZhihuTaskRequest) -> TaskSnap
         cache_lease_bytes: 0,
         created_at: now.clone(),
         updated_at: now,
+        last_heartbeat_at: None,
+        checkpoint_at: None,
     }
 }
 
@@ -222,7 +237,7 @@ pub fn start_task(
     let snapshot = event.snapshot.clone();
     app.emit(TASK_EVENT_NAME, event)
         .map_err(|error| error.to_string())?;
-    spawn_poller(task_id.to_string(), settings.clone(), app.clone());
+    ensure_poller(task_id.to_string(), settings.clone(), app.clone());
     Ok(snapshot)
 }
 
@@ -367,6 +382,9 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
             completed_units: Some(completed),
             total_units: Some(remote.total_count),
             label,
+            unit: Some("篇".to_string()),
+            source_total_units: None,
+            skipped_units: None,
         },
         error_code: if remote.status == "failed" {
             Some(TaskErrorCode::Unknown)
@@ -398,7 +416,9 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
         source_id: (!author_id.is_empty()).then_some(author_id),
         cache_lease_bytes: 0,
         created_at: now.clone(),
-        updated_at: now,
+        updated_at: now.clone(),
+        last_heartbeat_at: Some(now.clone()),
+        checkpoint_at: Some(now),
     }
 }
 
@@ -409,49 +429,156 @@ impl RemoteTask {
     }
 }
 
-fn spawn_poller(task_id: String, settings: AppSettings, app: AppHandle) {
+fn fetch_remote_task(settings: &AppSettings, task_id: &str) -> Result<RemoteTask, String> {
+    let response: ApiResponse<RemoteTask> =
+        crate::tools::zhihu_get_json(settings, &format!("/api/tasks/{task_id}"))?;
+    if !response.success {
+        return Err(response
+            .error
+            .unwrap_or_else(|| "ZHIHU_TASK_FETCH_FAILED".to_string()));
+    }
+    response
+        .data
+        .ok_or_else(|| "ZHIHU_TASK_MISSING".to_string())
+}
+
+/// Apply sidecar task state into the control DB. Sidecar success overrides a
+/// false local "interrupted/crashed" terminal mirror.
+fn apply_remote_task(
+    remote: RemoteTask,
+    app: Option<&AppHandle>,
+) -> Result<Option<TaskEvent>, String> {
+    let terminal = matches!(
+        remote.status.as_str(),
+        "success" | "partial_success" | "failed"
+    );
+    let next = remote_snapshot(remote);
+    let mut control = ControlDb::open_current()?;
+    let event = control.record_external_snapshot(
+        next,
+        if terminal {
+            "engine_completed"
+        } else {
+            "engine_progress"
+        },
+    )?;
+    if let (Some(app), Some(event)) = (app, event.as_ref()) {
+        let _ = app.emit(TASK_EVENT_NAME, event.clone());
+    }
+    Ok(event)
+}
+
+/// Ensure a durable per-task supervisor is running (deduped by task id).
+/// Runs until the task reaches a real terminal state — no 10-minute cap.
+pub fn ensure_poller(task_id: String, settings: AppSettings, app: AppHandle) {
+    {
+        let Ok(mut guard) = active_pollers().lock() else {
+            return;
+        };
+        if !guard.insert(task_id.clone()) {
+            return;
+        }
+    }
     thread::spawn(move || {
-        for _ in 0..300 {
-            if let Ok(control) = ControlDb::open_current() {
-                if let Ok(Some(snapshot)) = control.task_snapshot(&task_id) {
-                    if snapshot.lifecycle_state == LifecycleState::Terminal {
+        let mut last_heartbeat_emit = Instant::now()
+            .checked_sub(HEARTBEAT_EMIT_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        loop {
+            let local_terminal = ControlDb::open_current()
+                .ok()
+                .and_then(|control| control.task_snapshot(&task_id).ok().flatten())
+                .is_some_and(|snapshot| {
+                    snapshot.lifecycle_state == LifecycleState::Terminal
+                        && !matches!(snapshot.outcome, TaskOutcome::Interrupted)
+                });
+            if local_terminal {
+                break;
+            }
+
+            match fetch_remote_task(&settings, &task_id) {
+                Ok(remote) => {
+                    let remote_terminal = matches!(
+                        remote.status.as_str(),
+                        "success" | "partial_success" | "failed"
+                    );
+                    let progress_changed = apply_remote_task(remote, Some(&app)).ok().flatten();
+                    if progress_changed.is_none()
+                        && !remote_terminal
+                        && last_heartbeat_emit.elapsed() >= HEARTBEAT_EMIT_INTERVAL
+                    {
+                        if let Ok(mut control) = ControlDb::open_current() {
+                            if let Ok(Some(mut snapshot)) = control.task_snapshot(&task_id) {
+                                let now = chrono::Utc::now().to_rfc3339();
+                                snapshot.last_heartbeat_at = Some(now.clone());
+                                if let Ok(Some(event)) =
+                                    control.record_external_snapshot(snapshot, "engine_heartbeat")
+                                {
+                                    let _ = app.emit(TASK_EVENT_NAME, event);
+                                    last_heartbeat_emit = Instant::now();
+                                }
+                            }
+                        }
+                    } else if progress_changed.is_some() {
+                        last_heartbeat_emit = Instant::now();
+                    }
+                    if remote_terminal {
                         break;
                     }
                 }
+                Err(_) => {
+                    // Keep supervising; transient sidecar/network blips should not stop the loop.
+                }
             }
-            let response = crate::tools::zhihu_get_json::<ApiResponse<RemoteTask>>(
-                &settings,
-                &format!("/api/tasks/{task_id}"),
-            );
-            if let Ok(response) = response {
-                if response.success {
-                    if let Some(remote) = response.data {
-                        let terminal = matches!(
-                            remote.status.as_str(),
-                            "success" | "partial_success" | "failed"
-                        );
-                        let next = remote_snapshot(remote);
-                        if let Ok(mut control) = ControlDb::open_current() {
-                            if let Ok(Some(event)) = control.record_external_snapshot(
-                                next,
-                                if terminal {
-                                    "engine_completed"
-                                } else {
-                                    "engine_progress"
-                                },
-                            ) {
-                                let _ = app.emit(TASK_EVENT_NAME, event);
-                            }
-                        }
-                        if terminal {
-                            break;
-                        }
+            thread::sleep(POLL_INTERVAL);
+        }
+        if let Ok(mut guard) = active_pollers().lock() {
+            guard.remove(&task_id);
+        }
+    });
+}
+
+/// Reconcile non-terminal (and falsely interrupted) Zhihu tasks with the sidecar.
+/// Starts durable supervisors for still-active remote tasks.
+pub fn reconcile_active_tasks(
+    settings: &AppSettings,
+    app: Option<&AppHandle>,
+) -> Result<u32, String> {
+    let control = ControlDb::open_current()?;
+    let tasks = control.task_snapshots(Some(TaskKind::Zhihu))?;
+    let mut updated = 0u32;
+    for snapshot in tasks {
+        let needs_reconcile = matches!(
+            snapshot.lifecycle_state,
+            LifecycleState::Starting
+                | LifecycleState::Running
+                | LifecycleState::Pausing
+                | LifecycleState::Paused
+                | LifecycleState::Stopping
+        ) || (snapshot.lifecycle_state == LifecycleState::Terminal
+            && matches!(snapshot.outcome, TaskOutcome::Interrupted));
+        if !needs_reconcile {
+            continue;
+        }
+        match fetch_remote_task(settings, &snapshot.id) {
+            Ok(remote) => {
+                let remote_active = matches!(remote.status.as_str(), "running" | "paused");
+                if apply_remote_task(remote, app)?.is_some() {
+                    updated = updated.saturating_add(1);
+                }
+                if remote_active {
+                    if let Some(app) = app {
+                        ensure_poller(snapshot.id.clone(), settings.clone(), app.clone());
+                    } else {
+                        // Snapshot path without AppHandle still updates DB; poller starts on next start/resume.
                     }
                 }
             }
-            thread::sleep(Duration::from_secs(2));
+            Err(_) => {
+                // Leave local state; avoid marking crashed solely because the sidecar was briefly down.
+            }
         }
-    });
+    }
+    Ok(updated)
 }
 
 #[cfg(test)]
@@ -487,5 +614,25 @@ mod tests {
         assert_eq!(snapshot.progress.percent, Some(100.0));
         assert!(snapshot.can_retry);
         assert_eq!(snapshot.book_id.as_deref(), Some("zhihu:author_1"));
+        assert!(snapshot.last_heartbeat_at.is_some());
+        assert_eq!(snapshot.progress.unit.as_deref(), Some("篇"));
+    }
+
+    #[test]
+    fn maps_running_remote_progress_with_heartbeat() {
+        let snapshot = remote_snapshot(RemoteTask {
+            id: "task_author_2_1".to_string(),
+            author_id: "author_2".to_string(),
+            status: "running".to_string(),
+            total_count: 122,
+            success_count: 90,
+            failed_count: 0,
+        });
+        assert_eq!(snapshot.lifecycle_state, LifecycleState::Running);
+        assert!(snapshot.can_pause);
+        assert!(!snapshot.can_resume);
+        assert_eq!(snapshot.progress.completed_units, Some(90));
+        assert_eq!(snapshot.progress.total_units, Some(122));
+        assert!(snapshot.last_heartbeat_at.is_some());
     }
 }

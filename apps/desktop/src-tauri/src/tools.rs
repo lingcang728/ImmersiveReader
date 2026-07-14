@@ -280,6 +280,20 @@ fn zhihu_client(settings: &AppSettings) -> Result<SidecarHttpClient, String> {
     SidecarHttpClient::new(&format!("http://127.0.0.1:{port}"), &token)
 }
 
+/// Ensure the Zhihu sidecar is launched and responsive (best-effort for snapshot reconcile).
+pub(crate) fn ensure_zhihu_ready(settings: &AppSettings) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _client = zhihu_client(settings)?;
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = settings;
+        Err("ZHIHU_ENGINE_UNSUPPORTED".to_string())
+    }
+}
+
 pub(crate) fn zhihu_get_json<O: DeserializeOwned>(
     settings: &AppSettings,
     path: &str,

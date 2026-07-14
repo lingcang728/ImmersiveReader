@@ -83,6 +83,15 @@ pub struct TaskProgress {
     pub completed_units: Option<u64>,
     pub total_units: Option<u64>,
     pub label: Option<String>,
+    /// Optional unit label for progress (e.g. "篇", "块", "字节").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Source-reported total when it may differ from reachable/API total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_total_units: Option<u64>,
+    /// Units intentionally skipped (e.g. already archived).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_units: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -112,6 +121,12 @@ pub struct TaskSnapshot {
     pub cache_lease_bytes: u64,
     pub created_at: String,
     pub updated_at: String,
+    /// Last live heartbeat from supervisor / worker. Defaults for older DB rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<String>,
+    /// Last durable checkpoint time. Defaults for older DB rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

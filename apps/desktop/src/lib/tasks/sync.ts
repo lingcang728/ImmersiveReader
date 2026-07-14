@@ -28,6 +28,9 @@ export type TaskProgress = {
 	readonly completedUnits?: number;
 	readonly totalUnits?: number;
 	readonly label?: string;
+	readonly unit?: string;
+	readonly sourceTotalUnits?: number;
+	readonly skippedUnits?: number;
 };
 
 export type TaskSnapshot = {
@@ -54,6 +57,8 @@ export type TaskSnapshot = {
 	readonly cacheLeaseBytes: number;
 	readonly createdAt: string;
 	readonly updatedAt: string;
+	readonly lastHeartbeatAt?: string | null;
+	readonly checkpointAt?: string | null;
 };
 
 export type TaskEvent = {

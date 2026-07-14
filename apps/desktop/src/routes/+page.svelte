@@ -1911,8 +1911,8 @@
 		};
 		window.addEventListener("beforeunload", handleBeforeUnload);
 
-		// Closing the window exits cleanly; the tray remains available for users who
-		// want to keep background tasks alive while the window is hidden.
+		// Window X / chrome close: save reading state and hide to tray so acquisition
+		// tasks keep running. Only tray "退出" ends the process (preserve / cleanup).
 		let isClosing = false;
 		const finishExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
 			try {
@@ -1941,7 +1941,11 @@
 		};
 		const requestExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
 			if (isClosing) return;
-			if ((await requestNavigationGuard("退出应用")) === "cancel") return;
+			if (mode !== "hide") {
+				if ((await requestNavigationGuard("退出应用")) === "cancel") return;
+			} else if (editingParagraph || $currentFilePath) {
+				// Soft hide: still flush edits, but do not treat as app exit.
+			}
 			isClosing = true;
 			void finishExit(mode);
 		};
@@ -1952,7 +1956,7 @@
 		const unlistenClose = appWindow.onCloseRequested((event) => {
 			if (isClosing) return;
 			event.preventDefault();
-			void requestExit("preserve");
+			void requestExit("hide");
 		});
 
 		void refreshLibrary();

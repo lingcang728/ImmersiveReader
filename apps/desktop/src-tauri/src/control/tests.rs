@@ -136,6 +136,9 @@ fn task_event_for(
             completed_units: Some(sequence),
             total_units: Some(10),
             label: Some("transcribing".to_string()),
+            unit: None,
+            source_total_units: None,
+            skipped_units: None,
         },
         error_code: None,
         error_message: None,
@@ -152,6 +155,8 @@ fn task_event_for(
         cache_lease_bytes: 42,
         created_at: now.clone(),
         updated_at: now.clone(),
+        last_heartbeat_at: None,
+        checkpoint_at: None,
     };
     TaskEvent {
         schema_version: 1,
@@ -547,6 +552,140 @@ fn task_controls_enforce_revision_and_transition_pause_resume_cancel() {
     assert_eq!(cancelled.snapshot.outcome, TaskOutcome::Cancelled);
     assert!(cancelled.snapshot.recoverable);
     assert!(cancelled.snapshot.can_retry);
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn external_snapshot_ignores_identical_progress_but_records_heartbeat() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-external-heartbeat-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    database
+        .persist_task_event(&task_event(1, 1))
+        .expect("running task must persist");
+    let current = database
+        .task_snapshot("podcast-1")
+        .expect("load")
+        .expect("exists");
+    assert!(database
+        .record_external_snapshot(current.clone(), "engine_progress")
+        .expect("noop progress")
+        .is_none());
+    let mut heartbeat = current;
+    heartbeat.last_heartbeat_at = Some("2026-07-14T01:00:00Z".to_string());
+    let event = database
+        .record_external_snapshot(heartbeat, "engine_heartbeat")
+        .expect("heartbeat")
+        .expect("heartbeat event");
+    assert_eq!(event.event_type, "engine_heartbeat");
+    assert_eq!(
+        event.snapshot.last_heartbeat_at.as_deref(),
+        Some("2026-07-14T01:00:00Z")
+    );
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn zhihu_sidecar_success_overrides_false_interrupted_terminal() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-zhihu-override-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let mut event = task_event_for("zhihu-1", TaskKind::Zhihu, "zhihu:author", 1, 1);
+    event.snapshot.lifecycle_state = LifecycleState::Terminal;
+    event.snapshot.outcome = TaskOutcome::Interrupted;
+    event.snapshot.error_code = Some(TaskErrorCode::EngineCrashed);
+    event.snapshot.engine_stage = "crashed".to_string();
+    event.snapshot.engine_status = "exited".to_string();
+    event.snapshot.can_retry = true;
+    event.snapshot.can_pause = false;
+    event.snapshot.can_cancel = false;
+    database
+        .persist_task_event(&event)
+        .expect("interrupted zhihu must persist");
+
+    let mut success = event.snapshot.clone();
+    success.lifecycle_state = LifecycleState::Terminal;
+    success.outcome = TaskOutcome::Success;
+    success.error_code = None;
+    success.error_message = None;
+    success.engine_stage = "content".to_string();
+    success.engine_status = "success".to_string();
+    success.progress.percent = Some(100.0);
+    success.progress.completed_units = Some(10);
+    success.progress.total_units = Some(10);
+    success.can_retry = false;
+    success.recoverable = false;
+
+    let applied = database
+        .record_external_snapshot(success, "engine_completed")
+        .expect("override")
+        .expect("success event");
+    assert_eq!(applied.snapshot.outcome, TaskOutcome::Success);
+    assert_eq!(applied.snapshot.lifecycle_state, LifecycleState::Terminal);
+    assert!(applied.snapshot.error_code.is_none());
+
+    // True terminal success must not be overwritten again.
+    let mut again = applied.snapshot.clone();
+    again.outcome = TaskOutcome::Failed;
+    assert!(database
+        .record_external_snapshot(again, "engine_completed")
+        .expect("second write")
+        .is_none());
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn orphaned_podcast_tasks_without_contract_are_marked_input_copy_failed() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-orphan-podcast-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let data_root = root.join("data");
+    fs::create_dir_all(&data_root).expect("data root");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let mut queued = task_event(1, 1);
+    queued.snapshot.lifecycle_state = LifecycleState::Queued;
+    queued.snapshot.engine_stage = "queued".to_string();
+    queued.snapshot.engine_status = "waiting".to_string();
+    queued.snapshot.can_pause = false;
+    database
+        .persist_task_event(&queued)
+        .expect("queued podcast must persist");
+    assert_eq!(
+        database
+            .repair_orphaned_podcast_tasks_at(&data_root)
+            .expect("repair"),
+        1
+    );
+    let snapshot = database
+        .task_snapshot("podcast-1")
+        .expect("load")
+        .expect("exists");
+    assert_eq!(snapshot.outcome, TaskOutcome::Failed);
+    assert_eq!(snapshot.error_code, Some(TaskErrorCode::InputCopyFailed));
+    assert!(!snapshot.recoverable);
+    assert_eq!(
+        database
+            .repair_orphaned_podcast_tasks_at(&data_root)
+            .expect("idempotent"),
+        0
+    );
     drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

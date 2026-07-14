@@ -39,6 +39,13 @@ pub struct ControlDb {
     connection: Connection,
 }
 
+/// Repair podcast tasks that were interrupted before a task contract existed.
+pub fn repair_orphaned_podcast_tasks() -> Result<u32, String> {
+    let locations = crate::storage::StorageLocations::current()?;
+    let mut control = ControlDb::open_current()?;
+    control.repair_orphaned_podcast_tasks_at(&locations.data_root)
+}
+
 impl ControlDb {
     pub fn open_current() -> Result<Self, String> {
         let locations = crate::storage::StorageLocations::current()?;
@@ -521,6 +528,66 @@ impl ControlDb {
         Ok(recovered)
     }
 
+    /// Mark podcast tasks that never got a task contract / input copy as explicit
+    /// INPUT_COPY_FAILED (not auto-recoverable). Idempotent for already-failed rows.
+    pub fn repair_orphaned_podcast_tasks_at(
+        &mut self,
+        data_root: &Path,
+    ) -> Result<u32, String> {
+        let snapshots = self.task_snapshots(Some(TaskKind::Podcast))?;
+        let mut repaired = 0u32;
+        for snapshot in snapshots {
+            if snapshot.lifecycle_state == LifecycleState::Terminal {
+                continue;
+            }
+            let contract = data_root
+                .join("Podcast")
+                .join("Tasks")
+                .join(&snapshot.id)
+                .join("task.json");
+            if contract.is_file() {
+                continue;
+            }
+            let mut next = snapshot;
+            let now = chrono::Utc::now().to_rfc3339();
+            next.last_sequence = next
+                .last_sequence
+                .checked_add(1)
+                .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+            next.revision = next
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+            next.lifecycle_state = LifecycleState::Terminal;
+            next.outcome = TaskOutcome::Failed;
+            next.error_code = Some(TaskErrorCode::InputCopyFailed);
+            next.error_message = Some(
+                "任务缺少输入副本与任务合同，无法自动恢复。请重新选择原音频文件。".to_string(),
+            );
+            next.engine_stage = "input_copy_failed".to_string();
+            next.engine_status = "exited".to_string();
+            next.recoverable = false;
+            next.can_pause = false;
+            next.can_resume = false;
+            next.can_retry = false;
+            next.can_cancel = false;
+            next.updated_at = now.clone();
+            next.last_heartbeat_at = Some(now.clone());
+            let event = TaskEvent {
+                schema_version: 1,
+                task_id: next.id.clone(),
+                sequence: next.last_sequence,
+                revision: next.revision,
+                event_type: "input_copy_failed".to_string(),
+                snapshot: next,
+                created_at: now,
+            };
+            self.persist_task_event(&event)?;
+            repaired = repaired.saturating_add(1);
+        }
+        Ok(repaired)
+    }
+
     pub fn cancel_active_tasks(&mut self) -> Result<Vec<String>, String> {
         let snapshots = self.task_snapshots(None)?;
         let mut podcast_task_ids = Vec::new();
@@ -655,10 +722,24 @@ impl ControlDb {
         if current.kind != next.kind {
             return Err("TASK_KIND_CONFLICT".to_string());
         }
-        if current.lifecycle_state == LifecycleState::Terminal {
+        // Sidecar truth may supersede a false local crash/interrupt terminal for Zhihu.
+        let allow_terminal_override = current.lifecycle_state == LifecycleState::Terminal
+            && matches!(current.kind, TaskKind::Zhihu)
+            && matches!(current.outcome, TaskOutcome::Interrupted)
+            && (matches!(
+                next.lifecycle_state,
+                LifecycleState::Running
+                    | LifecycleState::Paused
+                    | LifecycleState::Starting
+                    | LifecycleState::Queued
+            ) || matches!(
+                next.outcome,
+                TaskOutcome::Success | TaskOutcome::PartialSuccess | TaskOutcome::Failed
+            ));
+        if current.lifecycle_state == LifecycleState::Terminal && !allow_terminal_override {
             return Ok(None);
         }
-        if current.lifecycle_state == next.lifecycle_state
+        let same_payload = current.lifecycle_state == next.lifecycle_state
             && current.outcome == next.outcome
             && current.required_action == next.required_action
             && current.progress == next.progress
@@ -669,11 +750,21 @@ impl ControlDb {
             && current.can_pause == next.can_pause
             && current.can_resume == next.can_resume
             && current.can_retry == next.can_retry
-            && current.can_cancel == next.can_cancel
+            && current.can_cancel == next.can_cancel;
+        // Ignore pure heartbeat noise unless the caller explicitly records a heartbeat.
+        if same_payload && event_type != "engine_heartbeat" {
+            return Ok(None);
+        }
+        if same_payload
+            && event_type == "engine_heartbeat"
+            && current.last_heartbeat_at == next.last_heartbeat_at
         {
             return Ok(None);
         }
         let now = chrono::Utc::now().to_rfc3339();
+        if next.last_heartbeat_at.is_none() {
+            next.last_heartbeat_at = Some(now.clone());
+        }
         next.last_sequence = current
             .last_sequence
             .checked_add(1)

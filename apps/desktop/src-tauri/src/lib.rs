@@ -584,8 +584,18 @@ fn get_migration_runs() -> Result<Vec<control::MigrationRunRecord>, String> {
 #[tauri::command]
 fn get_acquisition_snapshot(
     kind: Option<tasks::TaskKind>,
+    app: tauri::AppHandle,
 ) -> Result<tasks::AcquisitionSnapshot, String> {
     tools::recover_stale_engine_instances()?;
+    // Connect/start Zhihu sidecar when needed, then reconcile sidecar truth over
+    // stale desktop mirrors (including false interrupted/crashed terminals).
+    if matches!(kind, None | Some(tasks::TaskKind::Zhihu)) {
+        let settings = settings::load_settings()?;
+        if let Ok(()) = tools::ensure_zhihu_ready(&settings) {
+            let _ = zhihu::reconcile_active_tasks(&settings, Some(&app));
+        }
+    }
+    control::repair_orphaned_podcast_tasks()?;
     let control = control::ControlDb::open_current()?;
     let tasks = control.task_snapshots(kind)?;
     Ok(tasks::AcquisitionSnapshot {
