@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { BookDetail, BookSummary, LibraryIssue, TemporaryItem } from '$lib/library/books';
 	import type { TaskEvent, TaskSnapshot } from '$lib/tasks/sync';
+	import TaskQueue from './TaskQueue.svelte';
 	import './bookshelf.css';
 
 	export let books: BookSummary[] = [];
@@ -88,24 +89,6 @@
 		if (task.lifecycleState === 'pausing') return '正在暂停';
 		if (task.lifecycleState === 'queued') return '等待开始';
 		return task.progress.label ?? '正在处理';
-	}
-
-	function taskProgress(task: TaskSnapshot): number | null {
-		if (task.progress.mode !== 'determinate' || task.progress.percent === undefined) return null;
-		return Math.max(0, Math.min(100, task.progress.percent));
-	}
-
-	function formatBytes(bytes: number): string {
-		if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-		if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-		return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-	}
-
-	function eventTime(value: string): string {
-		const date = new Date(value);
-		return Number.isNaN(date.getTime())
-			? value
-			: date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 	}
 
 	$: recoverableBytes = tasks
@@ -269,89 +252,17 @@
 				{/each}
 			</details>
 		{/if}
-		{#if tasks.length > 0}
-			<section class="task-rail" aria-label="统一任务队列" aria-live="polite">
-				<header>
-					<div>
-						<strong>任务队列</strong>
-						<span>{tasks.length} 项 · 可恢复材料 {formatBytes(recoverableBytes)}</span>
-					</div>
-					<span class="task-source">由沉浸阅读统一管理</span>
-				</header>
-				<div class="task-list">
-					{#each tasks.slice(0, 4) as task (task.id)}
-						{@const percent = taskProgress(task)}
-						<div class="task-row">
-							<span class:zhihu={task.kind === 'zhihu'} class="task-kind">
-								{taskKindLabel(task.kind)}
-							</span>
-							<div class="task-copy">
-								<strong>{taskStateLabel(task)}</strong>
-								<small>{task.engineStage} · {task.engineStatus}</small>
-							</div>
-							{#if percent !== null}
-								<span class="task-progress" aria-label={`进度 ${Math.round(percent)}%`}>
-									<i style={`transform:scaleX(${percent / 100})`}></i>
-								</span>
-								<output>{Math.round(percent)}%</output>
-							{:else}
-								<span class="task-pulse" aria-hidden="true"></span>
-							{/if}
-							{#if task.kind === 'podcast' && task.lifecycleState === 'queued'}
-								<button type="button" class="task-start" on:click={() => onStartTask(task.id)}>
-									开始
-								</button>
-							{/if}
-							{#if task.kind === 'zhihu' && task.lifecycleState === 'queued'}
-								<button type="button" class="task-start" on:click={() => onStartZhihuTask(task.id, task.revision)}>开始</button>
-							{/if}
-							{#if task.kind === 'podcast' && task.canPause}
-								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'pause', task.revision)}>暂停</button>
-							{/if}
-							{#if task.kind === 'zhihu' && task.canPause}
-								<button type="button" class="task-start" on:click={() => onControlZhihuTask(task.id, 'pause', task.revision)}>暂停</button>
-							{/if}
-							{#if task.kind === 'podcast' && task.canResume}
-								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'resume', task.revision)}>恢复</button>
-							{/if}
-							{#if task.kind === 'zhihu' && task.canResume}
-								<button type="button" class="task-start" on:click={() => onControlZhihuTask(task.id, 'resume', task.revision)}>恢复</button>
-							{/if}
-							{#if task.kind === 'podcast' && task.canCancel}
-								<button type="button" class="task-start" on:click={() => onControlTask(task.id, 'cancel', task.revision)}>取消</button>
-							{/if}
-							{#if task.kind === 'zhihu' && task.canCancel}
-								<button type="button" class="task-start" on:click={() => onControlZhihuTask(task.id, 'cancel', task.revision)}>取消</button>
-							{/if}
-							{#if task.kind === 'podcast' && task.lifecycleState === 'terminal' && task.canRetry && task.requiredAction !== 'approve_budget'}
-								<button type="button" class="task-start" on:click={() => onRestartTask(task.id)}>
-									重新转写 revision
-								</button>
-							{/if}
-							{#if task.kind === 'podcast' && task.lifecycleState === 'terminal' && task.outcome === 'success'}
-								<button type="button" class="task-start" on:click={() => onOpenTaskResult(task.id)}>
-									打开结果
-								</button>
-							{/if}
-						</div>
-					{/each}
-				</div>
-				{#if events.length > 0}
-					<details class="task-events">
-						<summary>结构化事件（最近 {events.length} 条）</summary>
-						<div class="task-event-list">
-							{#each events.slice(0, 12) as event (event.taskId + ':' + event.sequence)}
-								<div class="task-event-row">
-									<time>{eventTime(event.createdAt)}</time>
-									<strong>{event.type}</strong>
-									<span>{event.taskId} · {event.snapshot.engineStage}</span>
-								</div>
-							{/each}
-						</div>
-					</details>
-				{/if}
-			</section>
-		{/if}
+		<TaskQueue
+			{tasks}
+			{events}
+			{recoverableBytes}
+			{onStartTask}
+			{onStartZhihuTask}
+			{onOpenTaskResult}
+			{onRestartTask}
+			{onControlTask}
+			{onControlZhihuTask}
+		/>
 
 		{#if loading}
 			<div class="empty-state" aria-live="polite">

@@ -304,14 +304,14 @@
 	word-break: break-all;
 }
 
-.task-rail {
+.task-queue {
 	margin: 0 0 22px;
 	border-top: 1px solid var(--line-strong);
 	border-bottom: 1px solid var(--line);
 	background: color-mix(in srgb, var(--surface-raised) 82%, transparent);
 }
 
-.task-rail > header {
+.task-queue-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -321,13 +321,14 @@
 	color: var(--fg-faint);
 }
 
-.task-rail > header div {
+.task-queue-header div {
 	display: flex;
 	align-items: baseline;
 	gap: 10px;
+	flex-wrap: wrap;
 }
 
-.task-rail > header strong {
+.task-queue-header strong {
 	font-size: 13px;
 	font-weight: 650;
 	color: var(--fg-strong);
@@ -343,12 +344,13 @@
 
 .task-row {
 	display: grid;
-	grid-template-columns: 82px minmax(160px, 1fr) minmax(90px, 150px) 38px;
+	grid-template-columns: 52px minmax(0, 1fr) minmax(96px, 140px) auto;
 	align-items: center;
-	gap: 14px;
-	min-height: 54px;
-	padding: 7px 2px;
+	gap: 12px 14px;
+	min-height: 56px;
+	padding: 10px 2px;
 	border-bottom: 1px solid color-mix(in srgb, var(--line) 74%, transparent);
+	animation: task-row-in 160ms ease-out both;
 }
 
 .task-row:last-child {
@@ -358,11 +360,11 @@
 .task-kind {
 	font-size: 11px;
 	font-weight: 650;
-	color: var(--accent);
+	color: var(--link, var(--accent));
 }
 
 .task-kind.zhihu {
-	color: color-mix(in srgb, var(--accent) 64%, var(--fg) 36%);
+	color: color-mix(in srgb, var(--link, var(--accent)) 72%, var(--fg) 28%);
 }
 
 .task-copy {
@@ -379,11 +381,20 @@
 }
 
 .task-copy small {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 6px;
 	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
 	font-size: 10px;
 	color: var(--fg-faint);
+}
+
+.task-meter {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
 }
 
 .task-progress {
@@ -397,24 +408,114 @@
 	width: 100%;
 	height: 100%;
 	transform-origin: left center;
-	background: var(--accent);
+	background: var(--link, var(--accent));
 	transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.task-row output {
-	justify-self: end;
+.task-meter output {
 	font: 11px ui-monospace, "Cascadia Mono", monospace;
 	color: var(--fg-muted);
+	min-width: 2.5em;
+	text-align: right;
 }
 
 .task-pulse {
-	grid-column: 3 / 5;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
 	justify-self: end;
-	width: 28px;
-	height: 2px;
-	background: var(--accent);
-	transform-origin: right center;
+	background: var(--link, var(--accent));
 	animation: task-breathe 1.4s ease-in-out infinite;
+}
+
+.task-idle {
+	justify-self: end;
+	color: var(--fg-faint);
+	font-size: 11px;
+}
+
+.task-actions {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.task-btn {
+	appearance: none;
+	border: 1px solid color-mix(in srgb, var(--link, var(--accent)) 42%, var(--line));
+	background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+	color: var(--link, var(--accent));
+	font: inherit;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 1;
+	padding: 7px 10px;
+	border-radius: 6px;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.task-btn:hover {
+	background: color-mix(in srgb, var(--link, var(--accent)) 12%, var(--surface-raised));
+}
+
+.task-btn:focus-visible {
+	outline: 2px solid var(--link, var(--accent));
+	outline-offset: 2px;
+}
+
+.task-btn.primary {
+	border-color: color-mix(in srgb, var(--link, var(--accent)) 55%, var(--line));
+	color: var(--link, var(--accent));
+}
+
+.task-btn.danger {
+	border-color: color-mix(in srgb, var(--line-strong) 80%, transparent);
+	color: var(--fg-muted);
+}
+
+.task-btn.danger:hover {
+	color: var(--fg);
+	border-color: var(--fg-muted);
+}
+
+.task-detail {
+	grid-column: 1 / -1;
+	margin: -2px 0 2px;
+	padding: 0 0 2px;
+	font-size: 11px;
+	color: var(--fg-faint);
+}
+
+.task-detail summary {
+	cursor: pointer;
+	color: var(--fg-muted);
+	width: fit-content;
+}
+
+.task-detail p {
+	margin: 6px 0 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 10px;
+}
+
+.task-detail code {
+	font: 11px ui-monospace, "Cascadia Mono", monospace;
+	color: var(--link, var(--accent));
+}
+
+.task-detail-meta {
+	color: var(--fg-faint);
+}
+
+.task-more {
+	margin: 0;
+	padding: 8px 2px 4px;
+	font-size: 11px;
+	color: var(--fg-faint);
 }
 
 .task-events {
@@ -454,6 +555,17 @@
 .task-event-row strong {
 	font-weight: 600;
 	color: var(--fg);
+}
+
+@keyframes task-row-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
 }
 
 .book-detail-backdrop {
@@ -1151,6 +1263,12 @@
 	.task-pulse {
 		animation: none;
 	}
+	.task-row {
+		animation: none;
+	}
+	.task-progress i {
+		transition: none;
+	}
 	.btn-resume,
 	.act-primary,
 	.icon-action,
@@ -1186,12 +1304,14 @@
 		display: none;
 	}
 	.task-row {
-		grid-template-columns: 76px minmax(0, 1fr) 32px;
+		grid-template-columns: 44px minmax(0, 1fr);
+		gap: 8px 10px;
 	}
-	.task-progress {
-		display: none;
+	.task-meter,
+	.task-actions {
+		grid-column: 1 / -1;
 	}
-	.task-pulse {
-		grid-column: 3;
+	.task-actions {
+		justify-content: flex-start;
 	}
 }
