@@ -161,7 +161,9 @@ def main() -> int:
             cache_root / "work" / "state" / "budget.json"
         )
 
-    sys.argv = ["transcribe_podcasts.py", "--force", "--no-open-output"]
+    # Default: resume from completed chunks / translation batches / output checkpoints.
+    # Explicit "restart from scratch" paths pass --force via a dedicated entrypoint.
+    sys.argv = ["transcribe_podcasts.py", "--no-open-output"]
     try:
         return transcribe_podcasts.main()
     except Exception as error:

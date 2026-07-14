@@ -5,9 +5,10 @@ use crate::tasks::TaskEvent;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
@@ -135,6 +136,23 @@ fn read_stream<R: std::io::Read + Send + 'static>(
     });
 }
 
+fn apply_worker_line(
+    task_id: &str,
+    app: &AppHandle,
+    stream: &str,
+    line: &str,
+    last_error: &mut Option<String>,
+) {
+    if stream == "stderr" && !line.trim().is_empty() {
+        *last_error = Some(line.to_string());
+    }
+    if let Ok(mut control) = ControlDb::open_current() {
+        if let Ok(Some(event)) = control.record_worker_line(task_id, stream, line) {
+            emit_task(app, &event);
+        }
+    }
+}
+
 fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: Option<WorkerJob>) {
     let (sender, receiver) = mpsc::channel();
     let mut child = match child_handle.lock() {
@@ -150,19 +168,47 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
     if let Some(stderr) = child.stderr.take() {
         read_stream(stderr, "stderr", sender.clone());
     }
-    let status = child.wait();
+    // Drop the local sender so the channel closes when both stream readers finish.
     drop(sender);
+
+    // Consume stdout/stderr live while the worker runs — never wait for exit first.
     let mut last_error = None;
-    for (stream, line) in receiver {
-        if stream == "stderr" && !line.trim().is_empty() {
-            last_error = Some(line.clone());
+    let mut exit_status: Option<Result<ExitStatus, std::io::Error>> = None;
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(150)) {
+            Ok((stream, line)) => {
+                apply_worker_line(&task_id, &app, &stream, &line, &mut last_error);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if exit_status.is_none() {
+                    match child.try_wait() {
+                        Ok(Some(status)) => exit_status = Some(Ok(status)),
+                        Ok(None) => {}
+                        Err(error) => {
+                            exit_status = Some(Err(error));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if exit_status.is_none() {
+                    exit_status = Some(child.wait());
+                }
+                break;
+            }
         }
-        if let Ok(mut control) = ControlDb::open_current() {
-            if let Ok(Some(event)) = control.record_worker_line(&task_id, &stream, &line) {
-                emit_task(&app, &event);
+        // Once the process has exited, keep draining until readers disconnect.
+        if exit_status.is_some() {
+            while let Ok((stream, line)) = receiver.try_recv() {
+                apply_worker_line(&task_id, &app, &stream, &line, &mut last_error);
             }
         }
     }
+    let status = match exit_status {
+        Some(value) => value,
+        None => child.wait(),
+    };
     let (success, status_message) = match status {
         Ok(value) if value.success() => {
             match StorageLocations::current().and_then(|locations| {

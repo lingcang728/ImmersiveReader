@@ -689,6 +689,10 @@ impl ControlDb {
         snapshot.outcome = TaskOutcome::None;
         snapshot.engine_stage = worker_stage(line);
         snapshot.engine_status = "working".to_string();
+        snapshot.can_pause = true;
+        snapshot.can_cancel = true;
+        snapshot.can_resume = false;
+        snapshot.last_heartbeat_at = Some(now.clone());
         if stream == "stderr" {
             snapshot.error_message = Some(line.trim().chars().take(500).collect());
         }
