@@ -136,6 +136,7 @@ fn initial_snapshot(task_id: &str, request: &CreateZhihuTaskRequest) -> TaskSnap
         can_cancel: true,
         book_id: Some(format!("zhihu:{}", request.people_id)),
         source_id: Some(request.people_id.clone()),
+        display_name: Some(request.people_id.clone()),
         cache_lease_bytes: 0,
         created_at: now.clone(),
         updated_at: now,
@@ -464,7 +465,8 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
         } else {
             Some(format!("zhihu:{}", author_id))
         },
-        source_id: (!author_id.is_empty()).then_some(author_id),
+        source_id: (!author_id.is_empty()).then(|| author_id.clone()),
+        display_name: (!author_id.is_empty()).then_some(author_id),
         cache_lease_bytes: 0,
         created_at: now.clone(),
         updated_at: now.clone(),

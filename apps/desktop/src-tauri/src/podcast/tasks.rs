@@ -46,7 +46,14 @@ fn snapshot_for_file(
             } else {
                 ProgressMode::Indeterminate
             },
-            percent,
+            // input_copy is only the first ~8% of the whole pipeline.
+            percent: percent.map(|value| {
+                if stage == "input_copy" {
+                    (value.clamp(0.0, 100.0) / 100.0) * 8.0
+                } else {
+                    value
+                }
+            }),
             completed_units,
             total_units,
             label: Some(label.to_string()),
@@ -66,6 +73,14 @@ fn snapshot_for_file(
         can_cancel: true,
         book_id: Some(file.book_id.clone()),
         source_id: Some(file.source_id.clone()),
+        display_name: Some(
+            std::path::Path::new(&file.file_name)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&file.file_name)
+                .to_string(),
+        ),
         cache_lease_bytes: cache_bytes,
         created_at: created_at.unwrap_or_else(|| now.clone()),
         updated_at: now.clone(),

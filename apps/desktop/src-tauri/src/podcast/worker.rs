@@ -211,9 +211,18 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
     };
     let (success, status_message) = match status {
         Ok(value) if value.success() => {
-            match StorageLocations::current().and_then(|locations| {
+            // Must honor settings.libraryRoot — bare StorageLocations::current() points at the
+            // default Documents library and leaves books invisible to open_task_result.
+            match StorageLocations::current_with_library_settings().and_then(|locations| {
                 let mut control = ControlDb::open_current()?;
-                super::publish_task_result_at(&mut control, &locations, &task_id).map(|_| ())
+                let transaction =
+                    super::publish_task_result_at(&mut control, &locations, &task_id)?;
+                // Refuse "success" unless the shelf book is actually findable.
+                crate::library::open_book(&locations.library_root, &transaction.book_id)
+                    .map_err(|error| {
+                        format!("PUBLISH_FAILED: published book is not readable ({error})")
+                    })?;
+                Ok(())
             }) {
                 Ok(()) => (true, last_error),
                 Err(error) => (

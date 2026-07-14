@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { TaskSnapshot } from '$lib/tasks/sync';
+	import { displayTaskPercent, taskDisplayTitle } from '$lib/tasks/queueList';
 
 	export let task: TaskSnapshot;
 	export let onStartTask: (taskId: string) => void;
@@ -17,9 +18,10 @@
 		revision: number
 	) => void;
 
-	$: title = userTitle(task);
+	$: name = taskDisplayTitle(task);
+	$: status = userStatus(task);
 	$: subtitle = userSubtitle(task);
-	$: percent = displayPercent(task);
+	$: percent = displayTaskPercent(task);
 	$: flowing = isActive(task) && (percent === null || percent < 100);
 	$: primary = primaryAction(task);
 	$: secondary = secondaryAction(task);
@@ -39,7 +41,7 @@
 		);
 	}
 
-	function userTitle(task: TaskSnapshot): string {
+	function userStatus(task: TaskSnapshot): string {
 		if (task.requiredAction === 'login') return '需要登录';
 		if (task.requiredAction === 'captcha') return '需要验证';
 		if (task.requiredAction === 'configure_secret') return '需要配置密钥';
@@ -59,7 +61,6 @@
 			return '等待开始';
 		}
 		if (task.lifecycleState === 'starting') return '正在启动';
-		// Active: stage-only Chinese title — never raw worker logs.
 		return stageTitle(task.engineStage);
 	}
 
@@ -68,6 +69,7 @@
 		const map: Record<string, string> = {
 			queued: '排队中',
 			input_copy: '准备音频',
+			launching: '启动中',
 			load_model: '加载模型',
 			normalizing: '处理音频',
 			chunking: '切分音频',
@@ -90,9 +92,7 @@
 	function userSubtitle(task: TaskSnapshot): string {
 		if (task.lifecycleState === 'terminal') {
 			if (task.outcome === 'success') {
-				return task.kind === 'podcast'
-					? '已保存到 桌面/互动书架/播客'
-					: '归档完成';
+				return task.kind === 'podcast' ? '已保存到 桌面/互动书架/播客' : '归档完成';
 			}
 			if (task.outcome === 'partial_success') return '部分条目已完成';
 			if (task.outcome === 'cancelled') return '已取消';
@@ -105,22 +105,7 @@
 			}
 			return `已归档 ${task.progress.completedUnits}/${task.progress.totalUnits} 篇`;
 		}
-		// Running podcast: keep subtitle minimal — percent lives on the meter.
-		return '';
-	}
-
-	function displayPercent(task: TaskSnapshot): number | null {
-		if (task.lifecycleState === 'terminal' && task.outcome === 'success') return 100;
-		if (task.lifecycleState === 'terminal' && task.outcome === 'failed') {
-			const p = task.progress.percent;
-			return p !== undefined ? Math.max(0, Math.min(100, p)) : null;
-		}
-		if (task.progress.mode === 'determinate' && task.progress.percent !== undefined) {
-			return Math.max(0, Math.min(100, task.progress.percent));
-		}
-		// Active without a number: null → flowing indeterminate bar.
-		if (isActive(task)) return null;
-		return null;
+		return status;
 	}
 
 	function friendlyErrorText(task: TaskSnapshot): string {
@@ -233,38 +218,35 @@
 	class:error={task.lifecycleState === 'terminal' &&
 		(task.outcome === 'failed' || task.outcome === 'interrupted')}
 	class:success={task.lifecycleState === 'terminal' && task.outcome === 'success'}
-	aria-label={`${taskKindLabel(task.kind)} ${title}`}
+	aria-label={`${taskKindLabel(task.kind)} ${name} ${status}`}
 >
 	<span class="task-kind" class:zhihu={task.kind === 'zhihu'}>{taskKindLabel(task.kind)}</span>
 
 	<div class="task-copy">
-		<strong class="task-title">{title}</strong>
-		{#if subtitle}
-			<small class="task-sub">{subtitle}</small>
+		<strong class="task-title" title={name}>{name}</strong>
+		<small class="task-sub">{subtitle}</small>
+	</div>
+
+	<div
+		class="task-progress"
+		class:flowing
+		class:determinate={percent !== null}
+		aria-label={percent !== null ? `进度 ${Math.round(percent)}%` : '进行中'}
+	>
+		{#if percent !== null}
+			<i class="task-fill" style={`transform:scaleX(${percent / 100})`}></i>
+		{:else}
+			<i class="task-flow" aria-hidden="true"></i>
 		{/if}
 	</div>
 
-	<div class="task-meter">
-		<span
-			class="task-progress"
-			class:flowing
-			class:determinate={percent !== null}
-			aria-label={percent !== null ? `进度 ${Math.round(percent)}%` : '进行中'}
-		>
-			{#if percent !== null}
-				<i class="task-fill" style={`transform:scaleX(${percent / 100})`}></i>
-			{:else}
-				<i class="task-flow" aria-hidden="true"></i>
-			{/if}
-		</span>
-		{#if percent !== null}
-			<output>{Math.round(percent)}%</output>
-		{:else if isActive(task)}
-			<output class="task-ellipsis">…</output>
-		{:else}
-			<output class="task-idle">—</output>
-		{/if}
-	</div>
+	{#if percent !== null}
+		<output class="task-pct">{Math.round(percent)}%</output>
+	{:else if isActive(task)}
+		<output class="task-pct task-ellipsis">…</output>
+	{:else}
+		<output class="task-pct task-idle">—</output>
+	{/if}
 
 	<div class="task-actions">
 		{#if primary}

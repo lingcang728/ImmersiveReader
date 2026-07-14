@@ -425,6 +425,29 @@ impl ControlDb {
         .collect()
     }
 
+    /// Drop terminal task history older than `max_age_days` (events cascade-delete).
+    pub fn prune_terminal_tasks_older_than(&mut self, max_age_days: i64) -> Result<u32, String> {
+        if max_age_days <= 0 {
+            return Ok(0);
+        }
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(max_age_days)).to_rfc3339();
+        let snapshots = self.task_snapshots(None)?;
+        let mut removed = 0_u32;
+        for snapshot in snapshots {
+            if snapshot.lifecycle_state != LifecycleState::Terminal {
+                continue;
+            }
+            if snapshot.updated_at.as_str() >= cutoff.as_str() {
+                continue;
+            }
+            self.connection
+                .execute("DELETE FROM task_snapshots WHERE id = ?1", [&snapshot.id])
+                .map_err(|error| error.to_string())?;
+            removed = removed.saturating_add(1);
+        }
+        Ok(removed)
+    }
+
     pub fn task_snapshots_for_book(&self, book_id: &str) -> Result<Vec<TaskSnapshot>, String> {
         if book_id.trim().is_empty() {
             return Ok(Vec::new());
@@ -630,6 +653,10 @@ impl ControlDb {
         snapshot.lifecycle_state = LifecycleState::Starting;
         snapshot.engine_stage = "launching".to_string();
         snapshot.engine_status = "starting".to_string();
+        // Reset after input_copy's 0–100% so pipeline stages don't inherit a fake 100%.
+        snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
+        snapshot.progress.percent = Some(map_pipeline_percent("launching", Some(0.0)));
+        snapshot.progress.label = Some(stable_worker_label("launching"));
         snapshot.updated_at = now.clone();
         let event = TaskEvent {
             schema_version: 1,
@@ -749,13 +776,18 @@ impl ControlDb {
                 }
             }
         }
-        if let Some(percent) = next_percent {
+        // Map raw worker % into stage bands so "切分音频" never shows a leftover 100%
+        // from the input-copy phase.
+        let mapped = map_pipeline_percent(&next_stage, next_percent);
+        if next_percent.is_some() || stage_changed {
             snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
-            // Never decrease percent within a run (avoids bar thrashing on stage resets).
-            let floor = snapshot.progress.percent.unwrap_or(0.0);
-            snapshot.progress.percent = Some(percent.max(floor).clamp(0.0, 100.0));
+            let floor = if stage_changed {
+                map_pipeline_percent(&next_stage, Some(0.0))
+            } else {
+                snapshot.progress.percent.unwrap_or(0.0)
+            };
+            snapshot.progress.percent = Some(mapped.max(floor).clamp(0.0, 100.0));
         } else if snapshot.progress.percent.is_none() {
-            // Indeterminate running: still show a soft determinate floor for flowing bar UX.
             snapshot.progress.mode = crate::tasks::ProgressMode::Indeterminate;
         }
         snapshot.updated_at = now.clone();
@@ -1051,24 +1083,33 @@ fn worker_percent(line: &str) -> Option<f64> {
             }
         }
     }
-    let bytes = line.as_bytes();
-    for start in 0..bytes.len() {
-        if bytes[start] != b'%' {
-            continue;
-        }
-        let mut end = start;
-        while end > 0 && (bytes[end - 1].is_ascii_digit() || bytes[end - 1] == b'.') {
-            end -= 1;
-        }
-        if end == start {
-            continue;
-        }
-        let value = line[end..start].parse::<f64>().ok()?;
-        if value.is_finite() && value <= 100.0 {
-            return Some(value.max(0.0));
-        }
-    }
+    // Prefer structured JSON; plain log `%` tokens (tqdm bars, etc.) are unreliable.
     None
+}
+
+/// Map a stage-local raw percent (0–100) into overall pipeline progress.
+fn map_pipeline_percent(stage: &str, raw: Option<f64>) -> f64 {
+    let (lo, hi) = match stage {
+        "input_copy" | "prepare" => (0.0, 8.0),
+        "launching" | "starting" => (8.0, 10.0),
+        "load_model" => (10.0, 15.0),
+        "normalizing" => (15.0, 22.0),
+        "chunking" => (22.0, 30.0),
+        "transcribing" | "transcribe" => (30.0, 72.0),
+        "translating" | "translate" => (72.0, 88.0),
+        "polishing" | "postprocess" => (88.0, 95.0),
+        "writing_output" => (95.0, 98.0),
+        "publish" => (98.0, 99.5),
+        "completed" => (100.0, 100.0),
+        _ => (12.0, 90.0),
+    };
+    match raw {
+        Some(value) => {
+            let t = value.clamp(0.0, 100.0) / 100.0;
+            lo + t * (hi - lo)
+        }
+        None => lo,
+    }
 }
 
 fn worker_stage(line: &str) -> String {

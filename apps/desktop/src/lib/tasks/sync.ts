@@ -54,6 +54,8 @@ export type TaskSnapshot = {
 	readonly canCancel: boolean;
 	readonly bookId?: string;
 	readonly sourceId?: string;
+	/** Podcast file title / Zhihu author — distinguishes rows of the same kind. */
+	readonly displayName?: string | null;
 	readonly cacheLeaseBytes: number;
 	readonly createdAt: string;
 	readonly updatedAt: string;

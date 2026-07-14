@@ -7,12 +7,12 @@
 		shouldShowTaskQueue,
 		writeDismissedTaskQueueSignature
 	} from '$lib/tasks/queueVisibility';
+	import { partitionTaskQueue } from '$lib/tasks/queueList';
 	import TaskRow from './TaskRow.svelte';
 
 	export let tasks: readonly TaskSnapshot[] = [];
 	export let events: readonly TaskEvent[] = [];
 	export let recoverableBytes = 0;
-	export let maxVisible = 8;
 	export let onStartTask: (taskId: string) => void;
 	export let onStartZhihuTask: (taskId: string, revision: number) => void;
 	export let onOpenTaskResult: (taskId: string) => void;
@@ -29,6 +29,7 @@
 	) => void;
 
 	let dismissedSignature: string | null = readDismissedTaskQueueSignature();
+	let historyExpanded = false;
 
 	function formatBytes(bytes: number): string {
 		if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -51,12 +52,17 @@
 		const signature = buildTaskQueueSignature(tasks);
 		writeDismissedTaskQueueSignature(signature);
 		dismissedSignature = signature;
+		historyExpanded = false;
 	}
 
-	$: visible = tasks.slice(0, maxVisible);
-	$: hidden = Math.max(0, tasks.length - visible.length);
-	$: showQueue = shouldShowTaskQueue(tasks, dismissedSignature);
+	$: partitioned = partitionTaskQueue(tasks, historyExpanded);
+	$: visibleTasks = partitioned.primary;
+	$: historyCount = partitioned.historyCount;
+	$: showQueue =
+		shouldShowTaskQueue(tasks, dismissedSignature) &&
+		(visibleTasks.length > 0 || historyCount > 0 || historyExpanded);
 	$: dismissible = canDismissTaskQueue(tasks);
+	$: headerCount = historyExpanded ? tasks.length : visibleTasks.length;
 </script>
 
 {#if showQueue}
@@ -65,9 +71,21 @@
 			<header class="task-queue-header">
 				<div>
 					<strong>任务队列</strong>
-					<span>{tasks.length} 项 · 可恢复材料 {formatBytes(recoverableBytes)}</span>
+					<span
+						>{headerCount} 项{#if historyCount > 0 && !historyExpanded}
+							· 另有 {historyCount} 项历史{/if} · 可恢复材料 {formatBytes(recoverableBytes)}</span
+					>
 				</div>
 				<div class="task-queue-header-actions">
+					{#if historyCount > 0 || historyExpanded}
+						<button
+							type="button"
+							class="task-queue-expand"
+							on:click={() => (historyExpanded = !historyExpanded)}
+						>
+							{historyExpanded ? '收起历史' : `展开历史（${historyCount}）`}
+						</button>
+					{/if}
 					<span class="task-source">由沉浸阅读统一管理</span>
 					{#if dismissible}
 						<button
@@ -84,7 +102,7 @@
 			</header>
 
 			<div class="task-list">
-				{#each visible as task (task.id)}
+				{#each visibleTasks as task (task.id)}
 					<TaskRow
 						{task}
 						{onStartTask}
@@ -97,8 +115,8 @@
 				{/each}
 			</div>
 
-			{#if hidden > 0}
-				<p class="task-more">还有 {hidden} 项任务未展开显示</p>
+			{#if visibleTasks.length === 0 && historyCount > 0 && !historyExpanded}
+				<p class="task-more">当前没有进行中的任务。可展开历史查看已完成项。</p>
 			{/if}
 
 			{#if events.length > 0}

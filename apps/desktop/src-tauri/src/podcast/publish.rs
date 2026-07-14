@@ -338,12 +338,16 @@ pub fn publish_task_result_at(
     let final_relative_path = podcast_library_relative_path(&input_name);
     let rollback_relative_path = format!(".revisions/{source_id}/{revision}");
     let existing = load_transaction(&locations.library_root, task_id).ok();
-    if existing
+    if let Some(committed) = existing
         .as_ref()
-        .is_some_and(|item| item.phase == PublishPhase::Committed)
+        .filter(|item| item.phase == PublishPhase::Committed)
     {
-        release_podcast_cache_lease(locations, task_id, snapshot.cache_lease_bytes)?;
-        return Ok(existing.expect("committed transaction must exist"));
+        // Only short-circuit when the shelf book is still present. A committed
+        // journal after the folder was deleted must re-publish from worker output.
+        if crate::library::open_book(&locations.library_root, &committed.book_id).is_ok() {
+            release_podcast_cache_lease(locations, task_id, snapshot.cache_lease_bytes)?;
+            return Ok(committed.clone());
+        }
     }
     // Clear incomplete journals so a re-publish (Retry) always starts from a clean Prepared state.
     // Leaving RolledBack/Prepared journals makes commit_transaction no-op and looks like a hang/crash.
@@ -432,8 +436,19 @@ pub fn publish_task_result_at(
     )?;
     // Durable markdown-only copy on the user's Desktop shelf (survives cache cleanup).
     // Skip QA / test channels so unit tests do not touch the real Desktop.
+    // Sources must be taken from the committed final path — incoming/ was renamed away.
     if locations.channel == "production" {
-        if let Err(error) = export_markdown_to_desktop_shelf(&input_name, &markdown_sources) {
+        let final_root = locations
+            .library_root
+            .join(committed.final_relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let shelf_sources: Vec<(String, PathBuf)> = markdown_sources
+            .iter()
+            .filter_map(|(name, _)| {
+                let candidate = final_root.join(name);
+                candidate.is_file().then(|| (name.clone(), candidate))
+            })
+            .collect();
+        if let Err(error) = export_markdown_to_desktop_shelf(&input_name, &shelf_sources) {
             eprintln!("Desktop podcast export warning: {error}");
         }
     }
@@ -532,6 +547,7 @@ mod tests {
             can_cancel: true,
             book_id: Some(format!("podcast:{source_id}")),
             source_id: Some(source_id),
+            display_name: None,
             cache_lease_bytes: 12,
             created_at: now.clone(),
             updated_at: now.clone(),
@@ -642,6 +658,7 @@ mod tests {
             can_cancel: true,
             book_id: Some(format!("podcast:{source_id}")),
             source_id: Some(source_id.clone()),
+            display_name: Some("source".to_string()),
             cache_lease_bytes: 12,
             created_at: now.clone(),
             updated_at: now.clone(),

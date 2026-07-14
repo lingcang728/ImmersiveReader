@@ -1140,9 +1140,15 @@
 	async function openPodcastTaskResult(taskId: string) {
 		try {
 			const detail = await invoke<BookDetail>("open_task_result", { taskId });
+			await refreshLibrary();
 			await openLibraryBook(detail.manifest.bookId);
 		} catch (error) {
-			showAppNotice(`无法打开播客结果：${String(error)}`);
+			const message = String(error);
+			showAppNotice(
+				message.includes("Book not found") || message.includes("书架中找不到")
+					? `无法打开播客：书架中还没有这本书。若转写刚完成，请点「重试」或重新打开。详情：${message}`
+					: `无法打开播客结果：${message}`
+			);
 		}
 	}
 

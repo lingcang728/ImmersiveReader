@@ -596,8 +596,14 @@ fn get_acquisition_snapshot(
         }
     }
     control::repair_orphaned_podcast_tasks()?;
-    let control = control::ControlDb::open_current()?;
-    let tasks = control.task_snapshots(kind)?;
+    let mut control = control::ControlDb::open_current()?;
+    // Keep the queue lean: drop terminal history older than a week.
+    let _ = control.prune_terminal_tasks_older_than(7);
+    let mut tasks = control.task_snapshots(kind)?;
+    // Backfill titles for older snapshots that predate displayName.
+    if let Ok(locations) = storage::StorageLocations::current_with_library_settings() {
+        enrich_task_display_names(&locations, &mut tasks);
+    }
     Ok(tasks::AcquisitionSnapshot {
         recoverable_cache_bytes: tasks
             .iter()
@@ -607,6 +613,45 @@ fn get_acquisition_snapshot(
         tasks,
         generated_at: chrono::Utc::now().to_rfc3339(),
     })
+}
+
+fn enrich_task_display_names(
+    locations: &storage::StorageLocations,
+    tasks: &mut [tasks::TaskSnapshot],
+) {
+    for task in tasks.iter_mut() {
+        if task
+            .display_name
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            continue;
+        }
+        if !matches!(task.kind, tasks::TaskKind::Podcast) {
+            continue;
+        }
+        let spec_path = locations
+            .data_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(&task.id)
+            .join("task.json");
+        let Ok(raw) = std::fs::read_to_string(&spec_path) else {
+            continue;
+        };
+        let Ok(spec) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let stem = spec
+            .pointer("/input/relativePath")
+            .and_then(|value| value.as_str())
+            .and_then(|path| std::path::Path::new(path).file_stem())
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty());
+        if let Some(stem) = stem {
+            task.display_name = Some(stem.to_string());
+        }
+    }
 }
 
 #[tauri::command]
@@ -926,8 +971,31 @@ fn open_task_result(task_id: String) -> Result<library::BookDetail, String> {
     }
     let book_id = snapshot
         .book_id
+        .clone()
         .ok_or_else(|| "TASK_RESULT_BOOK_MISSING".to_string())?;
-    open_book_detail(&book_id)
+    match open_book_detail(&book_id) {
+        Ok(detail) => Ok(detail),
+        Err(error) if error.starts_with("Book not found:") => {
+            // Recover: worker may have published to the wrong library root historically,
+            // or the shelf folder was removed. Re-publish from managed task output.
+            let locations = storage::StorageLocations::current_with_library_settings()?;
+            let mut control = control::ControlDb::open_current()?;
+            let transaction =
+                podcast::publish_task_result_at(&mut control, &locations, &task_id).map_err(
+                    |publish_error| {
+                        format!(
+                            "书架中找不到已完成播客。已尝试从任务输出重新发布但失败：{publish_error}"
+                        )
+                    },
+                )?;
+            if !matches!(transaction.phase, publish::PublishPhase::Committed) {
+                return Err(format!("重新发布未完成（{:?}）", transaction.phase));
+            }
+            open_book_detail(&transaction.book_id)
+                .map_err(|open_error| format!("重新发布后仍无法打开播客：{open_error}"))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]

@@ -152,6 +152,7 @@ fn task_event_for(
         can_cancel: true,
         book_id: Some(book_id.to_string()),
         source_id: Some("sha256".to_string()),
+        display_name: None,
         cache_lease_bytes: 42,
         created_at: now.clone(),
         updated_at: now.clone(),
@@ -457,23 +458,29 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
         .persist_task_event(&task_event(1, 1))
         .expect("running task must persist");
     let stdout = database
-        .record_worker_line("podcast-1", "stdout", "[ 42.50%] transcribing chunk")
+        .record_worker_line(
+            "podcast-1",
+            "stdout",
+            r#"{"type":"progress","stage":"chunking","percent":50.0,"message":"切分中"}"#,
+        )
         .expect("stdout must map")
         .expect("stdout event must exist");
-    assert_eq!(stdout.event_type, "worker_stdout");
-    assert_eq!(stdout.snapshot.progress.percent, Some(42.5));
+    assert_eq!(stdout.event_type, "worker_progress");
+    // chunking band is 22–30 → raw 50% maps to 26.
+    assert_eq!(stdout.snapshot.progress.percent, Some(26.0));
     assert_eq!(stdout.snapshot.engine_stage, "chunking");
     assert_eq!(stdout.snapshot.progress.label.as_deref(), Some("正在切分音频"));
     let ndjson = database
         .record_worker_line(
             "podcast-1",
             "stdout",
-            r#"{"type":"progress","stage":"transcribe","percent":55.5,"completedUnits":11,"totalUnits":20,"unit":"块","message":"转写第 11 块"}"#,
+            r#"{"type":"progress","stage":"transcribe","percent":50.0,"completedUnits":11,"totalUnits":20,"unit":"块","message":"转写第 11 块"}"#,
         )
         .expect("ndjson must map")
         .expect("ndjson event must exist");
     assert_eq!(ndjson.event_type, "worker_progress");
-    assert_eq!(ndjson.snapshot.progress.percent, Some(55.5));
+    // transcribing band is 30–72 → raw 50% maps to 51; floor keeps progress monotonic.
+    assert_eq!(ndjson.snapshot.progress.percent, Some(51.0));
     assert_eq!(ndjson.snapshot.engine_stage, "transcribing");
     assert_eq!(ndjson.snapshot.progress.completed_units, Some(11));
     assert_eq!(ndjson.snapshot.progress.total_units, Some(20));

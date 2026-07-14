@@ -94,6 +94,15 @@ impl StorageLocations {
             &runtime_root,
         ))
     }
+
+    /// Default storage roots plus the user-configured Library path from settings.
+    /// Podcast publish / open must use this — never the bare default Documents path alone.
+    pub fn current_with_library_settings() -> Result<Self, String> {
+        let mut locations = Self::current()?;
+        let settings = crate::settings::load_settings()?;
+        locations.library_root = PathBuf::from(settings.library_root);
+        Ok(locations)
+    }
 }
 
 #[cfg(test)]

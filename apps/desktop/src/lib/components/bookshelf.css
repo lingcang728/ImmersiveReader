@@ -352,29 +352,47 @@
 	letter-spacing: 0.04em;
 }
 
-.task-queue-dismiss {
+.task-queue-dismiss,
+.task-queue-expand {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 28px;
-	height: 28px;
 	margin: 0;
 	padding: 0;
 	border: 1px solid transparent;
 	border-radius: 8px;
 	background: transparent;
 	color: var(--fg-faint);
-	font-size: 18px;
-	line-height: 1;
 	cursor: pointer;
 }
 
+.task-queue-dismiss {
+	width: 28px;
+	height: 28px;
+	font-size: 18px;
+	line-height: 1;
+}
+
+.task-queue-expand {
+	padding: 4px 8px;
+	font-size: 11px;
+	color: var(--link, var(--accent));
+	white-space: nowrap;
+}
+
 .task-queue-dismiss:hover,
-.task-queue-dismiss:focus-visible {
+.task-queue-dismiss:focus-visible,
+.task-queue-expand:hover,
+.task-queue-expand:focus-visible {
 	color: var(--fg-strong);
 	border-color: color-mix(in srgb, var(--line) 90%, transparent);
 	background: color-mix(in srgb, var(--surface-raised) 70%, transparent);
 	outline: none;
+}
+
+.task-queue-expand:hover,
+.task-queue-expand:focus-visible {
+	color: var(--link, var(--accent));
 }
 
 .task-list {
@@ -383,10 +401,11 @@
 }
 
 .task-row {
+	/* kind | title | long progress (middle) | percent | actions */
 	display: grid;
-	grid-template-columns: 48px minmax(0, 1fr) minmax(108px, 150px) auto;
+	grid-template-columns: 44px minmax(120px, 24%) minmax(0, 1fr) 3.25em auto;
 	align-items: center;
-	gap: 10px 12px;
+	gap: 10px 14px;
 	min-height: 58px;
 	padding: 12px 14px;
 	border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
@@ -444,20 +463,22 @@
 	min-height: 1.3em;
 }
 
-.task-meter {
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) 2.75em;
-	align-items: center;
-	gap: 8px;
-	min-width: 0;
-}
-
 .task-progress {
 	position: relative;
-	height: 4px;
+	height: 5px;
+	min-width: 0;
+	width: 100%;
 	overflow: hidden;
 	border-radius: 999px;
 	background: color-mix(in srgb, var(--line) 90%, transparent);
+}
+
+.task-pct {
+	font: 11px ui-monospace, "Cascadia Mono", monospace;
+	color: var(--fg-muted);
+	min-width: 3.25em;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
 }
 
 .task-fill {
@@ -509,14 +530,6 @@
 		);
 	background-size: 200% 100%, 100% 100%;
 	animation: task-sheen 2.2s linear infinite;
-}
-
-.task-meter output {
-	font: 11px ui-monospace, "Cascadia Mono", monospace;
-	color: var(--fg-muted);
-	min-width: 2.75em;
-	text-align: right;
-	font-variant-numeric: tabular-nums;
 }
 
 .task-ellipsis,
