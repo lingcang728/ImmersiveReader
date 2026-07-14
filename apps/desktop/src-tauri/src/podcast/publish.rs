@@ -355,6 +355,15 @@ pub fn publish_task_result_at(
         release_podcast_cache_lease(locations, task_id, snapshot.cache_lease_bytes)?;
         return Ok(existing.expect("committed transaction must exist"));
     }
+    // Clear incomplete journals so a re-publish (Retry) always starts from a clean Prepared state.
+    // Leaving RolledBack/Prepared journals makes commit_transaction no-op and looks like a hang/crash.
+    if existing.is_some() {
+        let journal = locations
+            .library_root
+            .join(".transactions")
+            .join(format!("{task_id}.json"));
+        let _ = fs::remove_file(journal);
+    }
     if incoming.exists() {
         fs::remove_dir_all(&incoming).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
     }
@@ -416,6 +425,14 @@ pub fn publish_task_result_at(
         &format!(".transactions/{}.json", task_id),
     )?;
     let committed = commit_transaction(&locations.library_root, &transaction)?;
+    if !matches!(committed.phase, PublishPhase::Committed) {
+        // commit_transaction returns Ok(RolledBack) when validation fails mid-flight.
+        // Surface that as a hard error so Retry does not mark the task successful.
+        return Err(format!(
+            "PUBLISH_FAILED: transaction ended in {:?}",
+            committed.phase
+        ));
+    }
     control.record_publish_transaction(
         &committed.transaction_id,
         task_id,

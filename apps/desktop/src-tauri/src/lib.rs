@@ -878,21 +878,40 @@ fn control_zhihu_task(
 }
 
 #[tauri::command]
-fn restart_podcast_task(
+async fn restart_podcast_task(
     task_id: String,
     app: tauri::AppHandle,
 ) -> Result<tasks::TaskSnapshot, String> {
-    let mut locations = storage::StorageLocations::current()?;
-    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
-    let mut control = control::ControlDb::open_current()?;
-    let snapshot = podcast::restart_incompatible_task_at(&mut control, &locations, &task_id)?;
-    let event = control
-        .task_events(&snapshot.id, 0, 1)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "TASK_EVENT_MISSING".to_string())?;
-    app.emit(podcast::TASK_EVENT_NAME, event)
-        .map_err(|error| error.to_string())?;
+    // Heavy copy / publish must not block the UI thread (was causing hard freezes / perceived crashes).
+    let app_for_work = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut locations = storage::StorageLocations::current()?;
+        locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+        let mut control = control::ControlDb::open_current()?;
+        podcast::retry_task_at(&mut control, &locations, &task_id)
+    })
+    .await
+    .map_err(|error| format!("RETRY_JOIN_FAILED: {error}"))??;
+
+    let (snapshot, kind) = result;
+    // Emit the latest event for the returned snapshot (republish or new queued task).
+    if let Ok(control) = control::ControlDb::open_current() {
+        let after = snapshot.last_sequence.saturating_sub(1);
+        if let Ok(events) = control.task_events(&snapshot.id, after, 1) {
+            if let Some(event) = events.into_iter().next() {
+                let _ = app_for_work.emit(podcast::TASK_EVENT_NAME, event);
+            }
+        }
+    }
+    // Full restart creates a queued task — auto-start transcription immediately.
+    if matches!(kind, podcast::RetryKind::Restarted) {
+        if let Err(error) = podcast::start_task(snapshot.id.clone(), app_for_work.clone()) {
+            // Surface as soft error string rather than panicking the command.
+            return Err(format!(
+                "已创建新任务但自动开始失败：{error}。请在任务列表点击「开始」。"
+            ));
+        }
+    }
     Ok(snapshot)
 }
 

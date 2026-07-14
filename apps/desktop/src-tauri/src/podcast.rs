@@ -378,6 +378,113 @@ pub fn copy_verified_input_with_progress(
     copied
 }
 
+fn task_has_markdown_artifacts(locations: &StorageLocations, task_id: &str) -> bool {
+    let cache_root = locations
+        .cache_root
+        .join("Podcast")
+        .join("Tasks")
+        .join(task_id);
+    for relative in [
+        "output",
+        "work/internal/markdown_bilingual",
+        "work/internal/markdown_raw",
+    ] {
+        let dir = cache_root.join(relative);
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_md = path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(|value| matches!(value.to_ascii_lowercase().as_str(), "md" | "markdown"))
+                    .unwrap_or(false);
+                if is_md && path.is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// User-facing retry: prefer re-publish of existing markdown (fast, no re-transcribe);
+/// otherwise clone a fresh task revision for a full re-run.
+pub fn retry_task_at(
+    control: &mut crate::control::ControlDb,
+    locations: &StorageLocations,
+    task_id: &str,
+) -> Result<(TaskSnapshot, RetryKind), String> {
+    validate_task_id(task_id)?;
+    let snapshot = control
+        .task_snapshot(task_id)?
+        .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
+    if !snapshot.can_retry
+        || !matches!(
+            snapshot.lifecycle_state,
+            crate::tasks::LifecycleState::Terminal
+        )
+    {
+        return Err("TASK_NOT_RETRYABLE".to_string());
+    }
+
+    // Fast path: publish already-produced transcript without re-running Whisper.
+    let publish_failed = matches!(
+        snapshot.error_code,
+        Some(crate::tasks::TaskErrorCode::PublishFailed)
+            | Some(crate::tasks::TaskErrorCode::PublishRecoveryRequired)
+    ) || snapshot
+        .error_message
+        .as_deref()
+        .is_some_and(|message| message.to_ascii_uppercase().contains("PUBLISH"));
+    if (publish_failed || task_has_markdown_artifacts(locations, task_id))
+        && locations
+            .data_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(task_id)
+            .join("task.json")
+            .is_file()
+    {
+        match publish_task_result_at(control, locations, task_id) {
+            Ok(transaction) => {
+                if !matches!(transaction.phase, crate::publish::PublishPhase::Committed) {
+                    return Err(format!(
+                        "PUBLISH_FAILED: re-publish ended in {:?}",
+                        transaction.phase
+                    ));
+                }
+                let event = control
+                    .mark_terminal_task_success(
+                        task_id,
+                        "已保存到 桌面/互动书架/播客",
+                        Some(transaction.book_id),
+                    )?
+                    .ok_or_else(|| "TASK_ALREADY_SUCCEEDED".to_string())?;
+                return Ok((event.snapshot, RetryKind::Republished));
+            }
+            Err(error) => {
+                // If there is no markdown left, fall through to full restart.
+                if !error.contains("no Markdown") && !error.contains("output directory is missing")
+                {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    let restarted = restart_incompatible_task_at(control, locations, task_id)?;
+    Ok((restarted, RetryKind::Restarted))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryKind {
+    Republished,
+    Restarted,
+}
+
 pub fn restart_incompatible_task_at(
     control: &mut crate::control::ControlDb,
     locations: &StorageLocations,
@@ -401,6 +508,11 @@ pub fn restart_incompatible_task_at(
         .join("Tasks")
         .join(task_id);
     let old_spec_path = old_task_root.join("task.json");
+    if !old_spec_path.is_file() {
+        return Err(
+            "TASK_CONTRACT_MISSING: 任务合同已丢失，请重新添加原音频文件。".to_string(),
+        );
+    }
     let spec: Value = serde_json::from_str(
         &fs::read_to_string(&old_spec_path).map_err(|error| error.to_string())?,
     )
@@ -427,14 +539,23 @@ pub fn restart_incompatible_task_at(
         .join("Tasks")
         .join(task_id);
     let relative = Path::new(relative_path);
+    // Accept both "input/foo.m4a" and nested Normal components (Unicode filenames).
     if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
     }
     let old_input = old_cache_root.join(relative);
+    if !old_input.is_file() {
+        return Err(
+            "INPUT_MISSING: 缓存中的原音频已不存在，请重新选择文件添加。".to_string(),
+        );
+    }
     let new_task_id = uuid::Uuid::new_v4().simple().to_string();
     let publish = spec
         .get("publish")
@@ -446,22 +567,30 @@ pub fn restart_incompatible_task_at(
         .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
         .checked_add(1)
         .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+    let compatibility_obj = spec
+        .get("compatibility")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?;
     let compatibility = PodcastCompatibility {
         input_sha256: input_sha256.to_string(),
-        pipeline_version: spec["compatibility"]["pipelineVersion"]
-            .as_str()
+        pipeline_version: compatibility_obj
+            .get("pipelineVersion")
+            .and_then(Value::as_str)
             .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
             .to_string(),
-        engine_version: spec["compatibility"]["engineVersion"]
-            .as_str()
+        engine_version: compatibility_obj
+            .get("engineVersion")
+            .and_then(Value::as_str)
             .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
             .to_string(),
-        config_hash: spec["compatibility"]["configHash"]
-            .as_str()
+        config_hash: compatibility_obj
+            .get("configHash")
+            .and_then(Value::as_str)
             .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
             .to_string(),
-        model_hash: spec["compatibility"]["modelHash"]
-            .as_str()
+        model_hash: compatibility_obj
+            .get("modelHash")
+            .and_then(Value::as_str)
             .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?
             .to_string(),
     };
@@ -470,10 +599,14 @@ pub fn restart_incompatible_task_at(
             copy_verified_input(&old_input, locations, &new_task_id, input_sha256, bytes)?;
         let mut new_spec = spec.clone();
         new_spec["taskId"] = Value::String(new_task_id.clone());
-        new_spec["input"]["relativePath"] = Value::String(verified.relative_path);
-        new_spec["publish"]["revision"] = json!(revision);
-        new_spec["publish"]["incomingRelativePath"] =
-            Value::String(format!(".incoming/{new_task_id}"));
+        if let Some(input_obj) = new_spec.get_mut("input") {
+            input_obj["relativePath"] = Value::String(verified.relative_path);
+        }
+        if let Some(publish_obj) = new_spec.get_mut("publish") {
+            publish_obj["revision"] = json!(revision);
+            publish_obj["incomingRelativePath"] =
+                Value::String(format!(".incoming/{new_task_id}"));
+        }
         let new_task_root = locations
             .data_root
             .join("Podcast")
@@ -519,8 +652,8 @@ pub fn restart_incompatible_task_at(
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_verified_input, preview_podcast_files_at, restart_incompatible_task_at,
-        PodcastPreviewOptions,
+        copy_verified_input, preview_podcast_files_at, restart_incompatible_task_at, retry_task_at,
+        PodcastPreviewOptions, RetryKind,
     };
     use crate::cache::read_podcast_recovery;
     use crate::control::ControlDb;
@@ -776,5 +909,136 @@ mod tests {
         assert_eq!(new_spec["publish"]["sourceId"], "source");
         drop(control);
         fs::remove_dir_all(root).expect("fixture must be removed");
+    }
+
+    #[test]
+    fn retry_publish_failed_republishes_without_new_task() {
+        let (root, locations) = fixture("retry-republish");
+        let task_id = "task-retry";
+        let source_id = "b".repeat(64);
+        let book_id = format!("podcast:{source_id}");
+        let task_root = locations
+            .data_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(task_id);
+        let cache_root = locations
+            .cache_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(task_id);
+        fs::create_dir_all(&task_root).expect("task root");
+        fs::create_dir_all(cache_root.join("input")).expect("input root");
+        fs::create_dir_all(cache_root.join("output")).expect("empty output root");
+        let bilingual = cache_root
+            .join("work")
+            .join("internal")
+            .join("markdown_bilingual");
+        fs::create_dir_all(&bilingual).expect("bilingual root");
+        fs::write(
+            bilingual.join("episode.bilingual.md"),
+            "# Huberman\n\nTranscript body",
+        )
+        .expect("markdown");
+        let input = b"retry-audio-bytes";
+        fs::write(cache_root.join("input").join("episode.mp3"), input).expect("input");
+        let input_sha256 = format!("{:x}", Sha256::digest(input));
+        fs::write(
+            task_root.join("task.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "taskId": task_id,
+                "input": {
+                    "relativePath": "input/episode.mp3",
+                    "inputSha256": input_sha256,
+                    "bytes": input.len(),
+                    "durationSeconds": 1.0
+                },
+                "compatibility": {
+                    "pipelineVersion": "pipeline-1",
+                    "engineVersion": "engine-1",
+                    "configHash": "config-1",
+                    "modelHash": "model-1"
+                },
+                "publish": {
+                    "bookId": book_id,
+                    "sourceId": source_id,
+                    "revision": 1,
+                    "incomingRelativePath": format!(".incoming/{task_id}")
+                }
+            }))
+            .expect("serialize"),
+        )
+        .expect("task.json");
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let snapshot = TaskSnapshot {
+            id: task_id.to_string(),
+            kind: TaskKind::Podcast,
+            revision: 1,
+            last_sequence: 1,
+            lifecycle_state: LifecycleState::Terminal,
+            outcome: TaskOutcome::Failed,
+            required_action: RequiredAction::None,
+            progress: TaskProgress {
+                mode: ProgressMode::Determinate,
+                percent: Some(99.0),
+                completed_units: None,
+                total_units: None,
+                label: Some("发布失败".to_string()),
+                unit: None,
+                source_total_units: None,
+                skipped_units: None,
+            },
+            error_code: Some(TaskErrorCode::PublishFailed),
+            error_message: Some(
+                r#"{"errorCode":"PUBLISH_FAILED","message":"PUBLISH_FAILED: worker produced no Markdown output","type":"fatal"}"#.to_string(),
+            ),
+            retry_after_seconds: None,
+            engine_stage: "failed".to_string(),
+            engine_status: "exited".to_string(),
+            recoverable: true,
+            can_pause: false,
+            can_resume: false,
+            can_retry: true,
+            can_cancel: false,
+            book_id: Some(book_id.clone()),
+            source_id: Some(source_id),
+            cache_lease_bytes: 0,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            last_heartbeat_at: Some(now.clone()),
+            checkpoint_at: None,
+        };
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: task_id.to_string(),
+            sequence: 1,
+            revision: 1,
+            event_type: "worker_failed".to_string(),
+            snapshot,
+            created_at: now,
+        };
+        let mut control = ControlDb::open(&locations.data_root.join("App").join("control.db"))
+            .expect("control");
+        control.persist_task_event(&event).expect("persist failed task");
+
+        let (result, kind) =
+            retry_task_at(&mut control, &locations, task_id).expect("retry must republish");
+        assert_eq!(kind, RetryKind::Republished);
+        assert_eq!(result.id, task_id);
+        assert_eq!(result.outcome, TaskOutcome::Success);
+        assert_eq!(result.lifecycle_state, LifecycleState::Terminal);
+        assert!(!result.can_retry);
+        assert_eq!(result.book_id.as_deref(), Some(book_id.as_str()));
+        assert!(locations
+            .library_root
+            .join("播客")
+            .join("episode")
+            .join("manifest.json")
+            .is_file());
+
+        drop(control);
+        fs::remove_dir_all(root).expect("cleanup");
     }
 }

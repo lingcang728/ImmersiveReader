@@ -849,6 +849,64 @@ impl ControlDb {
         Ok(Some(event))
     }
 
+    /// Recover a previously failed/interrupted terminal task to success (e.g. re-publish).
+    pub fn mark_terminal_task_success(
+        &mut self,
+        task_id: &str,
+        label: &str,
+        book_id: Option<String>,
+    ) -> Result<Option<TaskEvent>, String> {
+        let Some(mut snapshot) = self.task_snapshot(task_id)? else {
+            return Err("TASK_NOT_FOUND".to_string());
+        };
+        if matches!(snapshot.outcome, TaskOutcome::Success)
+            && matches!(snapshot.lifecycle_state, LifecycleState::Terminal)
+        {
+            return Ok(None);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        snapshot.last_sequence = snapshot
+            .last_sequence
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+        snapshot.lifecycle_state = LifecycleState::Terminal;
+        snapshot.outcome = TaskOutcome::Success;
+        snapshot.error_code = None;
+        snapshot.error_message = None;
+        snapshot.retry_after_seconds = None;
+        snapshot.required_action = RequiredAction::None;
+        snapshot.engine_stage = "completed".to_string();
+        snapshot.engine_status = "exited".to_string();
+        snapshot.recoverable = false;
+        snapshot.can_pause = false;
+        snapshot.can_resume = false;
+        snapshot.can_retry = false;
+        snapshot.can_cancel = false;
+        if let Some(book_id) = book_id.filter(|value| !value.trim().is_empty()) {
+            snapshot.book_id = Some(book_id);
+        }
+        snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
+        snapshot.progress.percent = Some(100.0);
+        snapshot.progress.label = Some(label.to_string());
+        snapshot.updated_at = now.clone();
+        snapshot.last_heartbeat_at = Some(now.clone());
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: snapshot.id.clone(),
+            sequence: snapshot.last_sequence,
+            revision: snapshot.revision,
+            event_type: "recovered_success".to_string(),
+            snapshot,
+            created_at: now,
+        };
+        self.persist_task_event(&event)?;
+        Ok(Some(event))
+    }
+
     pub fn finish_worker_task(
         &mut self,
         task_id: &str,

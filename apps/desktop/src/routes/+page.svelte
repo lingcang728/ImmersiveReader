@@ -1093,11 +1093,27 @@
 
 	async function restartPodcastTask(taskId: string) {
 		try {
-			await invoke("restart_podcast_task", { taskId });
-			showAppNotice("已创建新的 Podcast revision");
+			showAppNotice("正在重试播客任务…");
+			const snapshot = await invoke<{
+				id: string;
+				outcome?: string;
+				lifecycleState?: string;
+			}>("restart_podcast_task", { taskId });
+			if (snapshot.outcome === "success") {
+				showAppNotice("发布成功，文稿已保存到桌面/互动书架/播客");
+			} else {
+				showAppNotice("已重新开始转写");
+			}
 			await refreshAcquisitionSnapshot();
 		} catch (error) {
-			showAppNotice(`无法重新开始播客任务：${String(error)}`);
+			const message = String(error);
+			// Never let a retry error look like a silent crash — surface it clearly.
+			showAppNotice(
+				message.includes("INPUT_MISSING") || message.includes("TASK_CONTRACT_MISSING")
+					? "无法重试：原音频或任务信息已丢失，请重新添加音频。"
+					: `无法重试播客任务：${message}`
+			);
+			await refreshAcquisitionSnapshot();
 		}
 	}
 
