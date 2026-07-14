@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	createChromeState,
+	createFlowFontScaleChangeMessage,
 	createFlowReadingActivityMessage,
+	createFlowSetFontScaleMessage,
 	deriveChromeSurface,
+	isAllowedFlowMessageOrigin,
+	isFlowFontScaleChangeMessage,
 	isFlowReadingActivityMessage,
+	isFlowSetFontScaleMessage,
 	isReadingActivityKey,
 	reduceChrome
 } from './state';
@@ -224,6 +229,33 @@ describe('chrome state machine', () => {
 			})
 		).toBe(false);
 		expect(isFlowReadingActivityMessage(null)).toBe(false);
+	});
+
+	it('validates flow font-scale bridge messages and origin', () => {
+		const setMsg = createFlowSetFontScaleMessage(1.15);
+		const changeMsg = createFlowFontScaleChangeMessage(0.9);
+		expect(isFlowSetFontScaleMessage(setMsg)).toBe(true);
+		expect(isFlowFontScaleChangeMessage(changeMsg)).toBe(true);
+		expect(
+			isFlowSetFontScaleMessage({
+				source: 'immersive-reader-flow',
+				version: 1,
+				type: 'set-font-scale',
+				scale: '1'
+			})
+		).toBe(false);
+		expect(
+			isFlowFontScaleChangeMessage({
+				source: 'immersive-reader-flow',
+				version: 1,
+				type: 'font-scale-change',
+				scale: Number.NaN
+			})
+		).toBe(false);
+		expect(isAllowedFlowMessageOrigin('http://127.0.0.1:1420')).toBe(true);
+		expect(isAllowedFlowMessageOrigin('http://localhost:1420')).toBe(true);
+		expect(isAllowedFlowMessageOrigin('null')).toBe(true);
+		expect(isAllowedFlowMessageOrigin('https://evil.example')).toBe(false);
 	});
 });
 

@@ -18,7 +18,14 @@ export class ReaderApp {
   private servedReadIds = new Set<string>();
 
   private activeIndex: number = 0;
-  private fontSize: number = 20; // 默认 20px
+  /** Shared with the desktop shell (80%–150%, step 5%). */
+  private fontScale: number = 1;
+  private readonly baseFontPx = 18;
+  private readonly fontScaleMin = 0.8;
+  private readonly fontScaleMax = 1.5;
+  private readonly fontScaleStep = 0.05;
+  private fontScaleToast: HTMLElement | null = null;
+  private fontScaleToastTimer: number | null = null;
   private isSidebarActive: boolean = false;
   private isSearchActive: boolean = false;
   private searchSelectedIndex: number = 0;
@@ -803,19 +810,111 @@ export class ReaderApp {
    * Throttled by the existing scroll RAF so high-frequency scroll does not spam.
    */
   private notifyParentReadingActivity() {
+    this.postToParent({ type: 'reading-activity' });
+  }
+
+  private postToParent(payload: { type: 'reading-activity' } | { type: 'font-scale-change'; scale: number }) {
     if (window.parent === window) return;
     try {
       window.parent.postMessage(
         {
           source: 'immersive-reader-flow',
           version: 1,
-          type: 'reading-activity',
+          ...payload,
         },
         '*'
       );
     } catch {
       // Cross-origin edge cases — ignore.
     }
+  }
+
+  private clampFontScale(value: number): number {
+    if (!Number.isFinite(value)) return 1;
+    return Math.round(Math.min(this.fontScaleMax, Math.max(this.fontScaleMin, value)) * 100) / 100;
+  }
+
+  /** Capture active card + viewport-relative anchor so font reflow does not jump. */
+  private captureViewportAnchor(): { index: number; offsetRatio: number } | null {
+    const index = this.getSafeActiveIndex();
+    const card = document.getElementById(`article-${index}`) as HTMLElement | null;
+    if (!card) return null;
+    const rect = card.getBoundingClientRect();
+    const height = Math.max(1, rect.height);
+    const offsetRatio = (window.innerHeight * 0.4 - rect.top) / height;
+    return { index, offsetRatio: Math.max(0, Math.min(1, offsetRatio)) };
+  }
+
+  private restoreViewportAnchor(anchor: { index: number; offsetRatio: number } | null) {
+    if (!anchor) return;
+    const card = document.getElementById(`article-${anchor.index}`) as HTMLElement | null;
+    if (!card) return;
+    const targetTop = card.offsetTop + card.offsetHeight * anchor.offsetRatio - window.innerHeight * 0.4;
+    window.scrollTo({ top: Math.max(0, targetTop), behavior: 'auto' });
+  }
+
+  private showFontScaleToast(scale: number) {
+    if (!this.fontScaleToast) {
+      const el = document.createElement('div');
+      el.className = 'font-scale-toast';
+      el.setAttribute('aria-live', 'polite');
+      Object.assign(el.style, {
+        position: 'fixed',
+        left: '50%',
+        bottom: '18px',
+        transform: 'translateX(-50%)',
+        zIndex: '70',
+        padding: '7px 12px',
+        borderRadius: '999px',
+        fontSize: '12px',
+        letterSpacing: '0.04em',
+        color: 'var(--text-light, #f5f5f5)',
+        background: 'rgba(20, 20, 20, 0.88)',
+        border: '1px solid rgba(255,255,255,0.08)',
+        pointerEvents: 'none',
+        opacity: '0',
+        transition: 'opacity 0.2s ease',
+      } as CSSStyleDeclaration);
+      document.body.appendChild(el);
+      this.fontScaleToast = el;
+    }
+    this.fontScaleToast.textContent = `字号 ${Math.round(scale * 100)}%`;
+    this.fontScaleToast.style.opacity = '1';
+    if (this.fontScaleToastTimer !== null) window.clearTimeout(this.fontScaleToastTimer);
+    this.fontScaleToastTimer = window.setTimeout(() => {
+      if (this.fontScaleToast) this.fontScaleToast.style.opacity = '0';
+      this.fontScaleToastTimer = null;
+    }, 1200);
+  }
+
+  private applyFontScale(scale: number, options?: { notifyParent?: boolean; showToast?: boolean }) {
+    const clamped = this.clampFontScale(scale);
+    const changed = clamped !== this.fontScale;
+    const anchor = changed ? this.captureViewportAnchor() : null;
+    this.fontScale = clamped;
+    document.documentElement.style.setProperty('--p-font-size', `${this.baseFontPx * clamped}px`);
+    if (changed) {
+      requestAnimationFrame(() => this.restoreViewportAnchor(anchor));
+    }
+    if (options?.showToast !== false && changed) {
+      this.showFontScaleToast(clamped);
+    }
+    if (options?.notifyParent && changed) {
+      this.postToParent({ type: 'font-scale-change', scale: clamped });
+    }
+  }
+
+  private bindParentFontScaleBridge() {
+    window.addEventListener('message', (event: MessageEvent) => {
+      // Only accept messages from the embedding parent window.
+      if (event.source !== window.parent) return;
+      const data = event.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.source !== 'immersive-reader-flow' || data.version !== 1) return;
+      if (data.type === 'set-font-scale' && typeof data.scale === 'number') {
+        this.applyFontScale(data.scale, { notifyParent: false, showToast: false });
+      }
+    });
   }
 
   private handleScrollThrottled() {
@@ -967,9 +1066,11 @@ export class ReaderApp {
     }, 100);
   }
 
-  private adjustFontSize(delta: number) {
-    this.fontSize = Math.max(15, Math.min(32, this.fontSize + delta));
-    document.documentElement.style.setProperty('--p-font-size', `${this.fontSize}px`);
+  private adjustFontSize(direction: number) {
+    this.applyFontScale(this.fontScale + direction * this.fontScaleStep, {
+      notifyParent: true,
+      showToast: true,
+    });
   }
 
   private openSidebar() {
@@ -1102,6 +1203,20 @@ export class ReaderApp {
     // 遮罩点击
     this.sidebarOverlay.onclick = () => this.closeSidebar();
     this.menuTrigger.onclick = () => this.toggleSidebar();
+
+    this.bindParentFontScaleBridge();
+    // Non-passive so Ctrl+wheel can prevent page zoom and drive shared font scale.
+    window.addEventListener(
+      'wheel',
+      (e: WheelEvent) => {
+        if (!e.ctrlKey) return;
+        e.preventDefault();
+        if (Math.abs(e.deltaY) > 0.01) {
+          this.adjustFontSize(e.deltaY < 0 ? 1 : -1);
+        }
+      },
+      { passive: false }
+    );
 
     window.addEventListener('scroll', () => {
       if (this.scrollRaf === null) {

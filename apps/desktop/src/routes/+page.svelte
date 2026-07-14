@@ -67,7 +67,10 @@
 		CHROME_HIDE_DELAY_MS,
 		CHROME_TOP_EDGE_PX,
 		createChromeState,
+		createFlowSetFontScaleMessage,
 		deriveChromeSurface,
+		isAllowedFlowMessageOrigin,
+		isFlowFontScaleChangeMessage,
 		isFlowReadingActivityMessage,
 		isImmersiveSurface,
 		isOverlaySurface,
@@ -383,7 +386,17 @@
 		}
 	}
 
-	function setFontScale(next: number) {
+	function postFlowFontScale(scale: number) {
+		const win = flowIframeEl?.contentWindow;
+		if (!win || !flowReaderSession) return;
+		try {
+			win.postMessage(createFlowSetFontScaleMessage(scale), "*");
+		} catch {
+			// iframe may be mid-navigation
+		}
+	}
+
+	function setFontScale(next: number, options?: { fromFlow?: boolean }) {
 		const clamped = clampFontScale(next);
 		zoomIndicatorText = `字号 ${Math.round(clamped * 100)}%`;
 		if (zoomIndicatorTimer) clearTimeout(zoomIndicatorTimer);
@@ -392,6 +405,13 @@
 			zoomIndicatorTimer = null;
 		}, 1200);
 		if (clamped !== $fontScale) $fontScale = clamped;
+		// Flow-originated changes already applied the scale; avoid echo loops.
+		if (!options?.fromFlow) postFlowFontScale(clamped);
+	}
+
+	// Keep the continuous-reader iframe in sync with settings / store updates.
+	$: if (flowReaderSession && flowIframeEl) {
+		postFlowFontScale($fontScale);
 	}
 
 	function adjustFontScale(direction: number) {
@@ -1981,13 +2001,14 @@
 			if (!flowReaderSession || !flowIframeEl) return;
 			if (event.source !== flowIframeEl.contentWindow) return;
 			// Local reader sessions are served from 127.0.0.1; accept same-origin and null for file.
-			const allowed =
-				event.origin === "null" ||
-				event.origin.startsWith("http://127.0.0.1") ||
-				event.origin.startsWith("http://localhost");
-			if (!allowed) return;
-			if (!isFlowReadingActivityMessage(event.data)) return;
-			noteReadingActivity();
+			if (!isAllowedFlowMessageOrigin(event.origin)) return;
+			if (isFlowReadingActivityMessage(event.data)) {
+				noteReadingActivity();
+				return;
+			}
+			if (isFlowFontScaleChangeMessage(event.data)) {
+				setFontScale(event.data.scale, { fromFlow: true });
+			}
 		};
 		window.addEventListener("message", handleFlowReaderMessage);
 
@@ -4008,6 +4029,7 @@
 					title="连续阅读器"
 					src={flowReaderSession.url}
 					sandbox="allow-same-origin allow-scripts allow-forms"
+					on:load={() => postFlowFontScale($fontScale)}
 				></iframe>
 			</section>
 		{:else if trashOpen}

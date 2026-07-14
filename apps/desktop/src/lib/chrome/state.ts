@@ -186,6 +186,27 @@ export type FlowReadingActivityMessage = {
 	type: 'reading-activity';
 };
 
+/** Parent → iframe: apply the shared reader font scale. */
+export type FlowSetFontScaleMessage = {
+	source: typeof FLOW_READING_MESSAGE_SOURCE;
+	version: typeof FLOW_READING_MESSAGE_VERSION;
+	type: 'set-font-scale';
+	scale: number;
+};
+
+/** iframe → parent: report a user-driven scale change for persistence. */
+export type FlowFontScaleChangeMessage = {
+	source: typeof FLOW_READING_MESSAGE_SOURCE;
+	version: typeof FLOW_READING_MESSAGE_VERSION;
+	type: 'font-scale-change';
+	scale: number;
+};
+
+export type FlowBridgeMessage =
+	| FlowReadingActivityMessage
+	| FlowSetFontScaleMessage
+	| FlowFontScaleChangeMessage;
+
 export function createFlowReadingActivityMessage(): FlowReadingActivityMessage {
 	return {
 		source: FLOW_READING_MESSAGE_SOURCE,
@@ -194,14 +215,57 @@ export function createFlowReadingActivityMessage(): FlowReadingActivityMessage {
 	};
 }
 
-export function isFlowReadingActivityMessage(
-	data: unknown
-): data is FlowReadingActivityMessage {
+export function createFlowSetFontScaleMessage(scale: number): FlowSetFontScaleMessage {
+	return {
+		source: FLOW_READING_MESSAGE_SOURCE,
+		version: FLOW_READING_MESSAGE_VERSION,
+		type: 'set-font-scale',
+		scale
+	};
+}
+
+export function createFlowFontScaleChangeMessage(scale: number): FlowFontScaleChangeMessage {
+	return {
+		source: FLOW_READING_MESSAGE_SOURCE,
+		version: FLOW_READING_MESSAGE_VERSION,
+		type: 'font-scale-change',
+		scale
+	};
+}
+
+function isFlowEnvelope(data: unknown): data is Record<string, unknown> {
 	if (typeof data !== 'object' || data === null) return false;
 	const record = data as Record<string, unknown>;
 	return (
 		record.source === FLOW_READING_MESSAGE_SOURCE &&
 		record.version === FLOW_READING_MESSAGE_VERSION &&
-		record.type === 'reading-activity'
+		typeof record.type === 'string'
+	);
+}
+
+export function isFlowReadingActivityMessage(
+	data: unknown
+): data is FlowReadingActivityMessage {
+	return isFlowEnvelope(data) && data.type === 'reading-activity';
+}
+
+export function isFlowSetFontScaleMessage(data: unknown): data is FlowSetFontScaleMessage {
+	if (!isFlowEnvelope(data) || data.type !== 'set-font-scale') return false;
+	return typeof data.scale === 'number' && Number.isFinite(data.scale);
+}
+
+export function isFlowFontScaleChangeMessage(
+	data: unknown
+): data is FlowFontScaleChangeMessage {
+	if (!isFlowEnvelope(data) || data.type !== 'font-scale-change') return false;
+	return typeof data.scale === 'number' && Number.isFinite(data.scale);
+}
+
+/** Accept only local reader origins for the flow iframe message bridge. */
+export function isAllowedFlowMessageOrigin(origin: string): boolean {
+	return (
+		origin === 'null' ||
+		origin.startsWith('http://127.0.0.1') ||
+		origin.startsWith('http://localhost')
 	);
 }

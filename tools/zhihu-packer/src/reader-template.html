@@ -500,6 +500,7 @@
     .articles-container {
       width: 100%;
       max-width: 720px;
+      min-width: 0;
       display: flex;
       flex-direction: column;
       gap: 100px;
@@ -512,6 +513,9 @@
       border-radius: 20px;
       padding: 44px;
       position: relative;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
       transition: transform 0.6s cubic-bezier(0.25, 1, 0.5, 1),
                   box-shadow 0.6s cubic-bezier(0.25, 1, 0.5, 1),
                   border-color 0.6s cubic-bezier(0.25, 1, 0.5, 1),
@@ -545,6 +549,8 @@
       letter-spacing: -0.02em;
       margin-bottom: 20px;
       transition: color 0.3s ease;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .article-divider {
@@ -592,6 +598,17 @@
       color: var(--text-color);
       font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
       transition: font-size 0.25s cubic-bezier(0.25, 1, 0.5, 1);
+      min-width: 0;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .article-body p,
+    .article-body li,
+    .article-body a {
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .article-body p {
@@ -607,6 +624,8 @@
       margin-top: 2rem;
       margin-bottom: 1rem;
       line-height: 1.4;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     
     .article-body h1 { font-size: 1.8rem; }
@@ -616,19 +635,21 @@
     .article-body ul, .article-body ol {
       margin-bottom: 1.8rem;
       padding-left: 28px;
+      min-width: 0;
     }
 
     .article-body li {
       margin-bottom: 0.6em;
     }
 
-    /* 代码块美化 */
+    /* 代码块美化 — 横向滚动限制在卡片内 */
     .article-body pre {
       background: rgba(0, 0, 0, 0.2);
       border: 1px solid var(--border-color);
       padding: 20px;
       border-radius: 12px;
       overflow-x: auto;
+      max-width: 100%;
       margin-bottom: 1.8rem;
     }
 
@@ -639,12 +660,17 @@
       padding: 3px 6px;
       border-radius: 6px;
       border: 1px solid rgba(255, 255, 255, 0.04);
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .article-body pre code {
       background: transparent;
       padding: 0;
       border: none;
+      white-space: pre;
+      word-break: normal;
+      overflow-wrap: normal;
     }
 
     /* 图片美化 */
@@ -685,9 +711,14 @@
       margin: 1.5rem 0;
     }
 
-    /* 表格 */
+    /* 表格 — 宽表时在正文内横向滚动，不撑破卡片 */
+    .article-body {
+      overflow-x: auto;
+    }
+
     .article-body table {
       width: 100%;
+      max-width: 100%;
       border-collapse: collapse;
       margin-bottom: 1.8rem;
       font-size: 0.92em;
@@ -697,6 +728,8 @@
       border: 1px solid var(--border-color);
       padding: 12px 14px;
       text-align: left;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .article-body th {
