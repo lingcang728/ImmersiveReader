@@ -10,6 +10,9 @@ import {
   refreshTaskCounts, 
   getAuthorSuccessItems,
   replaceTaskIndex,
+  upsertTaskIndexItems,
+  saveIndexCheckpoint,
+  readIndexCheckpoint,
   tryStartTask,
   recordPublishedTaskItems,
   Task
@@ -211,18 +214,89 @@ async function runTaskInternal(taskId: string) {
       
       const scrapedIndexes: ScrapedIndexItem[] = [];
       const scanLimit = scanLimitForSelection(task.top_n, task.sort_by);
+      let lastAuthorName = task.author_name || '未知作者';
+      const priorCheckpoint = readIndexCheckpoint(taskId);
+
+      const persistIndexProgress = (
+        contentType: 'answers' | 'articles' | 'all',
+        items: ScrapedIndexItem[],
+        statusMessage: string,
+        paging?: { next: string | null; isEnd: boolean; pagesSeen: number; totals: number | null }
+      ) => {
+        const authorName = items[0]?.authorName || lastAuthorName;
+        lastAuthorName = authorName;
+        // Incremental upsert so crash mid-index keeps discovered rows.
+        upsertTaskIndexItems(
+          taskId,
+          authorName,
+          items.map((item) => ({
+            id: item.id,
+            type: item.type,
+            authorId: item.authorId,
+            authorName: item.authorName,
+            title: item.title,
+            url: item.url,
+            createdTime: item.createdTime,
+            updatedTime: item.updatedTime,
+            voteupCount: item.voteupCount,
+            commentCount: item.commentCount,
+            questionId: item.questionId,
+            questionUrl: item.questionUrl
+          })),
+          {
+            contentType,
+            next: paging?.next ?? priorCheckpoint?.next ?? null,
+            isEnd: paging?.isEnd ?? false,
+            pagesSeen: paging?.pagesSeen ?? priorCheckpoint?.pagesSeen ?? 0,
+            discovered: items.length,
+            totals: paging?.totals ?? priorCheckpoint?.totals ?? null,
+            stage: 'index',
+            statusMessage,
+            lastHeartbeatAt: Date.now()
+          }
+        );
+        emitProgress(taskId, 'running', statusMessage);
+      };
 
       if (task.item_types === 'answers' || task.item_types === 'all') {
-        const answers = await scrapePeopleIndex(page, task.author_id, 'answers', scanLimit);
-        scrapedIndexes.push(...answers);
+        const answers = await scrapePeopleIndex(
+          page,
+          task.author_id,
+          'answers',
+          scanLimit,
+          (progress) => {
+            scrapedIndexes.length = 0;
+            // Keep articles if already scraped in this run — answers phase first so only answers here.
+            scrapedIndexes.push(...progress.items);
+            persistIndexProgress('answers', scrapedIndexes, progress.statusMessage, progress.paging);
+          }
+        );
+        // Replace answers slice with final set
+        const withoutAnswers = scrapedIndexes.filter((i) => i.type !== 'answer');
+        scrapedIndexes.length = 0;
+        scrapedIndexes.push(...withoutAnswers, ...answers);
+        persistIndexProgress('answers', scrapedIndexes, `回答索引完成：${answers.length} 条`);
       }
 
       // 如果有暂停，需要在这里检查
       if (checkIsPaused(taskId)) return;
 
       if (task.item_types === 'articles' || task.item_types === 'all') {
-        const articles = await scrapePeopleIndex(page, task.author_id, 'articles', scanLimit);
-        scrapedIndexes.push(...articles);
+        const articles = await scrapePeopleIndex(
+          page,
+          task.author_id,
+          'articles',
+          scanLimit,
+          (progress) => {
+            const answersOnly = scrapedIndexes.filter((i) => i.type === 'answer');
+            const merged = [...answersOnly, ...progress.items];
+            persistIndexProgress('articles', merged, progress.statusMessage, progress.paging);
+          }
+        );
+        const answersOnly = scrapedIndexes.filter((i) => i.type === 'answer');
+        scrapedIndexes.length = 0;
+        scrapedIndexes.push(...answersOnly, ...articles);
+        persistIndexProgress('articles', scrapedIndexes, `文章索引完成：${articles.length} 条`);
       }
 
       if (scrapedIndexes.length === 0) {
@@ -232,11 +306,19 @@ async function runTaskInternal(taskId: string) {
       }
 
       // 获取并更新作者名
-      const authorName = scrapedIndexes[0].authorName || '未知作者';
+      const authorName = scrapedIndexes[0].authorName || lastAuthorName || '未知作者';
       const selectedIndexes = selectIndexItems(scrapedIndexes, task.top_n, task.sort_by);
 
-      // 用单个事务替换索引，避免半写入后被误认为索引完成。
+      // Final replace keeps selection/topN consistent and marks index complete.
       replaceTaskIndex(taskId, authorName, selectedIndexes);
+      saveIndexCheckpoint(taskId, {
+        contentType: task.item_types === 'all' ? 'all' : task.item_types,
+        isEnd: true,
+        discovered: selectedIndexes.length,
+        stage: 'content',
+        statusMessage: `列表扫描完毕。共发现 ${selectedIndexes.length} 个条目`,
+        lastHeartbeatAt: Date.now()
+      });
       taskItems = getTaskItems(taskId);
       emitProgress(taskId, 'running', `列表扫描完毕。共发现 ${taskItems.length} 个条目，开始消费正文队列...`);
     } else {

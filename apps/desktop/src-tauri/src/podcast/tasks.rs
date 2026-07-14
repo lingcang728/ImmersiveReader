@@ -1,7 +1,7 @@
 use super::task_contract::{write_task_contract, TaskContractRequest};
 use super::task_request::{replay, request_hash, validate_budget, StoredPreview};
 use super::{
-    copy_verified_input, AddPodcastFilesRequest, DuplicatePolicy, PodcastAddResult,
+    copy_verified_input_with_progress, AddPodcastFilesRequest, DuplicatePolicy, PodcastAddResult,
     PodcastBudgetApproval, PodcastPreviewStore,
 };
 use crate::cache::set_podcast_recovery_compatibility;
@@ -17,35 +17,48 @@ use uuid::Uuid;
 const COMMAND_NAME: &str = "add_podcast_files";
 pub const TASK_EVENT_NAME: &str = "acquisition://task-event";
 
-pub(crate) fn queued_event(
+fn snapshot_for_file(
     task_id: String,
     file: &super::PodcastFilePreview,
     cache_bytes: u64,
-) -> TaskEvent {
+    revision: u64,
+    last_sequence: u64,
+    stage: &str,
+    status: &str,
+    label: &str,
+    percent: Option<f64>,
+    completed_units: Option<u64>,
+    total_units: Option<u64>,
+    created_at: Option<String>,
+) -> TaskSnapshot {
     let now = chrono::Utc::now().to_rfc3339();
-    let snapshot = TaskSnapshot {
+    TaskSnapshot {
         id: task_id,
         kind: TaskKind::Podcast,
-        revision: 1,
-        last_sequence: 1,
+        revision,
+        last_sequence,
         lifecycle_state: LifecycleState::Queued,
         outcome: TaskOutcome::None,
         required_action: RequiredAction::None,
         progress: TaskProgress {
-            mode: ProgressMode::Indeterminate,
-            percent: None,
-            completed_units: None,
-            total_units: None,
-            label: Some("等待转写".to_string()),
-            unit: None,
-            source_total_units: None,
+            mode: if percent.is_some() || total_units.is_some() {
+                ProgressMode::Determinate
+            } else {
+                ProgressMode::Indeterminate
+            },
+            percent,
+            completed_units,
+            total_units,
+            label: Some(label.to_string()),
+            unit: Some("字节".to_string()),
+            source_total_units: Some(file.bytes),
             skipped_units: None,
         },
         error_code: None,
         error_message: None,
         retry_after_seconds: None,
-        engine_stage: "queued".to_string(),
-        engine_status: "waiting".to_string(),
+        engine_stage: stage.to_string(),
+        engine_status: status.to_string(),
         recoverable: true,
         can_pause: false,
         can_resume: false,
@@ -54,19 +67,40 @@ pub(crate) fn queued_event(
         book_id: Some(file.book_id.clone()),
         source_id: Some(file.source_id.clone()),
         cache_lease_bytes: cache_bytes,
-        created_at: now.clone(),
+        created_at: created_at.unwrap_or_else(|| now.clone()),
         updated_at: now.clone(),
-        last_heartbeat_at: None,
-        checkpoint_at: None,
-    };
+        last_heartbeat_at: Some(now.clone()),
+        checkpoint_at: Some(now),
+    }
+}
+
+pub(crate) fn queued_event(
+    task_id: String,
+    file: &super::PodcastFilePreview,
+    cache_bytes: u64,
+) -> TaskEvent {
+    let snapshot = snapshot_for_file(
+        task_id,
+        file,
+        cache_bytes,
+        1,
+        1,
+        "queued",
+        "waiting",
+        "等待转写",
+        None,
+        None,
+        None,
+        None,
+    );
     TaskEvent {
         schema_version: 1,
         task_id: snapshot.id.clone(),
         sequence: 1,
         revision: 1,
         event_type: "queued".to_string(),
+        created_at: snapshot.created_at.clone(),
         snapshot,
-        created_at: now,
     }
 }
 
@@ -88,13 +122,122 @@ fn create_tasks(
             }
         }
         let task_id = Uuid::new_v4().simple().to_string();
-        let input = copy_verified_input(
-            Path::new(&file.path),
-            locations,
-            &task_id,
-            &file.input_sha256,
+        // Visible snapshot first so UI shows copy progress within 1s.
+        let preparing = snapshot_for_file(
+            task_id.clone(),
+            file,
             file.bytes,
-        )?;
+            1,
+            1,
+            "input_copy",
+            "copying",
+            "正在复制输入",
+            Some(0.0),
+            Some(0),
+            Some(file.bytes),
+            None,
+        );
+        let preparing_event = TaskEvent {
+            schema_version: 1,
+            task_id: preparing.id.clone(),
+            sequence: 1,
+            revision: 1,
+            event_type: "input_copy_started".to_string(),
+            created_at: preparing.created_at.clone(),
+            snapshot: preparing.clone(),
+        };
+        control.persist_task_event(&preparing_event)?;
+        broadcast(&preparing_event);
+
+        let mut last_revision = 1_u64;
+        let mut last_sequence = 1_u64;
+        let created_at = preparing.created_at.clone();
+        let input = {
+            let mut progress_cb = |copied: u64, total: u64| {
+                let percent = if total == 0 {
+                    100.0
+                } else {
+                    (copied as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+                };
+                last_revision = last_revision.saturating_add(1);
+                last_sequence = last_sequence.saturating_add(1);
+                let snapshot = snapshot_for_file(
+                    task_id.clone(),
+                    file,
+                    total,
+                    last_revision,
+                    last_sequence,
+                    "input_copy",
+                    "copying",
+                    &format!("复制输入 {copied} / {total} 字节"),
+                    Some(percent),
+                    Some(copied),
+                    Some(total),
+                    Some(created_at.clone()),
+                );
+                let event = TaskEvent {
+                    schema_version: 1,
+                    task_id: snapshot.id.clone(),
+                    sequence: snapshot.last_sequence,
+                    revision: snapshot.revision,
+                    event_type: "input_copy_progress".to_string(),
+                    created_at: snapshot.updated_at.clone(),
+                    snapshot,
+                };
+                if control.persist_task_event(&event).is_ok() {
+                    broadcast(&event);
+                }
+            };
+            copy_verified_input_with_progress(
+                Path::new(&file.path),
+                locations,
+                &task_id,
+                &file.input_sha256,
+                file.bytes,
+                Some(&mut progress_cb),
+            )
+        };
+        let input = match input {
+            Ok(value) => value,
+            Err(error) => {
+                last_revision = last_revision.saturating_add(1);
+                last_sequence = last_sequence.saturating_add(1);
+                let mut failed = snapshot_for_file(
+                    task_id.clone(),
+                    file,
+                    file.bytes,
+                    last_revision,
+                    last_sequence,
+                    "input_copy_failed",
+                    "exited",
+                    "输入复制失败",
+                    None,
+                    None,
+                    Some(file.bytes),
+                    Some(created_at.clone()),
+                );
+                failed.lifecycle_state = LifecycleState::Terminal;
+                failed.outcome = TaskOutcome::Failed;
+                failed.error_code = Some(crate::tasks::TaskErrorCode::InputCopyFailed);
+                failed.error_message = Some(error);
+                failed.recoverable = false;
+                failed.can_cancel = false;
+                let event = TaskEvent {
+                    schema_version: 1,
+                    task_id: failed.id.clone(),
+                    sequence: failed.last_sequence,
+                    revision: failed.revision,
+                    event_type: "input_copy_failed".to_string(),
+                    created_at: failed.updated_at.clone(),
+                    snapshot: failed,
+                };
+                let _ = control.persist_task_event(&event);
+                broadcast(&event);
+                // Continue remaining files independently.
+                continue;
+            }
+        };
+
         let book_revision = u64::from(file.duplicate_book_id.is_some()) + 1;
         let contract = TaskContractRequest {
             task_id: &task_id,
@@ -108,7 +251,31 @@ fn create_tasks(
         };
         let compatibility = write_task_contract(locations, &contract)?;
         set_podcast_recovery_compatibility(locations, &task_id, compatibility)?;
-        let event = queued_event(task_id, file, input.bytes);
+        last_revision = last_revision.saturating_add(1);
+        last_sequence = last_sequence.saturating_add(1);
+        let ready = snapshot_for_file(
+            task_id,
+            file,
+            input.bytes,
+            last_revision,
+            last_sequence,
+            "queued",
+            "waiting",
+            "输入就绪，等待转写",
+            Some(100.0),
+            Some(input.bytes),
+            Some(input.bytes),
+            Some(created_at),
+        );
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: ready.id.clone(),
+            sequence: ready.last_sequence,
+            revision: ready.revision,
+            event_type: "queued".to_string(),
+            created_at: ready.updated_at.clone(),
+            snapshot: ready.clone(),
+        };
         control.persist_task_event(&event)?;
         broadcast(&event);
         tasks.push(event.snapshot);

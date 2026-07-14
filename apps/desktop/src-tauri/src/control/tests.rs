@@ -463,6 +463,20 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
     assert_eq!(stdout.event_type, "worker_stdout");
     assert_eq!(stdout.snapshot.progress.percent, Some(42.5));
     assert_eq!(stdout.snapshot.engine_stage, "chunking");
+    let ndjson = database
+        .record_worker_line(
+            "podcast-1",
+            "stdout",
+            r#"{"type":"progress","stage":"transcribe","percent":55.5,"completedUnits":11,"totalUnits":20,"unit":"块","message":"转写第 11 块"}"#,
+        )
+        .expect("ndjson must map")
+        .expect("ndjson event must exist");
+    assert_eq!(ndjson.event_type, "worker_progress");
+    assert_eq!(ndjson.snapshot.progress.percent, Some(55.5));
+    assert_eq!(ndjson.snapshot.engine_stage, "transcribe");
+    assert_eq!(ndjson.snapshot.progress.completed_units, Some(11));
+    assert_eq!(ndjson.snapshot.progress.total_units, Some(20));
+    assert_eq!(ndjson.snapshot.progress.label.as_deref(), Some("转写第 11 块"));
     let stderr = database
         .record_worker_line("podcast-1", "stderr", "worker warning")
         .expect("stderr must map")

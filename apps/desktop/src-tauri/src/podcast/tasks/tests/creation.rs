@@ -37,7 +37,8 @@ fn queued_task_is_persisted_before_broadcast() {
     .expect("queued task must be created");
 
     assert_eq!(result.tasks.len(), 1);
-    assert_eq!(broadcasts, 1);
+    // Preparing + progress + ready (at least the first and last snapshots).
+    assert!(broadcasts >= 2, "expected prepare+ready broadcasts, got {broadcasts}");
     let task_id = &result.tasks[0].id;
     let data_task = locations
         .data_root

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -163,9 +164,88 @@ def main() -> int:
 
     # Default: resume from completed chunks / translation batches / output checkpoints.
     # Explicit "restart from scratch" paths pass --force via a dedicated entrypoint.
+    def emit(payload: dict[str, Any]) -> None:
+        """Structured NDJSON for the desktop worker consumer (no secrets/full paths)."""
+        safe = {
+            key: value
+            for key, value in payload.items()
+            if key
+            in {
+                "type",
+                "stage",
+                "percent",
+                "completedUnits",
+                "totalUnits",
+                "unit",
+                "message",
+                "errorCode",
+                "retryAfterSeconds",
+            }
+        }
+        print(json.dumps(safe, ensure_ascii=False), flush=True)
+
+    emit(
+        {
+            "type": "progress",
+            "stage": "prepare",
+            "percent": 1,
+            "message": "任务规格已校验，开始转写流水线",
+        }
+    )
+    emit({"type": "heartbeat", "stage": "prepare", "message": "worker alive"})
+
+    # Install a lightweight logger hook so stage lines also surface as NDJSON.
+    class _NdjsonHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:  # noqa: A003
+            message = record.getMessage()
+            stage = "working"
+            lower = message.lower()
+            if "chunk" in lower:
+                stage = "chunking"
+            elif "transcrib" in lower:
+                stage = "transcribe"
+            elif "translat" in lower:
+                stage = "translate"
+            elif "normal" in lower:
+                stage = "normalize"
+            elif "model" in lower:
+                stage = "load_model"
+            elif "publish" in lower or "output" in lower:
+                stage = "write_output"
+            percent = None
+            for token in message.replace("%", " % ").split():
+                if token.endswith("%"):
+                    try:
+                        percent = float(token[:-1])
+                    except ValueError:
+                        percent = None
+            payload: dict[str, Any] = {
+                "type": "progress" if percent is not None else "heartbeat",
+                "stage": stage,
+                "message": message[:180],
+            }
+            if percent is not None and math.isfinite(percent):
+                payload["percent"] = max(0.0, min(100.0, percent))
+            try:
+                emit(payload)
+            except Exception:
+                pass
+
+    logging.getLogger().addHandler(_NdjsonHandler())
+
     sys.argv = ["transcribe_podcasts.py", "--no-open-output"]
     try:
-        return transcribe_podcasts.main()
+        code = transcribe_podcasts.main()
+        if code == 0:
+            emit(
+                {
+                    "type": "completed",
+                    "stage": "completed",
+                    "percent": 100,
+                    "message": "转写流水线完成",
+                }
+            )
+        return code
     except Exception as error:
         classified = error if isinstance(error, (PodcastBudgetExceededError, PodcastUpstreamError)) else classify_upstream_error(error)
         if classified is not None:

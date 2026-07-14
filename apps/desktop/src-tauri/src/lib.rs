@@ -632,7 +632,7 @@ fn preview_podcast_files(
 }
 
 #[tauri::command]
-fn add_podcast_files(
+async fn add_podcast_files(
     preview_id: String,
     duplicate_policy: podcast::DuplicatePolicy,
     budget_approval: Option<podcast::PodcastBudgetApproval>,
@@ -640,20 +640,34 @@ fn add_podcast_files(
     state: tauri::State<'_, podcast::PodcastPreviewStore>,
     app: tauri::AppHandle,
 ) -> Result<podcast::PodcastAddResult, String> {
-    let mut locations = storage::StorageLocations::current()?;
-    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
-    let mut control = control::ControlDb::open_current()?;
-    let request = podcast::AddPodcastFilesRequest {
-        preview_id: &preview_id,
-        duplicate_policy,
-        budget_approval: budget_approval.as_ref(),
-        request_id: &request_id,
-    };
-    podcast::add_podcast_files_at(&state, &mut control, &locations, &request, |event| {
-        if let Err(error) = app.emit(podcast::TASK_EVENT_NAME, event) {
-            eprintln!("Task event broadcast failed after persistence: {error}");
-        }
+    let store = state.inner().clone();
+    let app_for_work = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut locations = storage::StorageLocations::current()?;
+        locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+        let mut control = control::ControlDb::open_current()?;
+        let request = podcast::AddPodcastFilesRequest {
+            preview_id: &preview_id,
+            duplicate_policy,
+            budget_approval: budget_approval.as_ref(),
+            request_id: &request_id,
+        };
+        podcast::add_podcast_files_at(&store, &mut control, &locations, &request, |event| {
+            if let Err(error) = app_for_work.emit(podcast::TASK_EVENT_NAME, event) {
+                eprintln!("Task event broadcast failed after persistence: {error}");
+            }
+        })
     })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    // Input prep finished: auto-start transcription without a second "开始" click.
+    for task in &result.tasks {
+        if let Err(error) = podcast::start_task(task.id.clone(), app.clone()) {
+            eprintln!("Auto-start podcast task {} failed: {error}", task.id);
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]

@@ -76,6 +76,14 @@ struct RemoteTask {
     total_count: u64,
     success_count: u64,
     failed_count: u64,
+    #[serde(default)]
+    index_status: Option<String>,
+    #[serde(default)]
+    source_reported_count: Option<u64>,
+    #[serde(default)]
+    discovered_count: Option<u64>,
+    #[serde(default)]
+    index_checkpoint_json: Option<String>,
 }
 
 fn validate_request(request: &CreateZhihuTaskRequest) -> Result<(), String> {
@@ -340,30 +348,69 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
         _ => TaskOutcome::None,
     };
     let completed = remote.success_count.saturating_add(remote.failed_count);
-    let determinate = remote.total_count > 0;
-    let percent = determinate
-        .then(|| (completed as f64 / remote.total_count as f64 * 100.0).clamp(0.0, 100.0));
+    let discovered = remote.discovered_count.unwrap_or(remote.total_count);
+    let source_total = remote.source_reported_count;
+    let determinate = remote.total_count > 0 || discovered > 0;
+    let total_for_percent = if remote.total_count > 0 {
+        remote.total_count
+    } else {
+        discovered
+    };
+    let percent = determinate.then(|| {
+        if total_for_percent == 0 {
+            0.0
+        } else {
+            (completed as f64 / total_for_percent as f64 * 100.0).clamp(0.0, 100.0)
+        }
+    });
+    let index_complete = remote
+        .index_status
+        .as_deref()
+        .map(|s| s == "complete")
+        .unwrap_or_else(|| {
+            remote.total_count > 0
+                && remote.success_count.saturating_add(remote.failed_count) >= remote.total_count
+        });
+    let stage = if index_complete { "content" } else { "index" };
     let label = if terminal {
         Some(format!(
             "完成 {} / {}（失败 {}）",
             remote.success_count, remote.total_count, remote.failed_count
         ))
+    } else if !index_complete {
+        Some(format!(
+            "索引中 · 已发现 {}{}",
+            discovered,
+            source_total
+                .map(|t| format!(" / API {t}"))
+                .unwrap_or_default()
+        ))
     } else {
         Some(format!(
-            "{} · {} / {}",
+            "{} · 已归档 {} / {}（失败 {}）",
             if remote.status == "paused" {
                 "已暂停"
             } else {
-                "抓取中"
+                "抓取正文"
             },
-            completed,
-            remote.total_count
+            remote.success_count,
+            remote.total_count,
+            remote.failed_count
         ))
     };
-    let index_complete = remote.index_status_is_complete();
     let task_id = remote.id;
     let author_id = remote.author_id;
     let now = chrono::Utc::now().to_rfc3339();
+    let checkpoint_at = remote
+        .index_checkpoint_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.get("lastHeartbeatAt").and_then(|v| v.as_i64()))
+        .map(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| now.clone())
+        });
     TaskSnapshot {
         id: task_id,
         kind: TaskKind::Zhihu,
@@ -379,11 +426,19 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
                 ProgressMode::Indeterminate
             },
             percent,
-            completed_units: Some(completed),
-            total_units: Some(remote.total_count),
+            completed_units: Some(if index_complete {
+                completed
+            } else {
+                discovered
+            }),
+            total_units: Some(if remote.total_count > 0 {
+                remote.total_count
+            } else {
+                discovered
+            }),
             label,
             unit: Some("篇".to_string()),
-            source_total_units: None,
+            source_total_units: source_total,
             skipped_units: None,
         },
         error_code: if remote.status == "failed" {
@@ -397,11 +452,7 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
             None
         },
         retry_after_seconds: None,
-        engine_stage: if index_complete {
-            "content".to_string()
-        } else {
-            "index".to_string()
-        },
+        engine_stage: stage.to_string(),
         engine_status: remote.status.clone(),
         recoverable: !matches!(remote.status.as_str(), "success"),
         can_pause: remote.status == "running",
@@ -418,14 +469,7 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
         created_at: now.clone(),
         updated_at: now.clone(),
         last_heartbeat_at: Some(now.clone()),
-        checkpoint_at: Some(now),
-    }
-}
-
-impl RemoteTask {
-    fn index_status_is_complete(&self) -> bool {
-        self.total_count > 0
-            && self.success_count.saturating_add(self.failed_count) >= self.total_count
+        checkpoint_at: checkpoint_at.or(Some(now)),
     }
 }
 
@@ -608,6 +652,10 @@ mod tests {
             total_count: 5,
             success_count: 4,
             failed_count: 1,
+            index_status: Some("complete".to_string()),
+            source_reported_count: Some(6),
+            discovered_count: Some(5),
+            index_checkpoint_json: None,
         });
         assert_eq!(snapshot.lifecycle_state, LifecycleState::Terminal);
         assert_eq!(snapshot.outcome, TaskOutcome::PartialSuccess);
@@ -616,6 +664,7 @@ mod tests {
         assert_eq!(snapshot.book_id.as_deref(), Some("zhihu:author_1"));
         assert!(snapshot.last_heartbeat_at.is_some());
         assert_eq!(snapshot.progress.unit.as_deref(), Some("篇"));
+        assert_eq!(snapshot.progress.source_total_units, Some(6));
     }
 
     #[test]
@@ -627,12 +676,45 @@ mod tests {
             total_count: 122,
             success_count: 90,
             failed_count: 0,
+            index_status: Some("complete".to_string()),
+            source_reported_count: Some(150),
+            discovered_count: Some(122),
+            index_checkpoint_json: None,
         });
         assert_eq!(snapshot.lifecycle_state, LifecycleState::Running);
         assert!(snapshot.can_pause);
         assert!(!snapshot.can_resume);
         assert_eq!(snapshot.progress.completed_units, Some(90));
         assert_eq!(snapshot.progress.total_units, Some(122));
+        assert_eq!(snapshot.progress.source_total_units, Some(150));
+        assert_eq!(snapshot.engine_stage, "content");
         assert!(snapshot.last_heartbeat_at.is_some());
+    }
+
+    #[test]
+    fn maps_index_phase_using_discovered_and_api_totals() {
+        let snapshot = remote_snapshot(RemoteTask {
+            id: "task_author_3_1".to_string(),
+            author_id: "author_3".to_string(),
+            status: "running".to_string(),
+            total_count: 0,
+            success_count: 0,
+            failed_count: 0,
+            index_status: Some("running".to_string()),
+            source_reported_count: Some(200),
+            discovered_count: Some(90),
+            index_checkpoint_json: Some(
+                r#"{"isEnd":false,"discovered":90,"totals":200,"lastHeartbeatAt":0}"#.to_string(),
+            ),
+        });
+        assert_eq!(snapshot.engine_stage, "index");
+        assert_eq!(snapshot.progress.completed_units, Some(90));
+        assert_eq!(snapshot.progress.source_total_units, Some(200));
+        assert!(snapshot
+            .progress
+            .label
+            .as_deref()
+            .unwrap_or_default()
+            .contains("已发现 90"));
     }
 }

@@ -4,7 +4,7 @@ import * as path from 'path';
 import { logger } from './utils.js';
 import { resolveDatabasePath } from './runtime-paths.js';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 let db: DatabaseSync | null = null;
 let transactionDepth = 0;
 
@@ -56,6 +56,9 @@ function createSchema(database: DatabaseSync) {
       total_count INTEGER NOT NULL DEFAULT 0,
       success_count INTEGER NOT NULL DEFAULT 0,
       failed_count INTEGER NOT NULL DEFAULT 0,
+      index_checkpoint_json TEXT,
+      source_reported_count INTEGER,
+      discovered_count INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -308,8 +311,24 @@ export interface Task {
   total_count: number;
   success_count: number;
   failed_count: number;
+  /** JSON: { contentType, next, isEnd, pagesSeen, discovered, totals, lastHeartbeatAt } */
+  index_checkpoint_json: string | null;
+  source_reported_count: number | null;
+  discovered_count: number;
   created_at: number;
   updated_at: number;
+}
+
+export interface IndexCheckpoint {
+  contentType?: 'answers' | 'articles' | 'all';
+  next?: string | null;
+  isEnd?: boolean;
+  pagesSeen?: number;
+  discovered?: number;
+  totals?: number | null;
+  stage?: string;
+  statusMessage?: string;
+  lastHeartbeatAt?: number;
 }
 
 export interface Item {
@@ -368,7 +387,40 @@ export function initDb(dbPath?: string) {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   migrateToV1(db, absolutePath);
+  migrateToV3(db, absolutePath);
   db.exec('PRAGMA foreign_keys = ON');
+}
+
+/** Incremental columns for index checkpoints (v2 → v3). Idempotent by column presence. */
+function migrateToV3(database: DatabaseSync, absolutePath: string) {
+  if (!tableExists(database, 'tasks')) {
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    return;
+  }
+  const columns = database.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>;
+  const names = new Set(columns.map((c) => c.name));
+  const needs =
+    !names.has('index_checkpoint_json') ||
+    !names.has('source_reported_count') ||
+    !names.has('discovered_count');
+  if (!needs) {
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    return;
+  }
+  const versionRow = database.prepare('PRAGMA user_version').all()[0] as any;
+  const version = Number(versionRow?.user_version || 0);
+  backupDatabaseIfNeeded(absolutePath, `schema-v${version}-to-v3-index-checkpoint`);
+  if (!names.has('index_checkpoint_json')) {
+    database.exec('ALTER TABLE tasks ADD COLUMN index_checkpoint_json TEXT');
+  }
+  if (!names.has('source_reported_count')) {
+    database.exec('ALTER TABLE tasks ADD COLUMN source_reported_count INTEGER');
+  }
+  if (!names.has('discovered_count')) {
+    database.exec('ALTER TABLE tasks ADD COLUMN discovered_count INTEGER NOT NULL DEFAULT 0');
+  }
+  database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  logger.info('数据库已升级到 schema v3（index_checkpoint / discovered_count）。');
 }
 
 export function closeDb() {
@@ -412,9 +464,11 @@ export function saveTask(task: Partial<Task> & { id: string }) {
       INSERT INTO tasks (
         id, input_url, author_id, author_name, item_types, output_dir,
         sort_by, top_n, status, index_status, index_completed_at,
-        total_count, success_count, failed_count, created_at, updated_at
+        total_count, success_count, failed_count,
+        index_checkpoint_json, source_reported_count, discovered_count,
+        created_at, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       )
     `);
     stmt.run(...cleanParams([
@@ -432,6 +486,9 @@ export function saveTask(task: Partial<Task> & { id: string }) {
       task.total_count || 0,
       task.success_count || 0,
       task.failed_count || 0,
+      task.index_checkpoint_json !== undefined ? task.index_checkpoint_json : null,
+      task.source_reported_count !== undefined ? task.source_reported_count : null,
+      task.discovered_count || 0,
       task.created_at || now,
       task.updated_at || now
     ]));
@@ -597,6 +654,88 @@ function archiveSuccessfulTaskItem(database: DatabaseSync, taskItem: TaskItem, o
   ).run(revision, taskItem.updated_at, item.id);
 }
 
+function writeIndexItem(taskId: string, item: IndexItemInput, now: number) {
+  saveItem({
+    id: item.id,
+    item_type: item.type,
+    author_id: item.authorId,
+    author_name: item.authorName,
+    title: item.title,
+    answer_id: item.type === 'answer' ? item.id.split(':')[1] : null,
+    question_id: item.type === 'answer' ? item.questionId || null : null,
+    article_id: item.type === 'article' ? item.id.split(':')[1] : null,
+    url: item.url,
+    question_url: item.type === 'answer' ? item.questionUrl || null : null,
+    created_time: item.createdTime,
+    updated_time: item.updatedTime,
+    voteup_count: item.voteupCount,
+    comment_count: item.commentCount
+  });
+
+  // Keep successful rows; only insert missing task_items as pending.
+  const existing = getDb()
+    .prepare('SELECT status FROM task_items WHERE task_id = ? AND item_id = ?')
+    .all(taskId, item.id) as Array<{ status: string }>;
+  if (existing.length > 0) return;
+  saveTaskItem({
+    task_id: taskId,
+    item_id: item.id,
+    status: 'pending',
+    output_path: null,
+    failure_code: null,
+    error_message: null,
+    created_at: now,
+    updated_at: now
+  });
+}
+
+/** Upsert discovered index items without wiping already-success content rows. */
+export function upsertTaskIndexItems(
+  taskId: string,
+  authorName: string,
+  items: IndexItemInput[],
+  checkpoint?: IndexCheckpoint | null
+) {
+  const now = Date.now();
+  runInTransaction(() => {
+    saveTask({
+      id: taskId,
+      author_name: authorName,
+      index_status: 'running',
+      discovered_count: items.length,
+      source_reported_count:
+        checkpoint?.totals !== undefined && checkpoint?.totals !== null
+          ? checkpoint.totals
+          : undefined,
+      index_checkpoint_json: checkpoint ? JSON.stringify(checkpoint) : undefined
+    });
+    for (const item of items) {
+      writeIndexItem(taskId, item, now);
+    }
+    refreshTaskCounts(taskId);
+  });
+}
+
+export function saveIndexCheckpoint(taskId: string, checkpoint: IndexCheckpoint) {
+  saveTask({
+    id: taskId,
+    index_checkpoint_json: JSON.stringify(checkpoint),
+    discovered_count: checkpoint.discovered ?? undefined,
+    source_reported_count:
+      checkpoint.totals !== undefined && checkpoint.totals !== null ? checkpoint.totals : undefined
+  });
+}
+
+export function readIndexCheckpoint(taskId: string): IndexCheckpoint | null {
+  const task = getTask(taskId);
+  if (!task?.index_checkpoint_json) return null;
+  try {
+    return JSON.parse(task.index_checkpoint_json) as IndexCheckpoint;
+  } catch {
+    return null;
+  }
+}
+
 export function replaceTaskIndex(taskId: string, authorName: string, items: IndexItemInput[]) {
   const database = getDb();
   const now = Date.now();
@@ -611,40 +750,22 @@ export function replaceTaskIndex(taskId: string, authorName: string, items: Inde
     database.prepare('DELETE FROM task_items WHERE task_id = ?').run(taskId);
 
     for (const item of items) {
-      saveItem({
-        id: item.id,
-        item_type: item.type,
-        author_id: item.authorId,
-        author_name: item.authorName,
-        title: item.title,
-        answer_id: item.type === 'answer' ? item.id.split(':')[1] : null,
-        question_id: item.type === 'answer' ? item.questionId || null : null,
-        article_id: item.type === 'article' ? item.id.split(':')[1] : null,
-        url: item.url,
-        question_url: item.type === 'answer' ? item.questionUrl || null : null,
-        created_time: item.createdTime,
-        updated_time: item.updatedTime,
-        voteup_count: item.voteupCount,
-        comment_count: item.commentCount
-      });
-
-      saveTaskItem({
-        task_id: taskId,
-        item_id: item.id,
-        status: 'pending',
-        output_path: null,
-        failure_code: null,
-        error_message: null,
-        created_at: now,
-        updated_at: now
-      });
+      writeIndexItem(taskId, item, now);
     }
 
     refreshTaskCounts(taskId);
     saveTask({
       id: taskId,
       index_status: 'complete',
-      index_completed_at: now
+      index_completed_at: now,
+      discovered_count: items.length,
+      index_checkpoint_json: JSON.stringify({
+        isEnd: true,
+        discovered: items.length,
+        stage: 'content',
+        statusMessage: '索引完成',
+        lastHeartbeatAt: now
+      } satisfies IndexCheckpoint)
     });
   });
 }

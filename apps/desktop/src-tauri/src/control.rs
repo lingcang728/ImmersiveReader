@@ -696,18 +696,45 @@ impl ControlDb {
         if stream == "stderr" {
             snapshot.error_message = Some(line.trim().chars().take(500).collect());
         }
+        if let Some(json) = worker_json(line) {
+            if let Some(message) = json.get("message").and_then(|v| v.as_str()) {
+                snapshot.progress.label = Some(message.chars().take(180).collect());
+            } else {
+                snapshot.progress.label = Some(line.trim().chars().take(180).collect());
+            }
+            if let Some(completed) = json.get("completedUnits").and_then(|v| v.as_u64()) {
+                snapshot.progress.completed_units = Some(completed);
+            }
+            if let Some(total) = json.get("totalUnits").and_then(|v| v.as_u64()) {
+                snapshot.progress.total_units = Some(total);
+            }
+            if let Some(unit) = json.get("unit").and_then(|v| v.as_str()) {
+                snapshot.progress.unit = Some(unit.to_string());
+            }
+            if json.get("type").and_then(|v| v.as_str()) == Some("checkpoint") {
+                snapshot.checkpoint_at = Some(now.clone());
+            }
+        } else {
+            snapshot.progress.label = Some(line.trim().chars().take(180).collect());
+        }
         if let Some(percent) = worker_percent(line) {
             snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
             snapshot.progress.percent = Some(percent);
         }
-        snapshot.progress.label = Some(line.trim().chars().take(180).collect());
         snapshot.updated_at = now.clone();
+        let event_type = worker_json(line)
+            .and_then(|json| {
+                json.get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|t| format!("worker_{t}"))
+            })
+            .unwrap_or_else(|| format!("worker_{stream}"));
         let event = TaskEvent {
             schema_version: 1,
             task_id: snapshot.id.clone(),
             sequence: snapshot.last_sequence,
             revision: snapshot.revision,
-            event_type: format!("worker_{stream}"),
+            event_type,
             snapshot,
             created_at: now,
         };
@@ -920,7 +947,22 @@ fn task_kind_for_engine(engine: &str) -> Result<TaskKind, String> {
     }
 }
 
+fn worker_json(line: &str) -> Option<serde_json::Value> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(trimmed).ok()
+}
+
 fn worker_percent(line: &str) -> Option<f64> {
+    if let Some(value) = worker_json(line) {
+        if let Some(percent) = value.get("percent").and_then(|v| v.as_f64()) {
+            if percent.is_finite() {
+                return Some(percent.clamp(0.0, 100.0));
+            }
+        }
+    }
     let bytes = line.as_bytes();
     for start in 0..bytes.len() {
         if bytes[start] != b'%' {
@@ -942,6 +984,23 @@ fn worker_percent(line: &str) -> Option<f64> {
 }
 
 fn worker_stage(line: &str) -> String {
+    if let Some(value) = worker_json(line) {
+        if let Some(stage) = value
+            .get("stage")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return stage.to_string();
+        }
+        if let Some(event_type) = value.get("type").and_then(|v| v.as_str()) {
+            match event_type {
+                "progress" | "heartbeat" | "checkpoint" | "completed" | "fatal" => {
+                    return event_type.to_string();
+                }
+                _ => {}
+            }
+        }
+    }
     let lower = line.to_ascii_lowercase();
     for (needle, stage) in [
         ("normaliz", "normalizing"),
@@ -950,6 +1009,9 @@ fn worker_stage(line: &str) -> String {
         ("writ", "writing_output"),
         ("postprocess", "postprocess"),
         ("transcrib", "transcribing"),
+        ("copy", "input_copy"),
+        ("publish", "publish"),
+        ("model", "load_model"),
     ] {
         if lower.contains(needle) {
             return stage.to_string();

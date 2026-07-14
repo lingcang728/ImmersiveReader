@@ -54,7 +54,7 @@ test('legacy manifests become an idempotent archive catalog with provenance', ()
   assert.equal(sha256(markdownPath), originalMarkdownHash);
 
   const verification = new DatabaseSync(database, { readOnly: true });
-  assert.equal((verification.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2);
+  assert.equal((verification.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3);
   assert.equal((verification.prepare('SELECT COUNT(*) AS count FROM archive_authors').get() as { count: number }).count, 1);
   assert.equal((verification.prepare('SELECT COUNT(*) AS count FROM archive_items').get() as { count: number }).count, 1);
   assert.equal((verification.prepare('SELECT COUNT(*) AS count FROM archive_revisions').get() as { count: number }).count, 1);

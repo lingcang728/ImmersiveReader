@@ -265,6 +265,26 @@ pub fn copy_verified_input(
     expected_sha256: &str,
     expected_bytes: u64,
 ) -> Result<VerifiedPodcastInput, String> {
+    copy_verified_input_with_progress(
+        source,
+        locations,
+        task_id,
+        expected_sha256,
+        expected_bytes,
+        None,
+    )
+}
+
+/// Copy source audio into the managed task cache with optional progress callbacks.
+/// Progress is throttled to at most once per 250ms or every +1% of total bytes.
+pub fn copy_verified_input_with_progress(
+    source: &Path,
+    locations: &StorageLocations,
+    task_id: &str,
+    expected_sha256: &str,
+    expected_bytes: u64,
+    mut on_progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<VerifiedPodcastInput, String> {
     validate_task_id(task_id)?;
     let expected_sha256 = validate_sha256(expected_sha256)?;
     let before = fs::metadata(source).map_err(|_| "INPUT_CHANGED".to_string())?;
@@ -297,6 +317,13 @@ pub fn copy_verified_input(
         let mut hasher = Sha256::new();
         let mut copied_bytes = 0_u64;
         let mut buffer = [0_u8; 1024 * 1024];
+        let mut last_report = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(250))
+            .unwrap_or_else(std::time::Instant::now);
+        let mut last_percent = 0_u64;
+        if let Some(callback) = on_progress.as_mut() {
+            callback(0, expected_bytes);
+        }
         loop {
             let read = reader
                 .read(&mut buffer)
@@ -309,6 +336,21 @@ pub fn copy_verified_input(
                 .map_err(|error| error.to_string())?;
             hasher.update(&buffer[..read]);
             copied_bytes = copied_bytes.saturating_add(read as u64);
+            if let Some(callback) = on_progress.as_mut() {
+                let percent = if expected_bytes == 0 {
+                    100
+                } else {
+                    ((copied_bytes.saturating_mul(100)) / expected_bytes).min(100)
+                };
+                if last_report.elapsed() >= std::time::Duration::from_millis(250)
+                    || percent >= last_percent.saturating_add(1)
+                    || copied_bytes >= expected_bytes
+                {
+                    callback(copied_bytes, expected_bytes);
+                    last_report = std::time::Instant::now();
+                    last_percent = percent;
+                }
+            }
         }
         writer.sync_all().map_err(|error| error.to_string())?;
         let actual_sha256 = format!("{:x}", hasher.finalize());
@@ -321,6 +363,9 @@ pub fn copy_verified_input(
             return Err("INPUT_CHANGED".to_string());
         }
         fs::rename(&partial, &final_path).map_err(|error| error.to_string())?;
+        if let Some(callback) = on_progress.as_mut() {
+            callback(copied_bytes, expected_bytes);
+        }
         Ok(VerifiedPodcastInput {
             relative_path: format!("input/{}", file_name.to_string_lossy()),
             input_sha256: actual_sha256,

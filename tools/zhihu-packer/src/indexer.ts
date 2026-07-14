@@ -353,11 +353,19 @@ async function waitForRealContent(page: Page): Promise<void> {
   throw new Error('CAPTCHA_REQUIRED: 触发知乎反爬（zse-ck）拦截，等待后仍未渲染出内容。请在沉浸阅读的知乎获取面板完成人机验证后重试。');
 }
 
+export type IndexProgress = {
+  contentType: 'answers' | 'articles';
+  items: ScrapedIndexItem[];
+  paging: ListPagingState;
+  statusMessage: string;
+};
+
 export async function scrapePeopleIndex(
   page: Page,
   peopleId: string,
   itemType: 'answers' | 'articles',
-  topN: number | null = null
+  topN: number | null = null,
+  onProgress?: (progress: IndexProgress) => void
 ): Promise<ScrapedIndexItem[]> {
   const indexPath = itemType === 'articles' ? 'posts' : itemType;
   const targetUrl = `https://www.zhihu.com/people/${peopleId}/${indexPath}`;
@@ -366,6 +374,15 @@ export async function scrapePeopleIndex(
   const collected: Map<string, ScrapedIndexItem> = new Map();
   const pagingState = emptyPagingState();
   let repeatedCursor = false;
+
+  const notify = (statusMessage: string) => {
+    onProgress?.({
+      contentType: itemType,
+      items: Array.from(collected.values()),
+      paging: { ...pagingState },
+      statusMessage
+    });
+  };
 
   // 1. 监听 API 请求拦截 — 以 paging.is_end / next / totals 为完成主依据
   const handleResponse = async (response: any) => {
@@ -388,6 +405,10 @@ export async function scrapePeopleIndex(
           `列表 API 页 #${pagingState.pagesSeen}: +${merged.added} 条，累计 ${collected.size}` +
             (pagingState.totals !== null ? ` / API total ${pagingState.totals}` : '') +
             (pagingState.isEnd ? '，is_end=true' : '')
+        );
+        notify(
+          `索引 ${itemType}: 已发现 ${collected.size}` +
+            (pagingState.totals !== null ? ` / API ${pagingState.totals}` : '')
         );
       }
     } catch {
@@ -605,6 +626,11 @@ export async function scrapePeopleIndex(
   if (domAdded > 0) {
     logger.info(`从 DOM 中补充解析到 ${domAdded} 条索引。`);
   }
+
+  notify(
+    `索引 ${itemType} 结束 (${stopReason || 'done'}): 已发现 ${collected.size}` +
+      (pagingState.totals !== null ? ` / API ${pagingState.totals}` : '')
+  );
 
   // 4. 返回最终结果并转换成数组
   let result = Array.from(collected.values());

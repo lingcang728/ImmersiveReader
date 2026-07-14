@@ -4,7 +4,7 @@ use crate::tasks::TaskSnapshot;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub(super) struct StoredPreview {
@@ -12,9 +12,9 @@ pub(super) struct StoredPreview {
     pub options: PodcastPreviewOptions,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PodcastPreviewStore {
-    previews: Mutex<HashMap<String, StoredPreview>>,
+    previews: Arc<Mutex<HashMap<String, StoredPreview>>>,
 }
 
 impl PodcastPreviewStore {

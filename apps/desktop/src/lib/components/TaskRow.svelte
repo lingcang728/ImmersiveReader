@@ -84,12 +84,27 @@
 	function formatProgress(task: TaskSnapshot, percent: number | null): string {
 		const completed = task.progress.completedUnits;
 		const total = task.progress.totalUnits;
+		const source = task.progress.sourceTotalUnits;
 		const unit = task.progress.unit ?? '';
-		if (completed != null && total != null && total > 0) {
-			return `${completed}/${total}${unit ? unit : ''}`;
+		const parts: string[] = [];
+		if (source != null && source > 0) {
+			parts.push(`主页/API ${source}${unit}`);
 		}
-		if (percent !== null) return `${Math.round(percent)}%`;
-		return '…';
+		if (completed != null && total != null && total > 0) {
+			if (task.kind === 'zhihu' && task.engineStage === 'index') {
+				parts.push(`已发现 ${completed}${unit}`);
+			} else if (task.kind === 'zhihu') {
+				parts.push(`已归档 ${completed}/${total}${unit}`);
+			} else {
+				parts.push(`${completed}/${total}${unit}`);
+			}
+		} else if (completed != null) {
+			parts.push(`已发现 ${completed}${unit}`);
+		} else if (percent !== null) {
+			parts.push(`${Math.round(percent)}%`);
+		}
+		if (parts.length === 0) return '…';
+		return parts.join(' · ');
 	}
 
 	function formatHeartbeat(value?: string | null): string {
