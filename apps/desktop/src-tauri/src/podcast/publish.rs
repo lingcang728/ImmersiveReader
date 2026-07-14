@@ -154,20 +154,10 @@ fn collect_markdown(
     Ok(())
 }
 
-/// Prefer final polished output/, then fall back to worker internal markdown roots
-/// (raw / bilingual) so a misplaced polish path still publishes usable transcript.
+/// Publish only the managed final draft under output/. Never fall back to
+/// intermediate markdown_bilingual / markdown_raw checkpoints.
 fn resolve_markdown_roots(task_cache_root: &Path) -> Vec<PathBuf> {
-    vec![
-        task_cache_root.join("output"),
-        task_cache_root
-            .join("work")
-            .join("internal")
-            .join("markdown_bilingual"),
-        task_cache_root
-            .join("work")
-            .join("internal")
-            .join("markdown_raw"),
-    ]
+    vec![task_cache_root.join("output")]
 }
 
 fn copy_outputs(
@@ -467,6 +457,107 @@ mod tests {
         );
         assert_eq!(sanitize_podcast_folder_name("..."), "未命名播客");
     }
+
+    #[test]
+    fn publish_fails_when_final_output_missing_without_internal_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "immersive-podcast-publish-no-final-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let locations = StorageLocations {
+            channel: "test".to_string(),
+            settings_path: root.join(r"Settings\settings.json"),
+            data_root: root.join("Data"),
+            cache_root: root.join("Cache"),
+            logs_root: root.join("Logs"),
+            runtime_state_root: root.join("RuntimeState"),
+            backups_root: root.join("Backups"),
+            library_root: root.join("Library"),
+            runtime_root: PathBuf::from("runtime"),
+        };
+        let task_id = "task-no-final";
+        let source_id = "b".repeat(64);
+        let task_root = locations.data_root.join(r"Podcast\Tasks").join(task_id);
+        fs::create_dir_all(&task_root).expect("task root");
+        // Intermediate drafts alone must not publish.
+        let internal = locations
+            .cache_root
+            .join(r"Podcast\Tasks")
+            .join(task_id)
+            .join(r"work\internal\markdown_bilingual");
+        fs::create_dir_all(&internal).expect("internal");
+        fs::write(internal.join("draft.md"), "# Intermediate\n").expect("draft");
+        fs::write(
+            task_root.join("task.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "taskId": task_id,
+                "input": {"relativePath": "input/source.mp3", "inputSha256": source_id, "bytes": 12},
+                "compatibility": {"engineVersion": "engine-hash"},
+                "publish": {"bookId": format!("podcast:{source_id}"), "sourceId": source_id, "revision": 1, "incomingRelativePath": ".incoming/task-no-final"}
+            }))
+            .expect("serialize"),
+        )
+        .expect("write task");
+        acquire_podcast_cache_lease(&locations, task_id, "queued", 12).expect("lease");
+        let now = "2026-07-12T00:00:00Z".to_string();
+        let snapshot = TaskSnapshot {
+            id: task_id.to_string(),
+            kind: TaskKind::Podcast,
+            revision: 1,
+            last_sequence: 1,
+            lifecycle_state: LifecycleState::Queued,
+            outcome: TaskOutcome::None,
+            required_action: RequiredAction::None,
+            progress: TaskProgress {
+                mode: ProgressMode::Indeterminate,
+                percent: None,
+                completed_units: None,
+                total_units: None,
+                label: None,
+                unit: None,
+                source_total_units: None,
+                skipped_units: None,
+            },
+            error_code: None,
+            error_message: None,
+            retry_after_seconds: None,
+            engine_stage: "queued".to_string(),
+            engine_status: "waiting".to_string(),
+            recoverable: true,
+            can_pause: false,
+            can_resume: false,
+            can_retry: false,
+            can_cancel: true,
+            book_id: Some(format!("podcast:{source_id}")),
+            source_id: Some(source_id),
+            cache_lease_bytes: 12,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            last_heartbeat_at: None,
+            checkpoint_at: None,
+        };
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: task_id.to_string(),
+            sequence: 1,
+            revision: 1,
+            event_type: "queued".to_string(),
+            snapshot,
+            created_at: now,
+        };
+        let mut control = ControlDb::open(&locations.data_root.join(r"App\control.db")).expect("db");
+        control.persist_task_event(&event).expect("persist");
+        let err = publish_task_result_at(&mut control, &locations, task_id).expect_err("must fail");
+        assert!(
+            err.contains("PUBLISH_FAILED")
+                && (err.contains("no Markdown output") || err.contains("output directory is missing")),
+            "unexpected error: {err}"
+        );
+        drop(control);
+        let _ = fs::remove_dir_all(root);
+    }
     use crate::cache::{acquire_podcast_cache_lease, read_podcast_recovery};
     use crate::control::ControlDb;
     use crate::storage::StorageLocations;
@@ -498,15 +589,15 @@ mod tests {
         let source_id = "a".repeat(64);
         let task_root = locations.data_root.join(r"Podcast\Tasks").join(task_id);
         fs::create_dir_all(&task_root).expect("task root must exist");
-        // Prefer final output/, but also verify internal fallback works when output/ is empty.
-        let internal = locations
+        // Only managed final output/ is publishable — intermediate drafts are ignored.
+        let final_output = locations
             .cache_root
             .join(r"Podcast\Tasks")
             .join(task_id)
-            .join(r"work\internal\markdown_raw");
-        fs::create_dir_all(&internal).expect("internal root must exist");
-        fs::write(internal.join("result.md"), "# Result\n\nPublished")
-            .expect("internal markdown must write");
+            .join("output");
+        fs::create_dir_all(&final_output).expect("output root must exist");
+        fs::write(final_output.join("result.md"), "# Result\n\nPublished")
+            .expect("final markdown must write");
         fs::write(
             task_root.join("task.json"),
             serde_json::to_vec_pretty(&json!({

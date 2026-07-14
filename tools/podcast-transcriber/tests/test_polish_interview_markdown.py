@@ -11,7 +11,7 @@ import polish_interview_markdown as pim  # noqa: E402
 import transcribe_podcasts as tp  # noqa: E402
 
 
-def test_final_quality_counts_logical_blocks_when_translation_has_multiple_paragraphs() -> None:
+def test_final_quality_counts_only_missing_en_translations() -> None:
     turns = [
         {
             "speaker": "主持人",
@@ -21,18 +21,22 @@ def test_final_quality_counts_logical_blocks_when_translation_has_multiple_parag
             "translation": "这是第一段。\n\n这是同一个说话块里的第二段。",
             "is_sponsor": False,
             "needs_polish": False,
+            "languageClass": "en",
         }
     ]
     rendered_blocks = pim.merge_same_speaker_blocks(turns)
     markdown = (
-        "**采访者：** 这是第一段。\n\n"
-        "**采访者：** 这是同一个说话块里的第二段。\n\n"
-        "> 采访者: This is one original block.\n"
+        "# sample\n\n"
+        "### 00:00:00\n\n"
+        "This is one original block.\n\n"
+        "这是第一段。\n\n"
+        "这是同一个说话块里的第二段。\n"
     )
 
     errors = pim.final_quality_errors(markdown, turns, True, 700, rendered_blocks=rendered_blocks)
 
     assert "Chinese and English block counts are badly mismatched" not in errors
+    assert not any("missing translation" in error for error in errors)
 
 
 def test_chinese_turn_builder_uses_chinese_speaker_rules() -> None:
@@ -51,6 +55,7 @@ def test_chinese_turn_builder_uses_chinese_speaker_rules() -> None:
     assert "嘉宾" in speakers
     assert speakers != {"说话人待校对"}
     assert all(len(turn["original"]) < 260 for turn in turns)
+    assert all(turn.get("languageClass") == "zh" for turn in turns)
 
 
 def test_disabled_deepseek_polish_does_not_require_api_key() -> None:
@@ -64,6 +69,7 @@ def test_disabled_deepseek_polish_does_not_require_api_key() -> None:
             "translation": "",
             "is_sponsor": False,
             "needs_polish": True,
+            "languageClass": "zh",
         }
     ]
     config = {
@@ -81,6 +87,7 @@ def test_disabled_deepseek_polish_does_not_require_api_key() -> None:
     markdown = pim.render_final_markdown(data, turns, config)
 
     assert "这是一段中文内容。" in markdown
+    assert "### 00:00:00" in markdown
 
 
 def test_batch_polish_applies_to_english_translations(monkeypatch) -> None:
@@ -100,6 +107,7 @@ def test_batch_polish_applies_to_english_translations(monkeypatch) -> None:
             "translation": "这是原始译文。",
             "is_sponsor": False,
             "needs_polish": True,
+            "languageClass": "en",
         }
     ]
     config = {
@@ -117,8 +125,11 @@ def test_batch_polish_applies_to_english_translations(monkeypatch) -> None:
 
     markdown = pim.render_final_markdown(data, turns, config)
 
+    assert "This is the original." in markdown
     assert "批量润色后的中文译文。" in markdown
-    assert "> 采访者: This is the original." in markdown
+    en_pos = markdown.index("This is the original.")
+    zh_pos = markdown.index("批量润色后的中文译文。")
+    assert en_pos < zh_pos
 
 
 def test_batch_polish_applies_to_chinese_originals(monkeypatch) -> None:
@@ -138,6 +149,7 @@ def test_batch_polish_applies_to_chinese_originals(monkeypatch) -> None:
             "translation": "",
             "is_sponsor": False,
             "needs_polish": True,
+            "languageClass": "zh",
         }
     ]
     config = {
@@ -158,7 +170,7 @@ def test_batch_polish_applies_to_chinese_originals(monkeypatch) -> None:
     assert "批量润色后的中文原文。" in markdown
 
 
-def test_speaker_labels_disabled_renders_plain_paragraphs() -> None:
+def test_final_markdown_plain_paragraphs_without_speaker_labels() -> None:
     data = {"source_file": "english.wav", "detected_language": "en"}
     turns = [
         {
@@ -169,6 +181,7 @@ def test_speaker_labels_disabled_renders_plain_paragraphs() -> None:
             "translation": "这是中文译文。",
             "is_sponsor": False,
             "needs_polish": False,
+            "languageClass": "en",
         },
         {
             "speaker": "嘉宾",
@@ -178,11 +191,11 @@ def test_speaker_labels_disabled_renders_plain_paragraphs() -> None:
             "translation": "这是回答译文。",
             "is_sponsor": False,
             "needs_polish": False,
+            "languageClass": "en",
         },
     ]
     config = {
         "markdown": {
-            "speaker_labels_enabled": False,
             "llm_polish": {"enabled": False},
         }
     }
@@ -190,20 +203,37 @@ def test_speaker_labels_disabled_renders_plain_paragraphs() -> None:
     markdown = pim.render_final_markdown(data, turns, config)
 
     assert "这是中文译文。" in markdown
-    assert "> This is the original question." in markdown
+    assert "This is the original question." in markdown
     assert "**采访者" not in markdown
     assert "**受访者" not in markdown
     assert "说话人待校对" not in markdown
+    assert "> " not in markdown
 
 
 def test_speaker_labels_disabled_skips_speaker_role_quality_gate() -> None:
     turns = [
-        {"speaker": "主持人", "start": float(i), "end": float(i) + 1, "original": f"Sentence {i}.", "translation": f"句子{i}。", "is_sponsor": False, "needs_polish": False}
+        {
+            "speaker": "主持人",
+            "start": float(i),
+            "end": float(i) + 1,
+            "original": f"Sentence {i}.",
+            "translation": f"句子{i}。",
+            "is_sponsor": False,
+            "needs_polish": False,
+            "languageClass": "en",
+        }
         for i in range(5)
     ]
     rendered_blocks = pim.merge_same_speaker_blocks(turns)
 
-    errors = pim.final_quality_errors("正文。\n", turns, True, 700, rendered_blocks=rendered_blocks, require_speaker_roles=False)
+    errors = pim.final_quality_errors(
+        "# t\n\n### 00:00:00\n\nSentence 0.\n\n句子0。\n",
+        turns,
+        True,
+        700,
+        rendered_blocks=rendered_blocks,
+        require_speaker_roles=False,
+    )
 
     assert "speaker inference produced fewer than two speaker roles" not in errors
 

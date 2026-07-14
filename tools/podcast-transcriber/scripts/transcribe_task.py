@@ -150,6 +150,11 @@ def main() -> int:
     from deepseek_pricing import PodcastBudgetExceededError, PodcastUpstreamError, classify_upstream_error
 
     options = spec.get("options") or {}
+    # Force-apply TaskSpec.options.translate into the runtime translation gate.
+    # false: never call the translation service (local normalize + polish still run).
+    # true: translate only non-Chinese (en/mixed) segments.
+    if "translate" in options:
+        os.environ["PODCAST_TRANSCRIBER_FORCE_TRANSLATE"] = "1" if options.get("translate") else "0"
     budget_limit = options.get("budgetLimitCny", options.get("maxApiCostCny"))
     try:
         budget_limit_value = float(budget_limit)

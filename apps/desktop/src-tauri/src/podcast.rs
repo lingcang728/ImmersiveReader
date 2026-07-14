@@ -929,17 +929,13 @@ mod tests {
             .join(task_id);
         fs::create_dir_all(&task_root).expect("task root");
         fs::create_dir_all(cache_root.join("input")).expect("input root");
-        fs::create_dir_all(cache_root.join("output")).expect("empty output root");
-        let bilingual = cache_root
-            .join("work")
-            .join("internal")
-            .join("markdown_bilingual");
-        fs::create_dir_all(&bilingual).expect("bilingual root");
+        let final_output = cache_root.join("output");
+        fs::create_dir_all(&final_output).expect("final output root");
         fs::write(
-            bilingual.join("episode.bilingual.md"),
+            final_output.join("episode.md"),
             "# Huberman\n\nTranscript body",
         )
-        .expect("markdown");
+        .expect("final markdown");
         let input = b"retry-audio-bytes";
         fs::write(cache_root.join("input").join("episode.mp3"), input).expect("input");
         let input_sha256 = format!("{:x}", Sha256::digest(input));

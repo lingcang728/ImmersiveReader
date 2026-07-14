@@ -432,9 +432,16 @@ MIXED_SPONSOR_TAILS = (
 BAD_FINAL_PATTERNS = (
     r"\{['\"][^'\"]+['\"]\s*:",
     r"\[TRANSLATION_MISSING\]",
+    r"翻译缺失",
     r"应保留或译为",
     r"Here (?:is|are) the translation",
     r"Translated text",
+    r"(?im)^Original:\s*$",
+    r"(?im)^Translation:\s*$",
+    r"(?i)[A-Za-z]:\\[^\s]+",  # absolute Windows paths
+    r"(?i)/Users/[^\s]+",
+    r"(?i)faster-whisper",
+    r"(?i)models[/\\]",
 )
 
 ZH_RESPONSE_STARTERS = (
@@ -1346,11 +1353,16 @@ def polish_source_context(data: dict[str, Any]) -> str:
 
 
 def block_text_for_polish(block: dict[str, Any], is_english: bool) -> str:
-    return (
-        sentence_join([t for t in block.get("translations", []) if t])
-        if is_english
-        else original_join([t for t in block.get("originals", []) if t])
-    )
+    language_class = block.get("languageClass")
+    prefer_translation = language_class in {"en", "mixed"} if language_class else is_english
+    if prefer_translation:
+        translated = sentence_join([t for t in block.get("translations", []) if t])
+        if translated:
+            return translated
+    originals = [t for t in block.get("originals", []) if t]
+    if language_class == "zh":
+        return chinese_original_join(originals)
+    return original_join(originals)
 
 
 def polish_need_score(block: dict[str, Any], is_english: bool) -> int:
@@ -1394,7 +1406,9 @@ def select_polish_targets(
 
     scored: list[tuple[int, int, dict[str, Any]]] = []
     for idx, block in enumerate(blocks):
-        score = polish_need_score(block, is_english)
+        language_class = str(block.get("languageClass") or "")
+        block_is_english = language_class in {"en", "mixed"} if language_class else is_english
+        score = polish_need_score(block, block_is_english)
         if only_suspect_llm_blocks and score <= 0:
             continue
         if not only_suspect_llm_blocks and score <= 0:
@@ -1553,34 +1567,46 @@ def should_add_break(text: str) -> bool:
 
 
 def build_turns(segments: list[dict[str, Any]], detected_language: str | None = None) -> list[dict[str, Any]]:
+    from podcast_transcriber.language import assign_language_classes, classify_segment_language
+
     turns: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     previous_speaker = "主持人"
     after_host_question = False
     sponsor_until = -1.0
-    lang = inferred_language(segments, detected_language)
+    prepared = assign_language_classes([dict(segment) for segment in segments], detected_language)
+    lang = inferred_language(prepared, detected_language)
     is_english = lang == "en"
 
-    def joined_original(parts: list[str]) -> str:
-        return original_join(parts) if is_english else chinese_original_join(parts)
+    def joined_original(parts: list[str], language_class: str) -> str:
+        if language_class == "zh":
+            return chinese_original_join(parts)
+        return original_join(parts)
 
     def finish_current() -> None:
         nonlocal current
         if not current:
             return
-        current["original"] = joined_original(current.pop("original_parts"))
+        language_class = str(current.get("languageClass") or "en")
+        current["original"] = joined_original(current.pop("original_parts"), language_class)
         current["translation"] = sentence_join(current.pop("translation_parts"))
         turns.append(current)
         current = None
 
-    for segment in split_mixed_dialogue_segments(split_mixed_sponsor_segments(segments)):
+    for segment in split_mixed_dialogue_segments(split_mixed_sponsor_segments(prepared)):
         original = clean_text(str(segment.get("text", "")))
         translation = clean_text(str(segment.get("translation", ""))) if segment.get("translation") else ""
         if not original:
             continue
 
+        language_class = str(
+            segment.get("languageClass")
+            or classify_segment_language(original)
+            or ("en" if is_english else "zh")
+        )
         start = float(segment.get("start", 0))
         end = float(segment.get("end", start))
+        section_bucket = int(start // 600) * 600
         sponsor_hit = is_sponsor_text(original)
         lower_for_sponsor = original.lower()
         if lower_for_sponsor.startswith(
@@ -1603,35 +1629,47 @@ def build_turns(segments: list[dict[str, Any]], detected_language: str | None = 
             else:
                 sponsor_until = start + sponsor_window_seconds(original)
         is_sponsor_segment = sponsor_hit or start <= sponsor_until
+        segment_is_english = language_class in {"en", "mixed"}
         if is_sponsor_segment:
             speaker = "主持人"
-        elif is_english:
+        elif segment_is_english:
             speaker = infer_speaker_from_original(original, previous_speaker, after_host_question)
         else:
             speaker = infer_speaker(original, previous_speaker, after_host_question, intro=start < 45)
 
-        max_chars = 900 if is_english and speaker == "嘉宾" else 520 if is_english else 420 if speaker == "嘉宾" else 280
+        max_chars = (
+            700
+            if language_class in {"en", "mixed"}
+            else 420
+        )
         gap = 0 if current is None else start - float(current["end"])
         continued_previous = (
-            is_english
+            segment_is_english
             and (not sponsor_hit)
             and current is not None
             and speaker == current.get("speaker")
+            and current.get("languageClass") == language_class
+            and int(float(current["start"]) // 600) * 600 == section_bucket
             and should_continue_previous_turn(current, original, gap, previous_speaker)
         )
         if continued_previous:
             speaker = str(current["speaker"])
             is_sponsor_segment = bool(current.get("is_sponsor", is_sponsor_segment))
-            max_chars = 900 if speaker == "嘉宾" else 520
-        current_len = len(joined_original(current.get("original_parts", []))) if current else 0
-        new_question_after_long_turn = (not is_english) and speaker == "主持人" and looks_like_question(original) and current_len > 80
-        new_response_after_question = (not is_english) and after_host_question and speaker == "嘉宾" and current is not None and current.get("speaker") == "主持人"
+        current_len = (
+            len(joined_original(current.get("original_parts", []), str(current.get("languageClass") or language_class)))
+            if current
+            else 0
+        )
+        new_question_after_long_turn = (not segment_is_english) and speaker == "主持人" and looks_like_question(original) and current_len > 80
+        new_response_after_question = (not segment_is_english) and after_host_question and speaker == "嘉宾" and current is not None and current.get("speaker") == "主持人"
         force_new = (
             current is None
             or current["speaker"] != speaker
             or current.get("is_sponsor") != is_sponsor_segment
+            or current.get("languageClass") != language_class
+            or int(float(current["start"]) // 600) * 600 != section_bucket
             or current_len > max_chars
-            or gap > (3.5 if is_english else 2.2)
+            or gap > (3.5 if segment_is_english else 2.2)
             or new_question_after_long_turn
             or new_response_after_question
         )
@@ -1646,6 +1684,7 @@ def build_turns(segments: list[dict[str, Any]], detected_language: str | None = 
                 "translation_parts": [translation] if translation else [],
                 "is_sponsor": is_sponsor_segment,
                 "needs_polish": False,
+                "languageClass": language_class,
             }
         else:
             assert current is not None
@@ -1657,9 +1696,9 @@ def build_turns(segments: list[dict[str, Any]], detected_language: str | None = 
                 current["needs_polish"] = True
 
         previous_speaker = speaker
-        if speaker == "主持人" and (looks_like_english_question(original) if is_english else looks_like_question(original)):
+        if speaker == "主持人" and (looks_like_english_question(original) if segment_is_english else looks_like_question(original)):
             after_host_question = True
-        elif speaker == "嘉宾" and (len(original.split()) > 3 if is_english else len(original) > 8):
+        elif speaker == "嘉宾" and (len(original.split()) > 3 if segment_is_english else len(original) > 8):
             after_host_question = False
 
     finish_current()
@@ -1670,15 +1709,24 @@ def merge_tiny_turns(turns: list[dict[str, Any]], gap_threshold: float = 3.0) ->
     merged: list[dict[str, Any]] = []
     for turn in turns:
         gap = turn["start"] - merged[-1]["end"] if merged else float("inf")
+        same_language = merged and merged[-1].get("languageClass") == turn.get("languageClass")
+        same_section = (
+            merged
+            and int(float(merged[-1]["start"]) // 600) * 600 == int(float(turn["start"]) // 600) * 600
+        )
         if (
             merged
+            and same_language
+            and same_section
             and merged[-1]["speaker"] == turn["speaker"]
             and merged[-1].get("is_sponsor") == turn.get("is_sponsor")
             and len(turn.get("original", "")) < 40
             and len(merged[-1].get("original", "")) < 600
             and gap <= gap_threshold
         ):
-            merged[-1]["original"] = original_join([merged[-1].get("original", ""), turn.get("original", "")])
+            language_class = str(turn.get("languageClass") or "en")
+            join_fn = chinese_original_join if language_class == "zh" else original_join
+            merged[-1]["original"] = join_fn([merged[-1].get("original", ""), turn.get("original", "")])
             merged[-1]["translation"] = sentence_join([merged[-1].get("translation", ""), turn.get("translation", "")])
             merged[-1]["end"] = turn["end"]
             merged[-1]["needs_polish"] = bool(merged[-1].get("needs_polish") or turn.get("needs_polish"))
@@ -1690,16 +1738,25 @@ def merge_tiny_turns(turns: list[dict[str, Any]], gap_threshold: float = 3.0) ->
 def merge_same_speaker_blocks(turns: list[dict[str, Any]], max_combined_chars: int = 1200) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     for turn in turns:
+        language_class = str(turn.get("languageClass") or "en")
+        max_chars = 700 if language_class in {"en", "mixed"} else 420
+        limit = min(max_combined_chars, max_chars)
         combined_original_len = (
             len(" ".join(blocks[-1].get("originals", []))) + len(turn.get("original", ""))
             if blocks
             else 0
         )
+        same_section = (
+            blocks
+            and int(float(blocks[-1]["start"]) // 600) * 600 == int(float(turn["start"]) // 600) * 600
+        )
         if (
             blocks
             and blocks[-1]["speaker"] == turn["speaker"]
             and blocks[-1].get("is_sponsor") == turn.get("is_sponsor")
-            and combined_original_len <= max_combined_chars
+            and blocks[-1].get("languageClass") == language_class
+            and same_section
+            and combined_original_len <= limit
         ):
             blocks[-1]["originals"].append(turn.get("original", ""))
             blocks[-1]["translations"].append(turn.get("translation", ""))
@@ -1715,6 +1772,7 @@ def merge_same_speaker_blocks(turns: list[dict[str, Any]], max_combined_chars: i
                     "translations": [turn.get("translation", "")],
                     "is_sponsor": turn.get("is_sponsor", False),
                     "needs_polish": bool(turn.get("needs_polish", False)),
+                    "languageClass": language_class,
                 }
             )
     return blocks
@@ -1783,91 +1841,101 @@ def final_quality_errors(
     is_english: bool,
     max_paragraph_chars: int,
     rendered_blocks: list[dict[str, Any]] | None = None,
-    require_speaker_roles: bool = True,
+    require_speaker_roles: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     for pattern in BAD_FINAL_PATTERNS:
         if re.search(pattern, markdown, flags=re.IGNORECASE):
             errors.append(f"final markdown contains forbidden pattern: {pattern}")
-    speakers = {turn.get("speaker") for turn in turns if turn.get("speaker") in {"主持人", "嘉宾"}}
-    if require_speaker_roles and is_english and len(speakers) < 2 and len(turns) > 3:
-        errors.append("speaker inference produced fewer than two speaker roles")
-    if is_english:
-        missing = [turn for turn in turns if turn.get("original") and not turn.get("translation") and not turn.get("is_sponsor")]
-        if missing:
-            errors.append(f"{len(missing)} turns are missing translation text")
+    # Missing translations only matter for en/mixed blocks — never Chinese-only.
+    missing = [
+        turn
+        for turn in turns
+        if turn.get("original")
+        and not turn.get("is_sponsor")
+        and str(turn.get("languageClass") or ("en" if is_english else "zh")) in {"en", "mixed"}
+        and not turn.get("translation")
+    ]
+    if missing:
+        errors.append(f"{len(missing)} turns are missing translation text")
     for paragraph in re.split(r"\n\s*\n", markdown):
         if len(paragraph) > max_paragraph_chars * 3:
             errors.append("final markdown contains an extremely long paragraph")
             break
-    if rendered_blocks is not None:
-        zh_blocks = sum(1 for block in rendered_blocks if any(block.get("translations", [])))
-        en_blocks = sum(1 for block in rendered_blocks if any(block.get("originals", [])))
-    else:
-        zh_blocks = len(re.findall(r"^\*\*", markdown, flags=re.MULTILINE))
-        en_blocks = len(re.findall(r"^> ", markdown, flags=re.MULTILINE))
-    if is_english and zh_blocks and en_blocks and abs(zh_blocks - en_blocks) > max(2, zh_blocks // 3):
-        errors.append("Chinese and English block counts are badly mismatched")
     return errors
 
 
 def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], config: dict[str, Any]) -> str:
+    """Produce the managed final draft:
+
+    # title
+    ### HH:MM:SS
+    English paragraph...
+
+    Chinese translation...
+
+    Chinese-only blocks emit polished Chinese only.
+    """
     title = Path(data.get("source_file", "podcast")).stem
     final_config = config.get("markdown") or config.get("final_markdown") or {}
     labels = final_config.get("speaker_labels") or {}
-    # 输出是否带「采访者/受访者」标签；关闭后仅按段落排版（说话人推断仍在内部驱动分段归并）
-    speaker_labels_enabled = bool(final_config.get("speaker_labels_enabled", True))
-    max_paragraph_chars = int(final_config.get("max_paragraph_chars", 700))
-    include_timestamps = bool(final_config.get("include_timestamps", False))
-    sponsor_mode = str(final_config.get("sponsor_mode", "section")).lower()
+    en_max_chars = int(final_config.get("max_paragraph_chars", 700))
+    zh_max_chars = int(final_config.get("zh_max_paragraph_chars", 420))
+    sponsor_mode = str(final_config.get("sponsor_mode", "drop")).lower()
     if sponsor_mode not in {"keep", "section", "drop"}:
-        sponsor_mode = "section"
+        sponsor_mode = "drop"
     lang = str(data.get("detected_language") or "").lower().split("-")[0]
     is_english = lang == "en"
-    if not is_english and max_paragraph_chars > 520:
-        max_paragraph_chars = int(final_config.get("zh_max_paragraph_chars", 420))
-    language_label = "English" if is_english else "中文" if lang == "zh" else (data.get("detected_language") or "未知")
-    output_type = "中英对照采访稿" if is_english else "中文采访稿"
     render_turns = [turn for turn in turns if not (sponsor_mode == "drop" and turn.get("is_sponsor"))]
-    merge_limit = 1200 if is_english else int(final_config.get("zh_merge_chars", 420))
-    blocks = merge_same_speaker_blocks(render_turns, max_combined_chars=merge_limit) if final_config.get("merge_same_speaker", True) else [
-        {
-            "speaker": turn["speaker"],
-            "start": turn["start"],
-            "end": turn["end"],
-            "originals": [turn.get("original", "")],
-            "translations": [turn.get("translation", "")],
-            "is_sponsor": turn.get("is_sponsor", False),
-            "needs_polish": bool(turn.get("needs_polish", False)),
-        }
-        for turn in render_turns
-    ]
+    for turn in render_turns:
+        if not turn.get("languageClass"):
+            from podcast_transcriber.language import classify_segment_language
+
+            turn["languageClass"] = classify_segment_language(str(turn.get("original", ""))) or (
+                "en" if is_english else "zh"
+            )
+    merge_limit = max(en_max_chars, zh_max_chars)
+    blocks = (
+        merge_same_speaker_blocks(render_turns, max_combined_chars=merge_limit)
+        if final_config.get("merge_same_speaker", True)
+        else [
+            {
+                "speaker": turn["speaker"],
+                "start": turn["start"],
+                "end": turn["end"],
+                "originals": [turn.get("original", "")],
+                "translations": [turn.get("translation", "")],
+                "is_sponsor": turn.get("is_sponsor", False),
+                "needs_polish": bool(turn.get("needs_polish", False)),
+                "languageClass": turn.get("languageClass", "en" if is_english else "zh"),
+            }
+            for turn in render_turns
+        ]
+    )
     llm_config = dict(final_config.get("llm_polish") or {})
     use_llm = bool(llm_config.get("enabled", False))
     only_suspect_llm_blocks = bool(llm_config.get("only_suspect_blocks", True))
     global_polish_context = polish_source_context(data)
 
+    # Polish uses Chinese text for zh blocks and translations for en/mixed.
+    # Prefer translations for en/mixed blocks and originals for zh (via languageClass).
     polish_targets = select_polish_targets(
         blocks,
-        is_english,
+        any(str(block.get("languageClass")) in {"en", "mixed"} for block in blocks) or is_english,
         use_llm,
         only_suspect_llm_blocks,
         llm_config,
     )
 
-    polished_texts = {}
+    polished_texts: dict[int, str] = {}
     serial_polished = 0
-    backend = ""
     if use_llm and polish_targets:
         _report_polish_progress(0, len(polish_targets))
         backend = effective_provider_name(llm_config)
         if backend == "deepseek":
             batch_blocks_limit = int(llm_config.get("batch_blocks", 8))
             max_batch_chars = int(llm_config.get("max_batch_chars", 12000))
-            if not is_english:
-                batch_blocks_limit = min(batch_blocks_limit, int(llm_config.get("zh_batch_blocks", 4)))
-                max_batch_chars = min(max_batch_chars, int(llm_config.get("zh_max_batch_chars", 5000)))
-            batches = _build_polish_batches(polish_targets, batch_blocks_limit, max_batch_chars, is_english)
+            batches = _build_polish_batches(polish_targets, batch_blocks_limit, max_batch_chars, True)
             for batch in batches:
                 batch_blocks = [item[1] for item in batch]
                 batch_indices = [item[0] for item in batch]
@@ -1876,29 +1944,20 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
                         batch_blocks,
                         labels,
                         llm_config,
-                        is_english,
+                        True,
                         blocks,
                         batch_indices,
                         global_context=global_polish_context,
                     )
-                    for idx, t in results.items():
-                        if t:
-                            polished_texts[idx] = t
+                    for idx, text in results.items():
+                        if text:
+                            polished_texts[idx] = text
                 except Exception as e:
                     logger.warning("Batch polish request failed, falling back to individual polish: %s", e)
                 _report_polish_progress(len(polished_texts), len(polish_targets))
 
-    lines = [
-        f"# {title}",
-        "",
-        f"> 来源音频：{data.get('source_file', '')}",
-        f"> 识别语言：{language_label}",
-        f"> 输出类型：{output_type}",
-        "",
-        "## 正文",
-        "",
-    ]
-    current_section = None
+    lines = [f"# {title}", ""]
+    current_section: int | None = None
 
     def block_context(index: int) -> str:
         snippets: list[str] = []
@@ -1906,75 +1965,68 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
             if ctx_index < 0 or ctx_index >= len(blocks):
                 continue
             ctx_block = blocks[ctx_index]
-            ctx_label = label_for_speaker(str(ctx_block.get("speaker", "")), labels)
-            ctx_text = block_text_for_polish(ctx_block, is_english)
+            ctx_text = block_text_for_polish(ctx_block, str(ctx_block.get("languageClass")) in {"en", "mixed"})
             if ctx_text:
-                snippets.append(f"{label_name}｜{ctx_label}：{compact_context_excerpt(ctx_text)}")
+                snippets.append(f"{label_name}：{compact_context_excerpt(ctx_text)}")
         return "\n".join(snippets)
 
     for block_index, block in enumerate(blocks):
-        if sponsor_mode == "keep" and block.get("is_sponsor"):
-            section = "正文"
-        else:
-            section = section_title_for_turn(block, sponsor_mode)
+        language_class = str(block.get("languageClass") or "en")
+        is_en_like = language_class in {"en", "mixed"}
+        section = int(float(block.get("start", 0)) // 600) * 600
         if section != current_section:
             current_section = section
-            lines.append(f"### {section}")
+            lines.append(f"### {format_hms(section)}")
             lines.append("")
 
-        label = label_for_speaker(block["speaker"], labels)
         original = original_join([item for item in block.get("originals", []) if item])
+        if language_class == "zh":
+            original = chinese_original_join([item for item in block.get("originals", []) if item])
         translated_text = sentence_join([item for item in block.get("translations", []) if item])
-        
+
         is_target = any(idx == block_index for idx, _ in polish_targets)
-        
+        polish_label = label_for_speaker(str(block.get("speaker", "")), labels)
         if is_target:
             if block_index in polished_texts:
-                if is_english:
+                if is_en_like and translated_text:
                     translated_text = polished_texts[block_index]
                 else:
                     original = polished_texts[block_index]
             else:
-                # 批量未能润色（或者根本没执行批量），进行串行 fallback
-                polish_context = "\n".join(part for part in (global_polish_context, block_context(block_index)) if part)
-                if is_english:
-                    if translated_text:
-                        translated_text = maybe_polish_text_with_llm(translated_text, label, llm_config, context=polish_context)
+                polish_context = "\n".join(
+                    part for part in (global_polish_context, block_context(block_index)) if part
+                )
+                if is_en_like and translated_text:
+                    translated_text = maybe_polish_text_with_llm(
+                        translated_text, polish_label, llm_config, context=polish_context
+                    )
                 else:
-                    original = maybe_polish_text_with_llm(original, label, llm_config, context=polish_context)
+                    original = maybe_polish_text_with_llm(
+                        original, polish_label, llm_config, context=polish_context
+                    )
                 serial_polished += 1
                 _report_polish_progress(len(polished_texts) + serial_polished, len(polish_targets))
 
-        if is_english:
+        original = clean_text(original)
+        if translated_text:
             translated_text = clean_text(translated_text)
-        else:
-            original = clean_text(original)
 
-        if speaker_labels_enabled:
-            prefix = f"**{label}（{format_hms(block['start'])}）：** " if include_timestamps else f"**{label}：** "
-        else:
-            prefix = f"（{format_hms(block['start'])}）" if include_timestamps else ""
-
-        if is_english:
-            translated_paragraphs = paragraphize(translated_text, max_paragraph_chars) if translated_text else []
-            if translated_paragraphs:
-                for paragraph in translated_paragraphs:
-                    lines.append(prefix + paragraph)
+        if is_en_like:
+            # English (or mixed source) first, Chinese second.
+            for paragraph in paragraphize(original, en_max_chars):
+                lines.append(paragraph)
+                lines.append("")
+            if translated_text:
+                for paragraph in paragraphize(translated_text, zh_max_chars):
+                    lines.append(paragraph)
                     lines.append("")
-            else:
-                lines.append(prefix + "[翻译缺失：请确认 Ollama 可用后重新运行 --translate-existing。]")
-                lines.append("")
-            if speaker_labels_enabled:
-                lines.append(f"> {label}: {original}")
-            else:
-                lines.append(f"> {original}")
-            lines.append("")
+            # Never emit missing placeholders for pure Chinese blocks; en/mixed
+            # without translation is caught by final_quality_errors.
         else:
-            display = original
-            for paragraph in paragraphize(display, max_paragraph_chars):
-                lines.append(prefix + paragraph)
+            for paragraph in paragraphize(original, zh_max_chars):
+                lines.append(paragraph)
                 lines.append("")
-    # 润色小结：供日志与 GUI 展示覆盖率、以及「连续错误导致中途默禁」这类静默问题
+
     processed_targets = len(polished_texts) + serial_polished
     global LAST_POLISH_SUMMARY
     LAST_POLISH_SUMMARY = {
@@ -1984,7 +2036,9 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
         "polished_serial": serial_polished,
         "polish_enabled": use_llm,
         "disabled_after_errors": bool(llm_config.get("_disabled_after_error", False)),
-        "coverage_percent": round(processed_targets / len(polish_targets) * 100, 1) if polish_targets else (100.0 if use_llm else 0.0),
+        "coverage_percent": round(processed_targets / len(polish_targets) * 100, 1)
+        if polish_targets
+        else (100.0 if use_llm else 0.0),
     }
     if use_llm and polish_targets:
         _report_polish_progress(processed_targets, len(polish_targets))
@@ -1995,9 +2049,9 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
             markdown,
             render_turns,
             is_english,
-            max_paragraph_chars,
+            max(en_max_chars, zh_max_chars),
             rendered_blocks=blocks,
-            require_speaker_roles=speaker_labels_enabled,
+            require_speaker_roles=False,
         )
         if errors:
             raise RuntimeError("Final Markdown QA failed: " + "; ".join(errors))

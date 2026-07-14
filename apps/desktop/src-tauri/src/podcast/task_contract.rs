@@ -8,7 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
 
-const PIPELINE_VERSION: &str = "podcast-pipeline-v1";
+const PIPELINE_VERSION: &str = "podcast-pipeline-v2";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -122,3 +122,19 @@ def test_single_task_spec_rejects_budget_below_verified_estimate(tmp_path: Path)
         assert error.code == "BUDGET_CONFIRMATION_REQUIRED"
     else:
         raise AssertionError("budget below verified estimate must be rejected")
+
+
+def test_task_spec_preserves_translate_option(tmp_path: Path) -> None:
+    path, environment = fixture(tmp_path)
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    spec["options"] = {"translate": False, "maxApiCostCny": 1.0, "budgetLimitCny": 1.0}
+    spec["budget"] = {"estimatedApiCostUpperCny": 0.1}
+    path.write_text(json.dumps(spec), encoding="utf-8")
+
+    loaded = load_task_spec(path, environment)
+    assert loaded["options"]["translate"] is False
+
+    spec["options"]["translate"] = True
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    loaded = load_task_spec(path, environment)
+    assert loaded["options"]["translate"] is True

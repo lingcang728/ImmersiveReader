@@ -506,7 +506,22 @@ def format_srt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def force_translate_override() -> bool | None:
+    """TaskSpec.options.translate maps to PODCAST_TRANSCRIBER_FORCE_TRANSLATE=0|1."""
+    raw = str(os.environ.get("PODCAST_TRANSCRIBER_FORCE_TRANSLATE", "")).strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return None
+
+
 def is_translation_enabled(config: dict[str, Any]) -> bool:
+    force = force_translate_override()
+    if force is False:
+        return False
+    if force is True:
+        return True
     translation = config.get("translation") or {}
     return bool(translation.get("enabled", translation.get("english_required", False)))
 
@@ -570,20 +585,42 @@ def should_translate_for_language(config: dict[str, Any], detected_language: Any
     translation = config.get("translation") or {}
     if not is_translation_enabled(config):
         return False
-    detected = normalize_language_code(detected_language)
-    if not detected and segments is not None:
-        detected = normalize_language_code(infer_segments_language(segments))
     backend = str(translation.get("backend", translation.get("provider", "ollama"))).lower()
-    return detected in configured_auto_translate_languages(config) and backend != "none"
+    if backend == "none":
+        return False
+    force = force_translate_override()
+    if segments is not None:
+        from podcast_transcriber.language import assign_language_classes, segment_needs_translation
+
+        assign_language_classes(segments, detected_language)
+        if any(segment_needs_translation(segment) for segment in segments):
+            return True
+        # Pure Chinese (or empty) content: skip the translation service.
+        return False
+    # No segments yet (budget preflight): keep conservative upper bound.
+    if force is True:
+        return True
+    detected = normalize_language_code(detected_language)
+    return detected in configured_auto_translate_languages(config)
 
 
 def has_missing_translations(segments: list[dict[str, Any]]) -> bool:
-    return any(segment.get("text") and not segment.get("translation") for segment in segments)
+    from podcast_transcriber.language import assign_language_classes, segment_needs_translation
+
+    assign_language_classes(segments, None)
+    return any(
+        segment_needs_translation(segment) and not segment.get("translation")
+        for segment in segments
+    )
 
 
 def has_invalid_translations(segments: list[dict[str, Any]]) -> bool:
+    from podcast_transcriber.language import assign_language_classes, segment_needs_translation
+
+    assign_language_classes(segments, None)
     return any(
-        segment.get("translation")
+        segment_needs_translation(segment)
+        and segment.get("translation")
         and (
             not is_valid_translation_text(str(segment.get("translation", "")))
             or is_controlled_missing_translation(str(segment.get("translation", "")))
@@ -895,7 +932,10 @@ def translate_segments_with_llm(
     max_single_retries = 2
     translation_state_lock = threading.RLock()
 
+    from podcast_transcriber.language import assign_language_classes, segment_needs_translation
+
     translated = [dict(segment) for segment in segments]
+    assign_language_classes(translated, state.get("detected_language") or (config.get("asr") or {}).get("language"))
 
     cache_entries = state.get("translation_cache", [])
     cache_map: dict[str, str] = {}
@@ -911,10 +951,11 @@ def translate_segments_with_llm(
 
     for segment in translated:
         seg_hash = text_hash(str(segment.get("text", "")))
-        if seg_hash in cache_map:
+        if seg_hash in cache_map and segment_needs_translation(segment):
             segment["translation"] = cache_map[seg_hash]
 
-    translatable = [segment for segment in translated if segment.get("text")]
+    # Chinese blocks never enter the translation service.
+    translatable = [segment for segment in translated if segment_needs_translation(segment)]
     state["translation_total"] = len(translatable)
     state["translation_errors"] = list(state.get("translation_errors") or [])
 
@@ -949,8 +990,11 @@ def translate_segments_with_llm(
     pending = [
         segment
         for segment in translated
-        if segment.get("text")
-        and (not segment.get("translation") or is_controlled_missing_translation(str(segment.get("translation", ""))))
+        if segment_needs_translation(segment)
+        and (
+            not segment.get("translation")
+            or is_controlled_missing_translation(str(segment.get("translation", "")))
+        )
     ]
     persist_translations()
     if not pending:
@@ -2001,6 +2045,10 @@ def write_outputs(
         "transcribed_at": now_stamp(),
         "segments": segments,
     }
+    from podcast_transcriber.language import assign_language_classes
+
+    assign_language_classes(segments, runtime.get("detected_language"))
+    payload["segments"] = segments
     file_stem = f"{safe_stem}.{task_id}"
     json_path = OUT_JSON / f"{file_stem}.segments.json"
     save_json(json_path, payload)

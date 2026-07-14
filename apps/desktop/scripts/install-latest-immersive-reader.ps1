@@ -37,7 +37,53 @@ function Get-CargoTargetDirectory {
   return $fallback
 }
 
+function Get-FileSha256Hex {
+  param([Parameter(Mandatory)][string]$Path)
+  return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Assert-RuntimeAppHashes {
+  $zhihuAppTemplate = Join-Path $monorepoRoot "runtime\zhihu\app\dist\reader-template.html"
+  $zhihuSourceTemplate = Join-Path $monorepoRoot "tools\zhihu-packer\dist\reader-template.html"
+  $podcastAppPolish = Join-Path $monorepoRoot "runtime\podcast\app\scripts\polish_interview_markdown.py"
+  $podcastSourcePolish = Join-Path $monorepoRoot "tools\podcast-transcriber\scripts\polish_interview_markdown.py"
+  $podcastAppLanguage = Join-Path $monorepoRoot "runtime\podcast\app\scripts\podcast_transcriber\language.py"
+  $podcastSourceLanguage = Join-Path $monorepoRoot "tools\podcast-transcriber\scripts\podcast_transcriber\language.py"
+  foreach ($pair in @(
+    @{ Name = "Reader template"; Source = $zhihuSourceTemplate; Runtime = $zhihuAppTemplate },
+    @{ Name = "Podcast final markdown generator"; Source = $podcastSourcePolish; Runtime = $podcastAppPolish },
+    @{ Name = "Podcast language classifier"; Source = $podcastSourceLanguage; Runtime = $podcastAppLanguage }
+  )) {
+    if (-not (Test-Path -LiteralPath $pair.Source)) {
+      throw "Ship preflight missing source: $($pair.Name) ($($pair.Source))"
+    }
+    if (-not (Test-Path -LiteralPath $pair.Runtime)) {
+      throw "Ship preflight missing managed runtime copy: $($pair.Name) ($($pair.Runtime))"
+    }
+    $sourceHash = Get-FileSha256Hex -Path $pair.Source
+    $runtimeHash = Get-FileSha256Hex -Path $pair.Runtime
+    if ($sourceHash -ne $runtimeHash) {
+      throw "Managed runtime drift for $($pair.Name): source=$sourceHash runtime=$runtimeHash. Re-run prepare-runtime -RefreshApps."
+    }
+    Write-Host "[ship] hash ok $($pair.Name): $sourceHash"
+  }
+}
+
 if ($Build) {
+  # Compile continuous-reader template, refresh managed runtime app code, then package.
+  Push-Location (Join-Path $monorepoRoot "tools\zhihu-packer")
+  try {
+    Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "compile-reader")
+  } finally {
+    Pop-Location
+  }
+  $prepareRuntime = Join-Path $monorepoRoot "scripts\prepare-runtime.ps1"
+  Invoke-CheckedCommand -FilePath "powershell.exe" -Arguments @(
+    "-ExecutionPolicy", "Bypass",
+    "-File", $prepareRuntime,
+    "-RefreshApps"
+  )
+  Assert-RuntimeAppHashes
   Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "tauri", "build", "--", "--no-sign", "--bundles", "nsis")
 }
 
