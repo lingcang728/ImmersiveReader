@@ -68,9 +68,16 @@ from deepseek_pricing import (
     reserve_budget,
     settle_budget,
 )
-from podcast_transcriber.common import CONFIG_PATH, OUT_FINAL, OUT_JSON, STATE_DIR, WORK
+from podcast_transcriber.common import (
+    CONFIG_PATH,
+    OUT_FINAL,
+    OUT_FINAL_MARKDOWN,
+    OUT_JSON,
+    STATE_DIR,
+    WORK,
+)
 
-ROOT = Path(os.environ.get("IMMERSIVE_PODCAST_DATA_ROOT", Path(__file__).resolve().parents[1])).resolve()
+# Managed task cache final dir (Cache/.../Tasks/{id}/output). Never write under Data root.
 OUT_INTERVIEW = WORK / "internal" / "markdown_interview"
 DEEPSEEK_POLISH_USAGE_PATH = STATE_DIR / "deepseek_polish_usage.json"
 DEEPSEEK_PROMPT_TOKEN_LIMIT = 200_000
@@ -2002,7 +2009,9 @@ def process_json(json_path: Path, final_only: bool = False) -> Path:
     data = load_json(json_path)
     turns = build_turns(data.get("segments", []), data.get("detected_language"))
     safe_name = Path(data.get("source_file", json_path.stem)).stem
-    final_dir = ROOT / str(config.get("output_dir") or (config.get("markdown") or {}).get("output_dir", "output"))
+    # Always publish into the managed cache output root so desktop publish can find it.
+    final_dir = OUT_FINAL_MARKDOWN
+    final_dir.mkdir(parents=True, exist_ok=True)
     final_path = final_dir / f"{safe_name}.md"
     save_text(final_path, render_final_markdown(data, turns, config))
 

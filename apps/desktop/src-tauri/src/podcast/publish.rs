@@ -76,12 +76,48 @@ fn collect_markdown(
     Ok(())
 }
 
+/// Prefer final polished output/, then fall back to worker internal markdown roots
+/// (raw / bilingual) so a misplaced polish path still publishes usable transcript.
+fn resolve_markdown_roots(task_cache_root: &Path) -> Vec<PathBuf> {
+    vec![
+        task_cache_root.join("output"),
+        task_cache_root
+            .join("work")
+            .join("internal")
+            .join("markdown_bilingual"),
+        task_cache_root
+            .join("work")
+            .join("internal")
+            .join("markdown_raw"),
+    ]
+}
+
 fn copy_outputs(output_root: &Path, incoming: &Path) -> Result<Vec<Chapter>, String> {
-    if !output_root.is_dir() {
-        return Err("PUBLISH_FAILED: worker output directory is missing".to_string());
-    }
+    let task_cache_root = output_root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| output_root.to_path_buf());
     let mut files = Vec::new();
-    collect_markdown(output_root, output_root, &mut files)?;
+    let mut source_root: Option<PathBuf> = None;
+    for root in resolve_markdown_roots(&task_cache_root) {
+        if !root.is_dir() {
+            continue;
+        }
+        let mut candidate = Vec::new();
+        collect_markdown(&root, &root, &mut candidate)?;
+        if !candidate.is_empty() {
+            files = candidate;
+            source_root = Some(root);
+            break;
+        }
+    }
+    let Some(source_root) = source_root else {
+        if !output_root.is_dir() {
+            return Err("PUBLISH_FAILED: worker output directory is missing".to_string());
+        }
+        return Err("PUBLISH_FAILED: worker produced no Markdown output".to_string());
+    };
+    let _ = source_root;
     files.sort_by(|left, right| left.0.cmp(&right.0));
     if files.is_empty() {
         return Err("PUBLISH_FAILED: worker produced no Markdown output".to_string());
@@ -329,15 +365,16 @@ mod tests {
         let task_id = "task-1";
         let source_id = "a".repeat(64);
         let task_root = locations.data_root.join(r"Podcast\Tasks").join(task_id);
-        let output_root = locations
+        fs::create_dir_all(&task_root).expect("task root must exist");
+        // Prefer final output/, but also verify internal fallback works when output/ is empty.
+        let internal = locations
             .cache_root
             .join(r"Podcast\Tasks")
             .join(task_id)
-            .join("output");
-        fs::create_dir_all(&task_root).expect("task root must exist");
-        fs::create_dir_all(&output_root).expect("output root must exist");
-        fs::write(output_root.join("result.md"), "# Result\n\nPublished")
-            .expect("output must write");
+            .join(r"work\internal\markdown_raw");
+        fs::create_dir_all(&internal).expect("internal root must exist");
+        fs::write(internal.join("result.md"), "# Result\n\nPublished")
+            .expect("internal markdown must write");
         fs::write(
             task_root.join("task.json"),
             serde_json::to_vec_pretty(&json!({

@@ -677,6 +677,38 @@ impl ControlDb {
             return Ok(None);
         }
         let now = chrono::Utc::now().to_rfc3339();
+        let json = worker_json(line);
+        let event_kind = json
+            .as_ref()
+            .and_then(|value| value.get("type").and_then(|v| v.as_str()))
+            .unwrap_or(if stream == "stderr" { "stderr" } else { "stdout" });
+        let is_fatal = event_kind == "fatal" || event_kind == "completed";
+        // Generic "working" must not clobber a more specific stage (and must not
+        // count as a stage change that defeats event throttling).
+        let detected_stage = worker_stage(line);
+        let next_stage = if detected_stage == "working" && !snapshot.engine_stage.is_empty() {
+            snapshot.engine_stage.clone()
+        } else {
+            detected_stage
+        };
+        let next_percent = worker_percent(line);
+        let stage_changed = snapshot.engine_stage != next_stage;
+        let prev_percent = snapshot.progress.percent.unwrap_or(-1.0);
+        let percent_changed = next_percent.is_some_and(|p| (p - prev_percent).abs() >= 0.5);
+        // Heartbeat-only / log spam: keep at most one UI event every 4s unless stage/% moves.
+        let heartbeat_stale = snapshot
+            .last_heartbeat_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| {
+                let elapsed = chrono::Utc::now().signed_duration_since(value.with_timezone(&chrono::Utc));
+                elapsed.num_milliseconds() >= 4000
+            })
+            .unwrap_or(true);
+        if !is_fatal && !stage_changed && !percent_changed && !heartbeat_stale {
+            return Ok(None);
+        }
+
         snapshot.last_sequence = snapshot
             .last_sequence
             .checked_add(1)
@@ -687,21 +719,18 @@ impl ControlDb {
             .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
         snapshot.lifecycle_state = LifecycleState::Running;
         snapshot.outcome = TaskOutcome::None;
-        snapshot.engine_stage = worker_stage(line);
+        snapshot.engine_stage = next_stage.clone();
         snapshot.engine_status = "working".to_string();
         snapshot.can_pause = true;
         snapshot.can_cancel = true;
         snapshot.can_resume = false;
         snapshot.last_heartbeat_at = Some(now.clone());
-        if stream == "stderr" {
+        // Never surface raw worker log spam as the primary label — UI maps stage to Chinese.
+        snapshot.progress.label = Some(stable_worker_label(&next_stage));
+        if stream == "stderr" && is_fatal {
             snapshot.error_message = Some(line.trim().chars().take(500).collect());
         }
-        if let Some(json) = worker_json(line) {
-            if let Some(message) = json.get("message").and_then(|v| v.as_str()) {
-                snapshot.progress.label = Some(message.chars().take(180).collect());
-            } else {
-                snapshot.progress.label = Some(line.trim().chars().take(180).collect());
-            }
+        if let Some(json) = json.as_ref() {
             if let Some(completed) = json.get("completedUnits").and_then(|v| v.as_u64()) {
                 snapshot.progress.completed_units = Some(completed);
             }
@@ -711,30 +740,31 @@ impl ControlDb {
             if let Some(unit) = json.get("unit").and_then(|v| v.as_str()) {
                 snapshot.progress.unit = Some(unit.to_string());
             }
-            if json.get("type").and_then(|v| v.as_str()) == Some("checkpoint") {
+            if event_kind == "checkpoint" {
                 snapshot.checkpoint_at = Some(now.clone());
             }
-        } else {
-            snapshot.progress.label = Some(line.trim().chars().take(180).collect());
+            if event_kind == "fatal" {
+                if let Some(message) = json.get("message").and_then(|v| v.as_str()) {
+                    snapshot.error_message = Some(message.chars().take(500).collect());
+                }
+            }
         }
-        if let Some(percent) = worker_percent(line) {
+        if let Some(percent) = next_percent {
             snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
-            snapshot.progress.percent = Some(percent);
+            // Never decrease percent within a run (avoids bar thrashing on stage resets).
+            let floor = snapshot.progress.percent.unwrap_or(0.0);
+            snapshot.progress.percent = Some(percent.max(floor).clamp(0.0, 100.0));
+        } else if snapshot.progress.percent.is_none() {
+            // Indeterminate running: still show a soft determinate floor for flowing bar UX.
+            snapshot.progress.mode = crate::tasks::ProgressMode::Indeterminate;
         }
         snapshot.updated_at = now.clone();
-        let event_type = worker_json(line)
-            .and_then(|json| {
-                json.get("type")
-                    .and_then(|v| v.as_str())
-                    .map(|t| format!("worker_{t}"))
-            })
-            .unwrap_or_else(|| format!("worker_{stream}"));
         let event = TaskEvent {
             schema_version: 1,
             task_id: snapshot.id.clone(),
             sequence: snapshot.last_sequence,
             revision: snapshot.revision,
-            event_type,
+            event_type: format!("worker_{event_kind}"),
             snapshot,
             created_at: now,
         };
@@ -990,25 +1020,22 @@ fn worker_stage(line: &str) -> String {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         {
-            return stage.to_string();
-        }
-        if let Some(event_type) = value.get("type").and_then(|v| v.as_str()) {
-            match event_type {
-                "progress" | "heartbeat" | "checkpoint" | "completed" | "fatal" => {
-                    return event_type.to_string();
-                }
-                _ => {}
-            }
+            return normalize_stage_name(stage);
         }
     }
     let lower = line.to_ascii_lowercase();
+    // Budget / retry messages still mean "translating", not "failed".
+    if lower.contains("budget") || lower.contains("retrying") || lower.contains("translat") {
+        return "translating".to_string();
+    }
     for (needle, stage) in [
         ("normaliz", "normalizing"),
         ("chunk", "chunking"),
-        ("translat", "translating"),
+        ("polish", "polishing"),
         ("writ", "writing_output"),
         ("postprocess", "postprocess"),
         ("transcrib", "transcribing"),
+        ("audio done", "postprocess"),
         ("copy", "input_copy"),
         ("publish", "publish"),
         ("model", "load_model"),
@@ -1018,6 +1045,34 @@ fn worker_stage(line: &str) -> String {
         }
     }
     "working".to_string()
+}
+
+fn normalize_stage_name(stage: &str) -> String {
+    match stage.to_ascii_lowercase().as_str() {
+        "translate" | "translation" => "translating".to_string(),
+        "transcribe" | "transcription" => "transcribing".to_string(),
+        "write_output" | "writing" | "output" => "writing_output".to_string(),
+        "load_model" | "model" => "load_model".to_string(),
+        "input_copy" | "copy" | "prepare" => "input_copy".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn stable_worker_label(stage: &str) -> String {
+    match stage {
+        "input_copy" => "正在准备音频".to_string(),
+        "load_model" => "正在加载模型".to_string(),
+        "normalizing" => "正在标准化音频".to_string(),
+        "chunking" => "正在切分音频".to_string(),
+        "transcribing" => "正在语音转写".to_string(),
+        "translating" => "正在翻译".to_string(),
+        "polishing" => "正在润色文稿".to_string(),
+        "postprocess" => "正在后处理".to_string(),
+        "writing_output" => "正在生成文稿".to_string(),
+        "publish" => "正在发布到书库".to_string(),
+        "completed" => "即将完成".to_string(),
+        _ => "处理中".to_string(),
+    }
 }
 
 fn worker_error_code(message: Option<&str>) -> Option<TaskErrorCode> {

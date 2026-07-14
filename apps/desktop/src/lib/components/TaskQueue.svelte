@@ -43,45 +43,46 @@
 
 {#if tasks.length > 0}
 	<section class="task-queue" aria-label="统一任务队列" aria-live="polite">
-		<header class="task-queue-header">
-			<div>
-				<strong>任务队列</strong>
-				<span>{tasks.length} 项 · 可恢复材料 {formatBytes(recoverableBytes)}</span>
-			</div>
-			<span class="task-source">由沉浸阅读统一管理</span>
-		</header>
-
-		<div class="task-list">
-			{#each visible as task (task.id)}
-				<TaskRow
-					{task}
-					{onStartTask}
-					{onStartZhihuTask}
-					{onOpenTaskResult}
-					{onRestartTask}
-					{onControlTask}
-					{onControlZhihuTask}
-				/>
-			{/each}
-		</div>
-
-		{#if hidden > 0}
-			<p class="task-more">还有 {hidden} 项任务未展开显示</p>
-		{/if}
-
-		{#if events.length > 0}
-			<details class="task-events">
-				<summary>结构化事件（最近 {events.length} 条）</summary>
-				<div class="task-event-list">
-					{#each events.slice(0, 12) as event (event.taskId + ':' + event.sequence)}
-						<div class="task-event-row">
-							<time>{eventTime(event.createdAt)}</time>
-							<strong>{event.type}</strong>
-							<span>{event.taskId} · {event.snapshot.engineStage}</span>
-						</div>
-					{/each}
+		<div class="task-queue-shell">
+			<header class="task-queue-header">
+				<div>
+					<strong>任务队列</strong>
+					<span>{tasks.length} 项 · 可恢复材料 {formatBytes(recoverableBytes)}</span>
 				</div>
-			</details>
-		{/if}
+				<span class="task-source">由沉浸阅读统一管理</span>
+			</header>
+
+			<div class="task-list">
+				{#each visible as task (task.id)}
+					<TaskRow
+						{task}
+						{onStartTask}
+						{onStartZhihuTask}
+						{onOpenTaskResult}
+						{onRestartTask}
+						{onControlTask}
+						{onControlZhihuTask}
+					/>
+				{/each}
+			</div>
+
+			{#if hidden > 0}
+				<p class="task-more">还有 {hidden} 项任务未展开显示</p>
+			{/if}
+
+			{#if events.length > 0}
+				<details class="task-events">
+					<summary>近期事件（{events.length}）</summary>
+					<div class="task-event-list">
+						{#each events.slice(0, 8) as event (event.taskId + ':' + event.sequence)}
+							<div class="task-event-row">
+								<time>{eventTime(event.createdAt)}</time>
+								<span>{event.snapshot.engineStage}</span>
+							</div>
+						{/each}
+					</div>
+				</details>
+			{/if}
+		</div>
 	</section>
 {/if}

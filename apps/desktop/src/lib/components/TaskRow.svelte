@@ -17,109 +17,135 @@
 		revision: number
 	) => void;
 
-	$: percent = taskProgress(task);
-	$: stageLabel = taskStageLabel(task);
-	$: stateLabel = taskStateLabel(task);
-	$: heartbeatLabel = formatHeartbeat(task.lastHeartbeatAt);
-	$: progressLabel = formatProgress(task, percent);
+	$: title = userTitle(task);
+	$: subtitle = userSubtitle(task);
+	$: percent = displayPercent(task);
+	$: flowing = isActive(task) && (percent === null || percent < 100);
 	$: primary = primaryAction(task);
 	$: secondary = secondaryAction(task);
+	$: friendlyError = friendlyErrorText(task);
 
 	function taskKindLabel(kind: TaskSnapshot['kind']): string {
 		return kind === 'podcast' ? '播客' : '知乎';
 	}
 
-	function taskStateLabel(task: TaskSnapshot): string {
-		if (task.requiredAction === 'login') return '等待登录';
-		if (task.requiredAction === 'captcha') return '等待验证码';
+	function isActive(task: TaskSnapshot): boolean {
+		return (
+			task.lifecycleState === 'running' ||
+			task.lifecycleState === 'starting' ||
+			task.lifecycleState === 'pausing' ||
+			task.lifecycleState === 'stopping' ||
+			task.lifecycleState === 'queued'
+		);
+	}
+
+	function userTitle(task: TaskSnapshot): string {
+		if (task.requiredAction === 'login') return '需要登录';
+		if (task.requiredAction === 'captcha') return '需要验证';
 		if (task.requiredAction === 'configure_secret') return '需要配置密钥';
 		if (task.requiredAction === 'free_disk_space') return '磁盘空间不足';
-		if (task.requiredAction === 'approve_budget') return '等待预算确认';
+		if (task.requiredAction === 'approve_budget') return '需要确认预算';
 		if (task.lifecycleState === 'terminal') {
 			if (task.outcome === 'success') return '已完成';
 			if (task.outcome === 'partial_success') return '部分完成';
 			if (task.outcome === 'cancelled') return '已取消';
 			if (task.outcome === 'interrupted') return '已中断';
-			if (task.errorCode === 'INPUT_COPY_FAILED') return '输入副本失败';
 			return '失败';
 		}
 		if (task.lifecycleState === 'paused') return '已暂停';
 		if (task.lifecycleState === 'pausing') return '正在暂停';
-		if (task.lifecycleState === 'queued') return '等待开始';
+		if (task.lifecycleState === 'queued') {
+			if (task.engineStage === 'input_copy') return '正在准备';
+			return '等待开始';
+		}
 		if (task.lifecycleState === 'starting') return '正在启动';
-		if (task.lifecycleState === 'stopping') return '正在停止';
-		return task.progress.label ?? '处理中';
+		// Active: stage-only Chinese title — never raw worker logs.
+		return stageTitle(task.engineStage);
 	}
 
-	function taskStageLabel(task: TaskSnapshot): string {
-		const stage = (task.engineStage || '').toLowerCase();
+	function stageTitle(stage: string): string {
+		const s = (stage || '').toLowerCase();
 		const map: Record<string, string> = {
-			queued: '排队',
+			queued: '排队中',
+			input_copy: '准备音频',
+			load_model: '加载模型',
+			normalizing: '处理音频',
+			chunking: '切分音频',
+			transcribing: '语音转写',
+			transcribe: '语音转写',
+			translating: '翻译中',
+			translate: '翻译中',
+			polishing: '润色文稿',
+			postprocess: '后处理',
+			writing_output: '生成文稿',
+			publish: '发布中',
 			index: '索引列表',
 			content: '抓取正文',
-			transcribe: '语音转写',
-			chunking: '音频切块',
-			normalize: '标准化',
-			translate: '翻译',
-			publish: '发布到书库',
-			copy: '复制输入',
-			input_copy: '复制输入',
-			input_copy_failed: '输入准备失败',
-			completed: '已完成',
-			failed: '失败',
-			crashed: '异常退出',
-			cancelled: '已取消',
-			recovery_check: '恢复检查'
+			working: '处理中',
+			completed: '即将完成'
 		};
-		if (map[stage]) return map[stage];
-		if (task.progress.label) return task.progress.label;
-		return stage || '准备中';
+		return map[s] || '处理中';
 	}
 
-	function taskProgress(task: TaskSnapshot): number | null {
-		if (task.progress.mode !== 'determinate' || task.progress.percent === undefined) return null;
-		return Math.max(0, Math.min(100, task.progress.percent));
-	}
-
-	function formatProgress(task: TaskSnapshot, percent: number | null): string {
-		const completed = task.progress.completedUnits;
-		const total = task.progress.totalUnits;
-		const source = task.progress.sourceTotalUnits;
-		const unit = task.progress.unit ?? '';
-		const parts: string[] = [];
-		if (source != null && source > 0) {
-			parts.push(`主页/API ${source}${unit}`);
-		}
-		if (completed != null && total != null && total > 0) {
-			if (task.kind === 'zhihu' && task.engineStage === 'index') {
-				parts.push(`已发现 ${completed}${unit}`);
-			} else if (task.kind === 'zhihu') {
-				parts.push(`已归档 ${completed}/${total}${unit}`);
-			} else {
-				parts.push(`${completed}/${total}${unit}`);
+	function userSubtitle(task: TaskSnapshot): string {
+		if (task.lifecycleState === 'terminal') {
+			if (task.outcome === 'success') {
+				return task.kind === 'podcast' ? '已加入书库' : '归档完成';
 			}
-		} else if (completed != null) {
-			parts.push(`已发现 ${completed}${unit}`);
-		} else if (percent !== null) {
-			parts.push(`${Math.round(percent)}%`);
+			if (task.outcome === 'partial_success') return '部分条目已完成';
+			if (task.outcome === 'cancelled') return '已取消';
+			if (task.outcome === 'interrupted') return '意外中断，可重试';
+			return friendlyErrorText(task) || '处理未完成';
 		}
-		if (parts.length === 0) return '…';
-		return parts.join(' · ');
+		if (task.kind === 'zhihu' && task.progress.completedUnits != null && task.progress.totalUnits) {
+			if (task.engineStage === 'index') {
+				return `已发现 ${task.progress.completedUnits} 篇`;
+			}
+			return `已归档 ${task.progress.completedUnits}/${task.progress.totalUnits} 篇`;
+		}
+		// Running podcast: keep subtitle minimal — percent lives on the meter.
+		return '';
 	}
 
-	function formatHeartbeat(value?: string | null): string {
-		if (!value) return '尚无心跳';
-		const date = new Date(value);
-		if (Number.isNaN(date.getTime())) return '心跳未知';
-		const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
-		if (seconds < 5) return '刚刚心跳';
-		if (seconds < 60) return `${seconds}s 前心跳`;
-		const minutes = Math.floor(seconds / 60);
-		if (minutes < 60) return `${minutes} 分钟前心跳`;
-		return new Intl.DateTimeFormat('zh-CN', {
-			hour: '2-digit',
-			minute: '2-digit'
-		}).format(date);
+	function displayPercent(task: TaskSnapshot): number | null {
+		if (task.lifecycleState === 'terminal' && task.outcome === 'success') return 100;
+		if (task.lifecycleState === 'terminal' && task.outcome === 'failed') {
+			const p = task.progress.percent;
+			return p !== undefined ? Math.max(0, Math.min(100, p)) : null;
+		}
+		if (task.progress.mode === 'determinate' && task.progress.percent !== undefined) {
+			return Math.max(0, Math.min(100, task.progress.percent));
+		}
+		// Active without a number: null → flowing indeterminate bar.
+		if (isActive(task)) return null;
+		return null;
+	}
+
+	function friendlyErrorText(task: TaskSnapshot): string {
+		const code = (task.errorCode || '').toUpperCase();
+		const msg = (task.errorMessage || '').toLowerCase();
+		if (code === 'PUBLISH_FAILED' || msg.includes('publish_failed') || msg.includes('no markdown')) {
+			return '文稿生成后发布失败，请重试';
+		}
+		if (code === 'BUDGET_CONFIRMATION_REQUIRED' || msg.includes('budget exceeds')) {
+			return '翻译预算不足，请提高预算后重试';
+		}
+		if (code === 'INPUT_COPY_FAILED' || code === 'INPUT_CHANGED') {
+			return '音频文件无效或已变更，请重新选择';
+		}
+		if (code === 'SECRET_MISSING' || task.requiredAction === 'configure_secret') {
+			return '请先配置 DeepSeek 密钥';
+		}
+		if (code === 'ENGINE_CRASHED' || task.outcome === 'interrupted') {
+			return '任务意外中断，可重试继续';
+		}
+		if (code === 'RATE_LIMITED') return '请求过于频繁，请稍后重试';
+		if (code === 'LOGIN_REQUIRED') return '需要重新登录知乎';
+		if (code === 'CAPTCHA_REQUIRED') return '需要完成人机验证';
+		if (task.lifecycleState === 'terminal' && task.outcome === 'failed') {
+			return '处理失败，可点击重试';
+		}
+		return '';
 	}
 
 	type Action =
@@ -134,23 +160,23 @@
 		| null;
 
 	function primaryAction(task: TaskSnapshot): { action: Action; label: string } | null {
-		if (task.lifecycleState === 'queued') {
+		if (task.lifecycleState === 'queued' && task.engineStage !== 'input_copy') {
 			return { action: { kind: 'start' }, label: '开始' };
 		}
-		if (task.canPause) {
+		if (task.canPause && isActive(task) && task.lifecycleState !== 'queued') {
 			return { action: { kind: 'pause' }, label: '暂停' };
 		}
 		if (task.canResume) {
 			return { action: { kind: 'resume' }, label: '继续' };
 		}
 		if (task.requiredAction === 'login') {
-			return { action: { kind: 'relogin' }, label: '重新登录' };
+			return { action: { kind: 'relogin' }, label: '去登录' };
 		}
 		if (task.errorCode === 'ENGINE_CRASHED' || task.outcome === 'interrupted') {
-			return { action: { kind: 'reconnect' }, label: '重新连接' };
+			return { action: { kind: 'reconnect' }, label: '重试' };
 		}
 		if (task.lifecycleState === 'terminal' && task.outcome === 'success' && task.kind === 'podcast') {
-			return { action: { kind: 'open' }, label: '打开结果' };
+			return { action: { kind: 'open' }, label: '打开' };
 		}
 		if (task.canRetry) {
 			return { action: { kind: 'retry' }, label: '重试' };
@@ -159,7 +185,7 @@
 	}
 
 	function secondaryAction(task: TaskSnapshot): { action: Action; label: string } | null {
-		if (task.canCancel) {
+		if (task.canCancel && task.lifecycleState !== 'terminal') {
 			return { action: { kind: 'cancel' }, label: '取消' };
 		}
 		return null;
@@ -192,90 +218,66 @@
 			return;
 		}
 		if (action.kind === 'cancel') {
-			const ok = window.confirm('确定取消该任务？进行中的进度将按检查点保留。');
-			if (!ok) return;
+			if (!window.confirm('确定取消该任务？')) return;
 			if (task.kind === 'podcast') onControlTask(task.id, 'cancel', task.revision);
 			else onControlZhihuTask(task.id, 'cancel', task.revision);
 		}
-	}
-
-	function isRunning(task: TaskSnapshot): boolean {
-		return (
-			task.lifecycleState === 'running' ||
-			task.lifecycleState === 'starting' ||
-			task.lifecycleState === 'pausing' ||
-			task.lifecycleState === 'stopping'
-		);
 	}
 </script>
 
 <article
 	class="task-row"
-	class:running={isRunning(task)}
+	class:running={isActive(task) && task.lifecycleState !== 'queued'}
 	class:error={task.lifecycleState === 'terminal' &&
 		(task.outcome === 'failed' || task.outcome === 'interrupted')}
 	class:success={task.lifecycleState === 'terminal' && task.outcome === 'success'}
-	aria-label={`${taskKindLabel(task.kind)}任务 ${stateLabel}`}
+	aria-label={`${taskKindLabel(task.kind)} ${title}`}
 >
 	<span class="task-kind" class:zhihu={task.kind === 'zhihu'}>{taskKindLabel(task.kind)}</span>
 
 	<div class="task-copy">
-		<strong>{stateLabel}</strong>
-		<small>
-			<span>{stageLabel}</span>
-			<span aria-hidden="true">·</span>
-			<span>{heartbeatLabel}</span>
-			{#if progressLabel !== '…'}
-				<span aria-hidden="true">·</span>
-				<span>{progressLabel}</span>
-			{/if}
-		</small>
+		<strong class="task-title">{title}</strong>
+		{#if subtitle}
+			<small class="task-sub">{subtitle}</small>
+		{/if}
 	</div>
 
-	<div class="task-meter" aria-hidden={percent === null}>
+	<div class="task-meter">
+		<span
+			class="task-progress"
+			class:flowing
+			class:determinate={percent !== null}
+			aria-label={percent !== null ? `进度 ${Math.round(percent)}%` : '进行中'}
+		>
+			{#if percent !== null}
+				<i class="task-fill" style={`transform:scaleX(${percent / 100})`}></i>
+			{:else}
+				<i class="task-flow" aria-hidden="true"></i>
+			{/if}
+		</span>
 		{#if percent !== null}
-			<span class="task-progress" aria-label={`进度 ${Math.round(percent)}%`}>
-				<i style={`transform:scaleX(${percent / 100})`}></i>
-			</span>
 			<output>{Math.round(percent)}%</output>
-		{:else if isRunning(task)}
-			<span class="task-pulse" aria-hidden="true"></span>
+		{:else if isActive(task)}
+			<output class="task-ellipsis">…</output>
 		{:else}
-			<span class="task-idle">—</span>
+			<output class="task-idle">—</output>
 		{/if}
 	</div>
 
 	<div class="task-actions">
 		{#if primary}
-			<button
-				type="button"
-				class="task-btn primary"
-				on:click={() => runAction(primary.action)}
-			>
+			<button type="button" class="task-btn primary" on:click={() => runAction(primary.action)}>
 				{primary.label}
 			</button>
 		{/if}
 		{#if secondary}
-			<button
-				type="button"
-				class="task-btn danger"
-				on:click={() => runAction(secondary.action)}
-			>
+			<button type="button" class="task-btn danger" on:click={() => runAction(secondary.action)}>
 				{secondary.label}
 			</button>
 		{/if}
 	</div>
 
-	{#if task.errorCode || task.errorMessage}
-		<details class="task-detail">
-			<summary>技术详情</summary>
-			<p>
-				{#if task.errorCode}<code>{task.errorCode}</code>{/if}
-				{#if task.errorMessage}<span>{task.errorMessage}</span>{/if}
-			</p>
-			<p class="task-detail-meta">
-				状态码 {task.engineStatus || '—'} · 阶段 {task.engineStage || '—'} · revision {task.revision}
-			</p>
-		</details>
+	{#if task.lifecycleState === 'terminal' && (task.outcome === 'failed' || task.outcome === 'interrupted') && friendlyError}
+		<p class="task-hint">{friendlyError}</p>
 	{/if}
 </article>

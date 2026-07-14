@@ -463,6 +463,7 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
     assert_eq!(stdout.event_type, "worker_stdout");
     assert_eq!(stdout.snapshot.progress.percent, Some(42.5));
     assert_eq!(stdout.snapshot.engine_stage, "chunking");
+    assert_eq!(stdout.snapshot.progress.label.as_deref(), Some("正在切分音频"));
     let ndjson = database
         .record_worker_line(
             "podcast-1",
@@ -473,19 +474,30 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
         .expect("ndjson event must exist");
     assert_eq!(ndjson.event_type, "worker_progress");
     assert_eq!(ndjson.snapshot.progress.percent, Some(55.5));
-    assert_eq!(ndjson.snapshot.engine_stage, "transcribe");
+    assert_eq!(ndjson.snapshot.engine_stage, "transcribing");
     assert_eq!(ndjson.snapshot.progress.completed_units, Some(11));
     assert_eq!(ndjson.snapshot.progress.total_units, Some(20));
-    assert_eq!(ndjson.snapshot.progress.label.as_deref(), Some("转写第 11 块"));
-    let stderr = database
+    assert_eq!(ndjson.snapshot.progress.label.as_deref(), Some("正在语音转写"));
+    // Spammy stderr without stage/% change is throttled (prevents UI flicker).
+    assert!(database
         .record_worker_line("podcast-1", "stderr", "worker warning")
-        .expect("stderr must map")
-        .expect("stderr event must exist");
-    assert_eq!(stderr.event_type, "worker_stderr");
-    assert_eq!(
-        stderr.snapshot.error_message.as_deref(),
-        Some("worker warning")
-    );
+        .expect("stderr throttle")
+        .is_none());
+    let fatal = database
+        .record_worker_line(
+            "podcast-1",
+            "stderr",
+            r#"{"type":"fatal","errorCode":"BUDGET_CONFIRMATION_REQUIRED","message":"budget exceeds"}"#,
+        )
+        .expect("fatal must map")
+        .expect("fatal event must exist");
+    assert_eq!(fatal.event_type, "worker_fatal");
+    assert!(fatal
+        .snapshot
+        .error_message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("budget"));
     let done = database
         .finish_worker_task("podcast-1", true, None)
         .expect("worker completion must map")
