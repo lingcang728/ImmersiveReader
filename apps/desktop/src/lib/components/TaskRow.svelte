@@ -90,7 +90,9 @@
 	function userSubtitle(task: TaskSnapshot): string {
 		if (task.lifecycleState === 'terminal') {
 			if (task.outcome === 'success') {
-				return task.kind === 'podcast' ? '已加入书库' : '归档完成';
+				return task.kind === 'podcast'
+					? '已保存到 桌面/互动书架/播客'
+					: '归档完成';
 			}
 			if (task.outcome === 'partial_success') return '部分条目已完成';
 			if (task.outcome === 'cancelled') return '已取消';

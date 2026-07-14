@@ -32,6 +32,84 @@ fn safe_segment(value: &str) -> bool {
             .all(|item| item.is_ascii_alphanumeric() || matches!(item, '-' | '_' | ':'))
 }
 
+/// Folder name for a podcast book under `播客/` and Desktop `互动书架/播客/`.
+/// Strips Windows-illegal characters and trims length while keeping CJK titles readable.
+pub(crate) fn sanitize_podcast_folder_name(raw: &str) -> String {
+    let mut name = raw
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => ' ',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect::<String>();
+    while name.contains("  ") {
+        name = name.replace("  ", " ");
+    }
+    let name = name.trim().trim_matches('.').to_string();
+    let mut name = if name.is_empty() {
+        "未命名播客".to_string()
+    } else {
+        name
+    };
+    // Keep path segments short enough for Windows MAX_PATH comfort.
+    if name.chars().count() > 80 {
+        name = name.chars().take(80).collect::<String>();
+        name = name.trim().trim_matches('.').to_string();
+    }
+    if name.is_empty() {
+        "未命名播客".to_string()
+    } else {
+        name
+    }
+}
+
+fn podcast_library_relative_path(display_name: &str) -> String {
+    format!("播客/{}", sanitize_podcast_folder_name(display_name))
+}
+
+/// Durable user-facing shelf: Desktop/互动书架/播客/{文件名}/ — markdown only.
+fn desktop_podcast_export_dir(display_name: &str) -> Result<PathBuf, String> {
+    let desktop = dirs::desktop_dir().ok_or_else(|| "DESKTOP_UNAVAILABLE".to_string())?;
+    Ok(desktop
+        .join("互动书架")
+        .join("播客")
+        .join(sanitize_podcast_folder_name(display_name)))
+}
+
+/// Copy only Markdown chapters into the desktop shelf folder (no manifest / provenance).
+fn export_markdown_to_desktop_shelf(
+    display_name: &str,
+    chapter_files: &[(String, PathBuf)],
+) -> Result<PathBuf, String> {
+    let dest_dir = desktop_podcast_export_dir(display_name)?;
+    fs::create_dir_all(&dest_dir).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
+    // Clear previous markdown in this folder so re-publish stays tidy.
+    if dest_dir.is_dir() {
+        for entry in fs::read_dir(&dest_dir).map_err(|error| format!("PUBLISH_FAILED: {error}"))? {
+            let entry = entry.map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
+            let path = entry.path();
+            let is_md = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| matches!(value.to_ascii_lowercase().as_str(), "md" | "markdown"))
+                .unwrap_or(false);
+            if is_md {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    for (relative, source) in chapter_files {
+        let file_name = Path::new(relative)
+            .file_name()
+            .map(|value| value.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("transcript.md"));
+        let destination = dest_dir.join(file_name);
+        fs::copy(source, &destination).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
+    }
+    Ok(dest_dir)
+}
+
 fn collect_markdown(
     root: &Path,
     dir: &Path,
@@ -92,7 +170,11 @@ fn resolve_markdown_roots(task_cache_root: &Path) -> Vec<PathBuf> {
     ]
 }
 
-fn copy_outputs(output_root: &Path, incoming: &Path) -> Result<Vec<Chapter>, String> {
+fn copy_outputs(
+    output_root: &Path,
+    incoming: &Path,
+    preferred_stem: &str,
+) -> Result<(Vec<Chapter>, Vec<(String, PathBuf)>), String> {
     let task_cache_root = output_root
         .parent()
         .map(Path::to_path_buf)
@@ -111,25 +193,37 @@ fn copy_outputs(output_root: &Path, incoming: &Path) -> Result<Vec<Chapter>, Str
             break;
         }
     }
-    let Some(source_root) = source_root else {
+    let Some(_source_root) = source_root else {
         if !output_root.is_dir() {
             return Err("PUBLISH_FAILED: worker output directory is missing".to_string());
         }
         return Err("PUBLISH_FAILED: worker produced no Markdown output".to_string());
     };
-    let _ = source_root;
     files.sort_by(|left, right| left.0.cmp(&right.0));
     if files.is_empty() {
         return Err("PUBLISH_FAILED: worker produced no Markdown output".to_string());
     }
     let mut chapters = Vec::with_capacity(files.len());
-    for (relative, source) in files {
-        let destination = incoming.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let mut exported_sources = Vec::with_capacity(files.len());
+    let single = files.len() == 1;
+    for (index, (relative, source)) in files.into_iter().enumerate() {
+        // Flatten into the book folder: one file → "{stem}.md"; multi → keep unique names.
+        let file_name = if single {
+            format!("{}.md", sanitize_podcast_folder_name(preferred_stem))
+        } else {
+            Path::new(&relative)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("chapter-{}.md", index + 1))
+        };
+        let destination = incoming.join(&file_name);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
         }
         fs::copy(&source, &destination).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
-        let title = Path::new(&relative)
+        exported_sources.push((file_name.clone(), destination.clone()));
+        let title = Path::new(&file_name)
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("Podcast")
@@ -144,21 +238,21 @@ fn copy_outputs(output_root: &Path, incoming: &Path) -> Result<Vec<Chapter>, Str
             .unwrap_or(0);
         let chapter_id = format!(
             "podcast:{}",
-            Sha256::digest(relative.as_bytes())
+            Sha256::digest(file_name.as_bytes())
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         );
         chapters.push(Chapter {
             id: chapter_id,
-            path: relative,
+            path: file_name.replace('\\', "/"),
             title,
             date: None,
             vote_count: 0,
             word_count,
         });
     }
-    Ok(chapters)
+    Ok((chapters, exported_sources))
 }
 
 fn write_book_metadata(
@@ -242,7 +336,16 @@ pub fn publish_task_result_at(
         return Err("PUBLISH_FAILED: publish path is unsafe".to_string());
     }
     let incoming = locations.library_root.join(&incoming_relative_path);
-    let final_relative_path = format!("Podcast/{source_id}");
+    let input_name = spec
+        .get("input")
+        .and_then(|value| value.get("relativePath"))
+        .and_then(Value::as_str)
+        .and_then(|value| Path::new(value).file_stem())
+        .and_then(|value| value.to_str())
+        .unwrap_or("Podcast")
+        .to_string();
+    // Human-readable shelf path: 播客/{文件名}/  (not Cache, not hash folders).
+    let final_relative_path = podcast_library_relative_path(&input_name);
     let rollback_relative_path = format!(".revisions/{source_id}/{revision}");
     let existing = load_transaction(&locations.library_root, task_id).ok();
     if existing
@@ -262,21 +365,13 @@ pub fn publish_task_result_at(
         .join("Tasks")
         .join(task_id)
         .join("output");
-    let input_name = spec
-        .get("input")
-        .and_then(|value| value.get("relativePath"))
-        .and_then(Value::as_str)
-        .and_then(|value| Path::new(value).file_stem())
-        .and_then(|value| value.to_str())
-        .unwrap_or("Podcast")
-        .to_string();
     let engine_version = spec
         .get("compatibility")
         .and_then(|value| value.get("engineVersion"))
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let chapters = match copy_outputs(&output_root, &incoming) {
-        Ok(chapters) => chapters,
+    let (chapters, markdown_sources) = match copy_outputs(&output_root, &incoming, &input_name) {
+        Ok(value) => value,
         Err(error) => {
             let _ = fs::remove_dir_all(&incoming);
             return Err(error);
@@ -328,13 +423,33 @@ pub fn publish_task_result_at(
         "committed",
         &format!(".transactions/{}.json", task_id),
     )?;
+    // Durable markdown-only copy on the user's Desktop shelf (survives cache cleanup).
+    // Skip QA / test channels so unit tests do not touch the real Desktop.
+    if locations.channel == "production" {
+        if let Err(error) = export_markdown_to_desktop_shelf(&input_name, &markdown_sources) {
+            eprintln!("Desktop podcast export warning: {error}");
+        }
+    }
     release_podcast_cache_lease(locations, task_id, snapshot.cache_lease_bytes)?;
     Ok(committed)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::publish_task_result_at;
+    use super::{publish_task_result_at, sanitize_podcast_folder_name};
+
+    #[test]
+    fn sanitizes_podcast_folder_names_for_windows() {
+        assert_eq!(
+            sanitize_podcast_folder_name(r#"[商业就是这样] 349.Vol.264 把世界杯作为方法"#),
+            "[商业就是这样] 349.Vol.264 把世界杯作为方法"
+        );
+        assert_eq!(
+            sanitize_podcast_folder_name(r#"a/b:c*d?"#),
+            "a b c d"
+        );
+        assert_eq!(sanitize_podcast_folder_name("..."), "未命名播客");
+    }
     use crate::cache::{acquire_podcast_cache_lease, read_podcast_recovery};
     use crate::control::ControlDb;
     use crate::storage::StorageLocations;
@@ -447,9 +562,15 @@ mod tests {
         assert_eq!(repeated.phase, crate::publish::PublishPhase::Committed);
         assert!(locations
             .library_root
-            .join(r"Podcast")
-            .join(&source_id)
+            .join("播客")
+            .join("source")
             .join("manifest.json")
+            .is_file());
+        assert!(locations
+            .library_root
+            .join("播客")
+            .join("source")
+            .join("source.md")
             .is_file());
         assert_eq!(
             read_podcast_recovery(&locations, task_id)
