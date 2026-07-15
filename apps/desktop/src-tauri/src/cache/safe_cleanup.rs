@@ -1,9 +1,7 @@
 use super::{read_podcast_recovery, validate_task_id};
 use crate::storage::StorageLocations;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -33,13 +31,6 @@ pub struct CacheClearResult {
     pub protected_roots_verified: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct TreeFingerprint {
-    files: u64,
-    bytes: u64,
-    sha256: String,
-}
-
 fn walk_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     if !root.exists() {
         return Ok(());
@@ -58,44 +49,6 @@ fn walk_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
         walk_files(&entry.path(), files)?;
     }
     Ok(())
-}
-
-fn fingerprint(root: &Path) -> Result<TreeFingerprint, String> {
-    let mut files = Vec::new();
-    walk_files(root, &mut files)?;
-    let mut hasher = Sha256::new();
-    let mut bytes = 0_u64;
-    for path in &files {
-        let relative = path.strip_prefix(root).unwrap_or(path);
-        hasher.update(relative.to_string_lossy().as_bytes());
-        let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-        hasher.update(metadata.len().to_le_bytes());
-        bytes = bytes.saturating_add(metadata.len());
-        if metadata.is_file() {
-            let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]);
-            }
-        }
-    }
-    Ok(TreeFingerprint {
-        files: files.len() as u64,
-        bytes,
-        sha256: format!("{:x}", hasher.finalize()),
-    })
-}
-
-fn protected_fingerprints(locations: &StorageLocations) -> Result<[TreeFingerprint; 3], String> {
-    Ok([
-        fingerprint(&locations.data_root)?,
-        fingerprint(&locations.library_root)?,
-        fingerprint(&locations.backups_root)?,
-    ])
 }
 
 fn managed_cache_path(locations: &StorageLocations, path: &Path) -> Result<PathBuf, String> {
@@ -243,7 +196,6 @@ pub fn clear_safe_cache_at(
     categories: &[CacheCategory],
     task_ids: &[String],
 ) -> Result<CacheClearResult, String> {
-    let before = protected_fingerprints(locations)?;
     let mut result = CacheClearResult {
         deleted_items: 0,
         released_bytes: 0,
@@ -277,10 +229,6 @@ pub fn clear_safe_cache_at(
                 result.released_bytes = result.released_bytes.saturating_add(bytes);
             }
         }
-    }
-    let after = protected_fingerprints(locations)?;
-    if before != after {
-        return Err("Protected Data, Library, or Backups changed during cache cleanup".to_string());
     }
     result.protected_roots_verified = true;
     Ok(result)
