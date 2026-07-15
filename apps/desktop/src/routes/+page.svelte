@@ -12,6 +12,7 @@
 	} from "$lib/edit/sourceBlock";
 	import { getFocusScrollTarget } from "$lib/focus/scroll";
 	import { splitSentences } from "$lib/focus/segment";
+	import { isCurrentNavigation, type NavigationSnapshot } from "$lib/navigation/generation";
 	import { resolveMarkdownImageSources } from "$lib/render/images";
 	import type { FrontMatterEntry, RenderedMarkdownDocument, TocItem } from "$lib/render/markdown";
 	import {
@@ -228,6 +229,7 @@
 	let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let saveStateTimer: ReturnType<typeof setTimeout> | null = null;
 	let currentLoadToken: string = '';
+	let navigationGeneration = 0;
 	let finishEditPromise: Promise<boolean> | null = null;
 	let lastFocusRenderSignature = "";
 	let focusStyleCache = new WeakMap<HTMLElement, string>();
@@ -2028,40 +2030,62 @@
 		let watchedPath = "";
 		let watchedMtime = 0;
 		let pollTick = 0;
+		let fileWatchInFlight = false;
 		const fileWatchTimer = window.setInterval(async () => {
 			pollTick += 1;
 			if (!document.hasFocus() && pollTick % 5 !== 0) return;
-			const path = $currentFilePath;
-			if (!path) {
-				watchedPath = "";
-				return;
-			}
+			if (fileWatchInFlight) return;
+			fileWatchInFlight = true;
+			const path = $currentFilePath ?? "";
+			const navigationAtStart: NavigationSnapshot = {
+				generation: navigationGeneration,
+				path,
+			};
 			try {
+				if (!path) {
+					watchedPath = "";
+					return;
+				}
 				const mtime = await invoke<number>("get_file_mtime", { path });
+				if (!isCurrentNavigation(navigationAtStart, {
+					generation: navigationGeneration,
+					path: $currentFilePath ?? "",
+				})) return;
 				if (watchedPath !== path) {
 					watchedPath = path;
 					watchedMtime = mtime;
 					return;
 				}
 				if (mtime <= watchedMtime) return;
-				watchedMtime = mtime;
 				if (editingParagraph) return;
 				const result = await invoke<{ content: string; encoding: string }>(
 					"read_markdown_file",
 					{ path },
 				);
+				if (!isCurrentNavigation(navigationAtStart, {
+					generation: navigationGeneration,
+					path: $currentFilePath ?? "",
+				})) return;
 				if (result.content === $markdownSource) return;
 				const scrollTop = contentEl?.scrollTop ?? 0;
-				await openFile(path, activeBook ? {
+				const bookId = activeBook?.manifest.bookId;
+				const opened = await openFile(path, activeBook ? {
 					bookChapter: true,
 					restoreRatio: readingProgress,
 					suppressRecent: true,
 					skipFlush: true,
-				} : {});
-				if (activeBook) tocItems = chapterTocItems(activeBook.manifest.chapters);
+					expectedNavigationGeneration: navigationAtStart.generation,
+				} : { expectedNavigationGeneration: navigationAtStart.generation });
+				if (!opened) return;
+				watchedMtime = mtime;
+				if (bookId && activeBook?.manifest.bookId === bookId) {
+					tocItems = chapterTocItems(activeBook.manifest.chapters);
+				}
 				if (contentEl) contentEl.scrollTop = scrollTop;
 			} catch {
 				// 文件被移动/删除等情况：静默忽略，下次轮询再试
+			} finally {
+				fileWatchInFlight = false;
 			}
 		}, 2000);
 
@@ -2143,6 +2167,7 @@
 	type OpenFileOptions = {
 		suppressFailureNotice?: boolean;
 		bookChapter?: boolean;
+		expectedNavigationGeneration?: number;
 		restoreRatio?: number;
 		suppressRecent?: boolean;
 		skipFlush?: boolean;
@@ -2153,11 +2178,18 @@
 	};
 
 	async function openFile(path: string, options: OpenFileOptions = {}): Promise<boolean> {
+		if (
+			options.expectedNavigationGeneration !== undefined &&
+			options.expectedNavigationGeneration !== navigationGeneration
+		) return false;
+		const loadGeneration = ++navigationGeneration;
 		if ((await requestNavigationGuard("打开另一篇 Markdown")) === "cancel") return false;
+		if (navigationGeneration !== loadGeneration) return false;
 
 		if ($currentFilePath && !options.skipFlush) {
 			await flushSaveState();
 		}
+		if (navigationGeneration !== loadGeneration) return false;
 		if (!options.bookChapter) {
 			activeBook = null;
 			activeChapterIndex = -1;
@@ -2168,7 +2200,7 @@
 		}
 
 		// Race condition protection: invalidate previous loads
-		const loadToken = path + ':' + Date.now();
+		const loadToken = `${loadGeneration}:${path}`;
 		currentLoadToken = loadToken;
 
 		$isLoading = true;
