@@ -16,6 +16,7 @@ export async function renderMarkdown(
   relativePath: string,
   rootFilesMap: Map<string, VirtualFile>,
   servedContentBase?: string,
+  chapterTitle?: string,
 ): Promise<HTMLElement> {
   if (typeof marked === 'undefined') {
     throw new Error('系统错误：未找到 Markdown 解析库 Marked。');
@@ -26,7 +27,7 @@ export async function renderMarkdown(
 
   // 1. 将 Markdown 解析为原始 HTML (marked.parse 默认是同步的，但支持 async)
   // 为了安全及一致，我们使用 marked.parse 直接转换
-  const cleanMarkdown = cleanReaderMarkdown(markdownText);
+  const cleanMarkdown = cleanReaderMarkdown(markdownText, chapterTitle);
   const rawHtml = marked.parse(cleanMarkdown);
 
   // 2. 使用 DOMPurify 进行严格的 XSS 净化

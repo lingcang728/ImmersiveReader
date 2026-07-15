@@ -6,16 +6,31 @@
 	export let visible = true;
 	/** When true, chrome overlays content (immersive reading). */
 	export let overlay = false;
+	/** Fired only when maximized state actually changes. */
+	export let onMaximizedChange: ((maximized: boolean) => void) | undefined = undefined;
 
 	let maximized = false;
 	let unlistenResize: (() => void) | undefined;
+	let resizeRaf = 0;
 
 	async function refreshMaximized() {
 		try {
-			maximized = await getCurrentWebviewWindow().isMaximized();
+			const next = await getCurrentWebviewWindow().isMaximized();
+			if (next !== maximized) {
+				maximized = next;
+				onMaximizedChange?.(maximized);
+			}
 		} catch {
 			// Web preview without Tauri.
 		}
+	}
+
+	function scheduleRefreshMaximized() {
+		if (resizeRaf) return;
+		resizeRaf = requestAnimationFrame(() => {
+			resizeRaf = 0;
+			void refreshMaximized();
+		});
 	}
 
 	async function minimize() {
@@ -65,7 +80,7 @@
 		void refreshMaximized();
 		void getCurrentWebviewWindow()
 			.onResized(() => {
-				void refreshMaximized();
+				scheduleRefreshMaximized();
 			})
 			.then((fn) => {
 				unlistenResize = fn;
@@ -73,7 +88,10 @@
 			.catch(() => {
 				/* web preview */
 			});
-		return () => unlistenResize?.();
+		return () => {
+			if (resizeRaf) cancelAnimationFrame(resizeRaf);
+			unlistenResize?.();
+		};
 	});
 </script>
 

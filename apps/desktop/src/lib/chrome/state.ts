@@ -202,10 +202,23 @@ export type FlowFontScaleChangeMessage = {
 	scale: number;
 };
 
+/** Parent → iframe: wide layout when the shell is maximized/fullscreen. */
+export type FlowSetLayoutModeMessage = {
+	source: typeof FLOW_READING_MESSAGE_SOURCE;
+	version: typeof FLOW_READING_MESSAGE_VERSION;
+	type: 'set-layout-mode';
+	wide: boolean;
+	contentMaxWidth: number;
+};
+
 export type FlowBridgeMessage =
 	| FlowReadingActivityMessage
 	| FlowSetFontScaleMessage
-	| FlowFontScaleChangeMessage;
+	| FlowFontScaleChangeMessage
+	| FlowSetLayoutModeMessage;
+
+/** Wide column cap when the desktop window is maximized or fullscreen. */
+export const WIDE_LAYOUT_MAX_WIDTH_PX = 1120;
 
 export function createFlowReadingActivityMessage(): FlowReadingActivityMessage {
 	return {
@@ -230,6 +243,19 @@ export function createFlowFontScaleChangeMessage(scale: number): FlowFontScaleCh
 		version: FLOW_READING_MESSAGE_VERSION,
 		type: 'font-scale-change',
 		scale
+	};
+}
+
+export function createFlowSetLayoutModeMessage(
+	wide: boolean,
+	contentMaxWidth: number = WIDE_LAYOUT_MAX_WIDTH_PX
+): FlowSetLayoutModeMessage {
+	return {
+		source: FLOW_READING_MESSAGE_SOURCE,
+		version: FLOW_READING_MESSAGE_VERSION,
+		type: 'set-layout-mode',
+		wide,
+		contentMaxWidth: Math.max(480, Math.round(contentMaxWidth))
 	};
 }
 
@@ -259,6 +285,15 @@ export function isFlowFontScaleChangeMessage(
 ): data is FlowFontScaleChangeMessage {
 	if (!isFlowEnvelope(data) || data.type !== 'font-scale-change') return false;
 	return typeof data.scale === 'number' && Number.isFinite(data.scale);
+}
+
+export function isFlowSetLayoutModeMessage(data: unknown): data is FlowSetLayoutModeMessage {
+	if (!isFlowEnvelope(data) || data.type !== 'set-layout-mode') return false;
+	return (
+		typeof data.wide === 'boolean' &&
+		typeof data.contentMaxWidth === 'number' &&
+		Number.isFinite(data.contentMaxWidth)
+	);
 }
 
 /** Accept only local reader origins for the flow iframe message bridge. */

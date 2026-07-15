@@ -52,6 +52,7 @@
 	import TrashPanel from "$lib/components/TrashPanel.svelte";
 	import WindowChrome from "$lib/components/WindowChrome.svelte";
 	import WindowResizeHandles from "$lib/components/WindowResizeHandles.svelte";
+	import BackButton from "$lib/components/BackButton.svelte";
 	import type { TrashDeleteResult, TrashItem } from "$lib/trash/types";
 	import {
 		chapterTocItems,
@@ -66,8 +67,10 @@
 	import {
 		CHROME_HIDE_DELAY_MS,
 		CHROME_TOP_EDGE_PX,
+		WIDE_LAYOUT_MAX_WIDTH_PX,
 		createChromeState,
 		createFlowSetFontScaleMessage,
+		createFlowSetLayoutModeMessage,
 		deriveChromeSurface,
 		isAllowedFlowMessageOrigin,
 		isFlowFontScaleChangeMessage,
@@ -345,6 +348,46 @@
 		}
 	}
 
+	let windowMaximized = false;
+	let lastPostedLayoutWide: boolean | null = null;
+
+	function postFlowLayoutMode(wide: boolean) {
+		const win = flowIframeEl?.contentWindow;
+		if (!win || !flowReaderSession) return;
+		if (lastPostedLayoutWide === wide) return;
+		lastPostedLayoutWide = wide;
+		try {
+			win.postMessage(
+				createFlowSetLayoutModeMessage(
+					wide,
+					wide ? WIDE_LAYOUT_MAX_WIDTH_PX : $readingWidth,
+				),
+				"*",
+			);
+		} catch {
+			// iframe may be mid-navigation
+		}
+	}
+
+	function handleWindowMaximizedChange(maximized: boolean) {
+		if (windowMaximized === maximized) return;
+		const progress = contentEl
+			? contentEl.scrollTop /
+				Math.max(1, contentEl.scrollHeight - contentEl.clientHeight)
+			: readingProgress;
+		windowMaximized = maximized;
+		requestAnimationFrame(() => {
+			if (!contentEl || !$currentFilePath) return;
+			contentEl.scrollTop =
+				progress * Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
+			if ($focusMode) {
+				invalidateFocusMetrics();
+				scheduleFocusUpdate(lastFocusedIdx >= 0 ? lastFocusedIdx : undefined);
+			}
+		});
+		if (flowReaderSession) postFlowLayoutMode(maximized);
+	}
+
 	function setFontScale(next: number, options?: { fromFlow?: boolean }) {
 		const clamped = clampFontScale(next);
 		zoomIndicatorText = `字号 ${Math.round(clamped * 100)}%`;
@@ -361,6 +404,8 @@
 	// Keep the continuous-reader iframe in sync with settings / store updates.
 	$: if (flowReaderSession && flowIframeEl) {
 		postFlowFontScale($fontScale);
+		lastPostedLayoutWide = null;
+		postFlowLayoutMode(windowMaximized);
 	}
 
 	function adjustFontScale(direction: number) {
@@ -3771,12 +3816,13 @@
 	class:is-light-theme={isLightTheme}
 	class:editing-in-focus={isEditingInDarkFocus}
 	class:chrome-overlay={chromeOverlay}
+	class:layout-wide={windowMaximized}
 	role="application"
 >
 	<WindowResizeHandles />
 
-	<!-- Reading progress indicator -->
-	{#if $currentFilePath}
+	<!-- Reading progress indicator (hidden during continuous reading) -->
+	{#if $currentFilePath && !flowReaderSession}
 		<div
 			class="progress-line"
 			style="width: {readingProgress * 100}%"
@@ -3805,7 +3851,12 @@
 		on:focusin={onChromeFocusIn}
 		on:focusout={onChromeFocusOut}
 	>
-		<WindowChrome title={chromeTitle} visible={true} overlay={false}>
+		<WindowChrome
+			title={chromeTitle}
+			visible={true}
+			overlay={false}
+			onMaximizedChange={handleWindowMaximizedChange}
+		>
 			<div slot="actions" class="chrome-extra-actions">
 				{#if !showMarkdownContext && !showFlowContext}
 					<button
@@ -3838,23 +3889,7 @@
 		{#if showMarkdownContext}
 			<header class="topbar context-bar" role="toolbar" aria-label="阅读工具栏">
 				<div class="topbar-left">
-					<button
-						type="button"
-						class="icon-btn shelf-back"
-						on:click={() => void returnToBookshelf()}
-						title="返回书架"
-						aria-label="返回书架"
-					>
-						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-							<path
-								d="M15 6L9 12l6 6"
-								stroke="currentColor"
-								stroke-width="1.85"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							/>
-						</svg>
-					</button>
+					<BackButton label="返回书架" onClick={() => void returnToBookshelf()} />
 					{#if fileName}
 						<span class="filename">{isTemporaryReading ? `临时 · ${fileName}` : fileName}</span>
 					{/if}
@@ -3945,11 +3980,13 @@
 			</header>
 		{:else if showFlowContext}
 			<header class="flow-context-bar context-bar" role="toolbar" aria-label="连续阅读">
-				<div>
-					<strong>连续阅读</strong>
-					<span>所有章节留在沉浸阅读窗口内</span>
+				<div class="flow-context-left">
+					<BackButton label="返回书库" onClick={() => void closeFlowReader()} />
+					<div>
+						<strong>连续阅读</strong>
+						<span>所有章节留在沉浸阅读窗口内</span>
+					</div>
 				</div>
-				<button type="button" on:click={() => void closeFlowReader()}>返回书库</button>
 			</header>
 		{/if}
 	</div>
@@ -3996,7 +4033,11 @@
 					title="连续阅读器"
 					src={flowReaderSession.url}
 					sandbox="allow-same-origin allow-scripts allow-forms"
-					on:load={() => postFlowFontScale($fontScale)}
+					on:load={() => {
+						lastPostedLayoutWide = null;
+						postFlowFontScale($fontScale);
+						postFlowLayoutMode(windowMaximized);
+					}}
 				></iframe>
 			</section>
 		{:else if trashOpen}
@@ -4210,8 +4251,8 @@
 		</div>
 	{/if}
 
-	<!-- Bottom status line: appears while scrolling, breathes away when idle -->
-	{#if $currentFilePath && !$focusMode && !editingParagraph}
+	<!-- Bottom status line: appears while scrolling; never during continuous reading -->
+	{#if $currentFilePath && !$focusMode && !editingParagraph && !flowReaderSession}
 		<div class="status-line-pill" class:visible={statusLineVisible}>
 			{#if statusChapterText}
 				<span class="status-chapter">{statusChapterText}</span>
@@ -4363,27 +4404,6 @@
 		height: 28px;
 	}
 
-	.shelf-back {
-		/* Fixed square control — never clips text */
-		flex: none;
-		width: 36px;
-		height: 36px;
-		min-width: 36px;
-		margin-right: 10px;
-		padding: 0;
-		border: 1px solid var(--hr);
-		border-radius: 10px;
-		background: var(--bg-secondary);
-		color: var(--text);
-		overflow: visible;
-	}
-
-	.shelf-back:hover {
-		border-color: var(--link);
-		color: var(--link);
-		background: color-mix(in srgb, var(--link) 14%, var(--bg-secondary));
-	}
-
 	.book-seam {
 		display: flex;
 		flex-direction: column;
@@ -4421,6 +4441,12 @@
 		overflow: visible;
 	}
 
+	.flow-context-left {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		min-width: 0;
+	}
 	.flow-context-bar {
 		gap: 12px;
 	}
@@ -4440,27 +4466,6 @@
 	.flow-context-bar span {
 		font-size: 11px;
 		color: var(--text-secondary);
-	}
-
-	.flow-context-bar button {
-		border: 1px solid var(--hr);
-		border-radius: 8px;
-		background: var(--bg-secondary);
-		color: var(--text);
-		padding: 6px 12px;
-		cursor: pointer;
-		font: inherit;
-		font-size: 12px;
-	}
-
-	.flow-context-bar button:hover {
-		border-color: var(--link);
-		color: var(--link);
-	}
-
-	.flow-context-bar button:focus-visible {
-		outline: 2px solid var(--link);
-		outline-offset: 2px;
 	}
 
 	.filename {
@@ -4550,6 +4555,10 @@
 		z-index: 20;
 		animation: contentFadeIn 0.3s ease;
 		overflow-wrap: anywhere;
+	}
+	/* Maximized / fullscreen: responsive wide column up to ~1120px. */
+	.app.layout-wide .article {
+		max-width: min(1120px, 100%);
 	}
 
 	.app:not(.focus-mode) :global(.article > *) {

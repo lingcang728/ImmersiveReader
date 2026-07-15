@@ -498,12 +498,14 @@
     }
 
     .articles-container {
+      /* Parent shell sets --flow-content-max-width when maximized (up to ~1120px). */
       width: 100%;
-      max-width: 720px;
+      max-width: var(--flow-content-max-width, 720px);
       min-width: 0;
       display: flex;
       flex-direction: column;
       gap: 100px;
+      transition: max-width 0.2s ease;
     }
 
     /* --- 文章卡片 (Raycast/Linear 风格) --- */

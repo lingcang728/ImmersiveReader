@@ -337,6 +337,7 @@ export class ReaderApp {
           art.relativePath,
           this.filesMap,
           this.mode.contentBase,
+          art.title,
         );
         bodyContainer.innerHTML = '';
         bodyContainer.appendChild(renderedDom);
@@ -355,7 +356,9 @@ export class ReaderApp {
           rawMarkdown,
           art.articleId,
           art.relativePath,
-          this.filesMap
+          this.filesMap,
+          undefined,
+          art.title,
         );
         bodyContainer.innerHTML = '';
         bodyContainer.appendChild(renderedDom);
@@ -889,6 +892,17 @@ export class ReaderApp {
     }
   }
 
+  private applyLayoutMode(wide: boolean, contentMaxWidth: number) {
+    const maxWidth = Math.max(480, Math.round(contentMaxWidth || (wide ? 1120 : 720)));
+    const root = document.documentElement;
+    const next = `${maxWidth}px`;
+    if (root.style.getPropertyValue('--flow-content-max-width') === next) return;
+    const anchor = this.captureViewportAnchor();
+    root.style.setProperty('--flow-content-max-width', next);
+    root.classList.toggle('layout-wide', wide);
+    requestAnimationFrame(() => this.restoreViewportAnchor(anchor));
+  }
+
   private bindParentFontScaleBridge() {
     window.addEventListener('message', (event: MessageEvent) => {
       // Only accept messages from the embedding parent window.
@@ -898,6 +912,13 @@ export class ReaderApp {
       if (data.source !== 'immersive-reader-flow' || data.version !== 1) return;
       if (data.type === 'set-font-scale' && typeof data.scale === 'number') {
         this.applyFontScale(data.scale, { notifyParent: false, showToast: false });
+      }
+      if (
+        data.type === 'set-layout-mode' &&
+        typeof data.wide === 'boolean' &&
+        typeof data.contentMaxWidth === 'number'
+      ) {
+        this.applyLayoutMode(data.wide, data.contentMaxWidth);
       }
     });
   }

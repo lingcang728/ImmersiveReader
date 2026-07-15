@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { TrashItem } from '$lib/trash/types';
+	import BackButton from './BackButton.svelte';
 
 	export let items: readonly TrashItem[] = [];
 	export let loading = false;
@@ -23,8 +24,8 @@
 
 <section class="trash-workspace" aria-label="回收站">
 	<header>
-		<div>
-			<button type="button" class="back" on:click={onClose} aria-label="返回书架">←</button>
+		<div class="header-left">
+			<BackButton label="返回书架" onClick={onClose} />
 			<div>
 				<span>书库</span>
 				<h1>回收站</h1>
@@ -88,12 +89,13 @@
 		border-bottom: 1px solid var(--hr);
 		background: color-mix(in srgb, var(--bg) 94%, var(--link) 6%);
 	}
-	header > div {
+	.header-left {
 		display: flex;
 		align-items: center;
 		gap: 13px;
+		min-width: 0;
 	}
-	header div div {
+	.header-left > div {
 		display: flex;
 		align-items: baseline;
 		gap: 8px;
@@ -111,18 +113,11 @@
 		font: inherit;
 		cursor: pointer;
 	}
-	.back,
 	.refresh {
 		border: 1px solid var(--hr);
 		border-radius: 999px;
 		background: var(--bg-secondary);
 		color: var(--text-secondary);
-	}
-	.back {
-		width: 34px;
-		height: 34px;
-	}
-	.refresh {
 		padding: 7px 14px;
 	}
 	.trash-body {
