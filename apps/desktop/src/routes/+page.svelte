@@ -83,6 +83,13 @@
 		type ChromeEvent,
 		type ChromeState,
 	} from "$lib/chrome/state";
+	import {
+		READING_CURSOR_HIDE_DELAY_MS,
+		createReadingCursorState,
+		reduceReadingCursor,
+		type ReadingCursorEvent,
+		type ReadingCursorState,
+	} from "$lib/reading/cursor";
 
 	let contentEl: HTMLElement;
 	let tocItems: TocItem[] = [];
@@ -596,6 +603,9 @@
 	let chromeHideTimer: ReturnType<typeof setTimeout> | null = null;
 	let chromeTitle = "沉浸阅读";
 	let flowIframeEl: HTMLIFrameElement | null = null;
+	let readingCursorState: ReadingCursorState = createReadingCursorState();
+	let readingCursorHideTimer: ReturnType<typeof setTimeout> | null = null;
+	let readingCursorMoveFrame: number | null = null;
 
 	function clearChromeHideTimer() {
 		if (chromeHideTimer) {
@@ -656,6 +666,33 @@
 		const stack = event.currentTarget as HTMLElement | null;
 		if (stack && next && stack.contains(next)) return;
 		dispatchChrome({ type: "chrome-blur" });
+	}
+
+	function clearReadingCursorHideTimer() {
+		if (readingCursorHideTimer) {
+			clearTimeout(readingCursorHideTimer);
+			readingCursorHideTimer = null;
+		}
+	}
+
+	function dispatchReadingCursor(event: ReadingCursorEvent) {
+		readingCursorState = reduceReadingCursor(readingCursorState, event);
+		if (readingCursorState.shouldCancelHide) {
+			clearReadingCursorHideTimer();
+		}
+		if (readingCursorState.shouldScheduleHide && !readingCursorHideTimer) {
+			readingCursorHideTimer = setTimeout(() => {
+				readingCursorHideTimer = null;
+				dispatchReadingCursor({ type: "apply-hide" });
+			}, READING_CURSOR_HIDE_DELAY_MS);
+		}
+	}
+
+	$: {
+		const readingSurfaceActive = !!$currentFilePath && !flowReaderSession;
+		if (readingSurfaceActive !== readingCursorState.active) {
+			dispatchReadingCursor({ type: readingSurfaceActive ? "enter-reading" : "leave-reading" });
+		}
 	}
 
 	$: chromeVisible = chromeState.chromeVisible;
@@ -1639,6 +1676,10 @@
 		setTimeout(checkInitialFile, 200);
 
 		const handleKeydown = (e: KeyboardEvent) => {
+			if (readingCursorState.active) {
+				dispatchReadingCursor({ type: "keyboard" });
+			}
+
 			if (isModKey(e) && e.key === "o") {
 				e.preventDefault();
 				openFileDialog();
@@ -1971,6 +2012,20 @@
 		document.addEventListener("visibilitychange", refreshTasksOnResume);
 		void refreshAcquisitionSnapshot();
 
+		const handleReadingCursorPointerMove = () => {
+			if (!readingCursorState.active || readingCursorMoveFrame !== null) return;
+			readingCursorMoveFrame = window.requestAnimationFrame(() => {
+				readingCursorMoveFrame = null;
+				dispatchReadingCursor({ type: "pointer-move" });
+			});
+		};
+
+		const handleReadingCursorWheel = (e: WheelEvent) => {
+			if (!readingCursorState.active) return;
+			if (Math.abs(e.deltaX) + Math.abs(e.deltaY) + Math.abs(e.deltaZ) < 0.01) return;
+			dispatchReadingCursor({ type: "wheel" });
+		};
+
 		const handleContentMouseOver = (e: MouseEvent) => {
 			const link = getFootnoteLink(e.target);
 			if (link) {
@@ -2005,6 +2060,8 @@
 		window.addEventListener("keydown", handleKeydown);
 		window.addEventListener("keyup", handleKeyup);
 		window.addEventListener("blur", handleWindowBlur);
+		window.addEventListener("pointermove", handleReadingCursorPointerMove, { passive: true });
+		window.addEventListener("wheel", handleReadingCursorWheel, { passive: true });
 		contentEl?.addEventListener("scroll", handleScroll);
 		contentEl?.addEventListener("wheel", handleWheel, { passive: false });
 		contentEl?.addEventListener("click", handleContentClick);
@@ -2172,6 +2229,8 @@
 			window.removeEventListener("keydown", handleKeydown);
 			window.removeEventListener("keyup", handleKeyup);
 			window.removeEventListener("blur", handleWindowBlur);
+			window.removeEventListener("pointermove", handleReadingCursorPointerMove);
+			window.removeEventListener("wheel", handleReadingCursorWheel);
 			window.removeEventListener("message", handleFlowReaderMessage);
 			contentEl?.removeEventListener("scroll", handleScroll);
 			contentEl?.removeEventListener("wheel", handleWheel);
@@ -2198,6 +2257,11 @@
 				clearTimeout(saveStateTimer);
 			}
 			clearChromeHideTimer();
+			if (readingCursorMoveFrame !== null) {
+				cancelAnimationFrame(readingCursorMoveFrame);
+				readingCursorMoveFrame = null;
+			}
+			clearReadingCursorHideTimer();
 			if (zoomIndicatorTimer) {
 				clearTimeout(zoomIndicatorTimer);
 			}
@@ -3919,6 +3983,7 @@
 	class:focus-key-scroll-active={isFocusKeyScrollActive}
 	class:is-light-theme={isLightTheme}
 	class:editing-in-focus={isEditingInDarkFocus}
+	class:reading-cursor-hidden={readingCursorState.hidden}
 	class:chrome-overlay={chromeOverlay}
 	class:layout-wide={windowMaximized}
 	role="application"
@@ -4433,6 +4498,11 @@
 		display: flex;
 		flex-direction: column;
 		position: relative;
+	}
+
+	.app.reading-cursor-hidden,
+	.app.reading-cursor-hidden :global(*) {
+		cursor: none !important;
 	}
 
 	/* ========== Unified chrome stack ========== */
