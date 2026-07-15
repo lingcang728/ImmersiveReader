@@ -98,6 +98,7 @@ try {
 Push-Location (Join-Path $root 'tools\zhihu-packer')
 try {
     Remove-FreshGeneratedDirectory 'tools\zhihu-packer\dist'
+    Invoke-Checked 'Zhihu Reader compile (fresh)' { & $npm run compile-reader }
     Invoke-Checked 'Zhihu tests' { & $npm test }
     Invoke-Checked 'Zhihu TypeScript build' { & $npm run build }
     Invoke-Checked 'Zhihu Reader compile' { & $npm run compile-reader }
