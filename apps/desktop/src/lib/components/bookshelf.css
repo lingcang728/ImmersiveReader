@@ -678,17 +678,6 @@
 	color: var(--fg);
 }
 
-@keyframes task-row-in {
-	from {
-		opacity: 0;
-		transform: translateY(4px);
-	}
-	to {
-		opacity: 1;
-		transform: translateY(0);
-	}
-}
-
 .book-detail-backdrop {
 	position: fixed;
 	inset: 0;
