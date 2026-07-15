@@ -135,6 +135,12 @@ impl ControlDb {
                   created_at TEXT NOT NULL,
                   completed_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS cancel_discard_intents (
+                  task_id TEXT PRIMARY KEY NOT NULL,
+                  state TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
                 PRAGMA user_version = 1;
                 "#;
         let mut last_lock_error = None;
@@ -658,6 +664,64 @@ impl ControlDb {
             .filter(|snapshot| is_active_task(&snapshot.lifecycle_state))
             .map(|snapshot| snapshot.id)
             .collect())
+    }
+
+    pub fn capture_cancel_discard(&self) -> Result<Vec<String>, String> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        let mut statement = transaction
+            .prepare("SELECT id, snapshot_json FROM task_snapshots")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut task_ids = Vec::new();
+        for row in rows {
+            let (task_id, raw) = row.map_err(|error| error.to_string())?;
+            let snapshot: TaskSnapshot =
+                serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+            if snapshot.kind == TaskKind::Podcast && is_active_task(&snapshot.lifecycle_state) {
+                task_ids.push(task_id);
+            }
+        }
+        drop(statement);
+        let now = chrono::Utc::now().to_rfc3339();
+        for task_id in task_ids {
+            transaction
+                .execute(
+                    "INSERT INTO cancel_discard_intents(task_id, state, created_at, updated_at) VALUES (?1, 'pending', ?2, ?2) ON CONFLICT(task_id) DO UPDATE SET state = 'pending', updated_at = excluded.updated_at",
+                    params![task_id, now],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        self.pending_cancel_discard()
+    }
+
+    pub fn pending_cancel_discard(&self) -> Result<Vec<String>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT task_id FROM cancel_discard_intents WHERE state = 'pending' ORDER BY created_at")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    pub fn complete_cancel_discard(&self, task_id: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "UPDATE cancel_discard_intents SET state = 'completed', updated_at = ?2 WHERE task_id = ?1",
+                params![task_id, chrono::Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub fn validate_task_control(

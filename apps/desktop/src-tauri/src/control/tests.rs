@@ -110,6 +110,7 @@ fn control_database_creates_all_v3_control_tables() {
         "engine_instances",
         "publish_transaction_index",
         "migration_runs",
+        "cancel_discard_intents",
     ] {
         assert!(tables.contains(&expected.to_string()), "missing {expected}");
     }
@@ -218,6 +219,48 @@ fn task_event_for(
 
 fn task_event(sequence: u64, revision: u64) -> TaskEvent {
     task_event_for("podcast-1", TaskKind::Podcast, "book-1", sequence, revision)
+}
+
+#[test]
+fn cancel_discard_capture_survives_reopen_until_cache_cleanup_completes() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-cancel-intent-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    {
+        let mut database = ControlDb::open(&path).expect("control database must open");
+        database
+            .persist_task_event(&task_event(1, 1))
+            .expect("task must persist");
+        assert_eq!(
+            database
+                .capture_cancel_discard()
+                .expect("cancel set must persist"),
+            vec!["podcast-1"]
+        );
+        database
+            .cancel_active_tasks()
+            .expect("task must become terminal");
+    }
+    let reopened = ControlDb::open(&path).expect("control database must reopen");
+    assert_eq!(
+        reopened
+            .pending_cancel_discard()
+            .expect("pending intents must load"),
+        vec!["podcast-1"]
+    );
+    reopened
+        .complete_cancel_discard("podcast-1")
+        .expect("intent must complete");
+    assert!(reopened
+        .pending_cancel_discard()
+        .expect("pending intents must reload")
+        .is_empty());
+    drop(reopened);
+    fs::remove_dir_all(root).expect("fixture must be removed");
 }
 
 #[test]

@@ -598,6 +598,8 @@ fn get_acquisition_snapshot(
     }
     control::repair_orphaned_podcast_tasks()?;
     let mut control = control::ControlDb::open_current()?;
+    let locations = storage::StorageLocations::current_with_library_settings()?;
+    reconcile_cancel_and_discard(&locations, &control)?;
     // Keep the queue lean: drop terminal history older than a week.
     let _ = control.prune_terminal_tasks_older_than(7);
     let mut tasks = control.task_snapshots(kind)?;
@@ -653,6 +655,40 @@ fn enrich_task_display_names(
             task.display_name = Some(stem.to_string());
         }
     }
+}
+
+fn reconcile_cancel_and_discard(
+    locations: &storage::StorageLocations,
+    control: &control::ControlDb,
+) -> Result<(), String> {
+    let pending = control.pending_cancel_discard()?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let active: BTreeSet<String> = control
+        .task_snapshots(None)?
+        .into_iter()
+        .filter(|snapshot| {
+            matches!(
+                snapshot.lifecycle_state,
+                tasks::LifecycleState::Queued
+                    | tasks::LifecycleState::Starting
+                    | tasks::LifecycleState::Running
+                    | tasks::LifecycleState::Pausing
+                    | tasks::LifecycleState::Paused
+                    | tasks::LifecycleState::Stopping
+            )
+        })
+        .map(|snapshot| snapshot.id)
+        .collect();
+    for task_id in pending {
+        if active.contains(&task_id) {
+            continue;
+        }
+        cache::discard_podcast_task_at(locations, &task_id)?;
+        control.complete_cancel_discard(&task_id)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -851,19 +887,10 @@ fn schedule_tray_exit_fallback(app: &tauri::AppHandle, delay: Duration) {
 fn cancel_and_discard(app: tauri::AppHandle) -> Result<(), String> {
     let locations = storage::StorageLocations::current()?;
     let mut control = control::ControlDb::open_current()?;
-    let mut podcast_task_ids = control
-        .active_podcast_task_ids()?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    control.capture_cancel_discard()?;
     tools::stop_all()?;
-    let cancellation = control.cancel_active_tasks();
-    if let Ok(cancelled) = &cancellation {
-        podcast_task_ids.extend(cancelled.iter().cloned());
-    }
-    for task_id in podcast_task_ids {
-        cache::discard_podcast_task_at(&locations, &task_id)?;
-    }
-    cancellation?;
+    control.cancel_active_tasks()?;
+    reconcile_cancel_and_discard(&locations, &control)?;
     app.exit(0);
     Ok(())
 }
