@@ -5335,16 +5335,6 @@
 			opacity: 1;
 		}
 	}
-	@keyframes slideIn {
-		from {
-			transform: translateX(20px);
-			opacity: 0;
-		}
-		to {
-			transform: translateX(0);
-			opacity: 1;
-		}
-	}
 	@keyframes scaleIn {
 		from {
 			transform: scale(0.95);
