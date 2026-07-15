@@ -8,8 +8,21 @@ const QA_TARGET: &str = "com.lingcang.immersivereading.qa/deepseek-api-key";
 #[serde(rename_all = "camelCase")]
 pub struct SecretStatus {
     pub configured: bool,
-    pub target: String,
+    /// First two characters + stars; never the full key.
+    pub masked_hint: Option<String>,
     pub last_verified_at: Option<String>,
+}
+
+fn mask_secret_hint(secret: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(secret);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut chars = trimmed.chars();
+    let a = chars.next().unwrap_or('*');
+    let b = chars.next().unwrap_or('*');
+    Some(format!("{a}{b}********"))
 }
 
 pub fn deepseek_target(channel: &AppChannel) -> &'static str {
@@ -142,16 +155,17 @@ fn delete_secret(_target: &str) -> Result<(), String> {
 
 pub fn deepseek_status(channel: &AppChannel) -> Result<SecretStatus, String> {
     let target = deepseek_target(channel);
-    let configured = match read_secret(target)? {
+    let (configured, masked_hint) = match read_secret(target)? {
         Some(mut secret) => {
+            let hint = mask_secret_hint(&secret);
             secret.fill(0);
-            true
+            (true, hint)
         }
-        None => false,
+        None => (false, None),
     };
     Ok(SecretStatus {
         configured,
-        target: target.to_string(),
+        masked_hint,
         last_verified_at: configured.then(|| chrono::Utc::now().to_rfc3339()),
     })
 }
@@ -196,7 +210,7 @@ mod tests {
     fn secret_status_serialization_never_has_a_secret_field() {
         let status = SecretStatus {
             configured: true,
-            target: QA_TARGET.to_string(),
+            masked_hint: Some("sk********".to_string()),
             last_verified_at: None,
         };
         let json = serde_json::to_string(&status).expect("status must serialize");
@@ -204,5 +218,15 @@ mod tests {
         assert!(!json.contains("apiKey"));
         assert!(!json.contains("secret"));
         assert!(!json.contains("credentialBlob"));
+        assert!(!json.contains("target"));
+        assert!(json.contains("maskedHint"));
+    }
+
+    #[test]
+    fn mask_secret_hint_keeps_only_two_prefix_chars() {
+        assert_eq!(
+            super::mask_secret_hint(b"sk-secret-value"),
+            Some("sk********".to_string())
+        );
     }
 }

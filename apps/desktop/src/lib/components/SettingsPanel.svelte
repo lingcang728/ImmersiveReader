@@ -37,7 +37,11 @@
 		backupsBytes: number;
 		runtimeStateBytes: number;
 	};
-	type SecretStatus = { configured: boolean; target: string; lastVerifiedAt?: string | null };
+	type SecretStatus = {
+		configured: boolean;
+		maskedHint?: string | null;
+		lastVerifiedAt?: string | null;
+	};
 	type MigrationPreview = {
 		items: Array<{ kind: string; exists: boolean; bytes: number; sensitive: boolean; conflict: boolean }>;
 		totalBytes: number;
@@ -57,6 +61,9 @@
 	let migrationRuns: MigrationRun[] = [];
 	let backupResult: StateBackupResult | null = null;
 	let panelLoading = false;
+	let advancedLoading = false;
+	let advancedOpen = false;
+	let advancedLoaded = false;
 	let actionBusy = false;
 	let panelNotice = "";
 	let apiKey = "";
@@ -64,18 +71,22 @@
 	let storageRows: Array<[string, string, string, number]> = [];
 	$: storageRows = locations
 		? [
-				["library", "Library", locations.libraryRoot, usage?.libraryBytes ?? 0],
-				["data", "Data", locations.dataRoot, usage?.dataBytes ?? 0],
-				["cache", "Cache", locations.cacheRoot, usage?.cacheBytes ?? 0],
-				["logs", "Logs", locations.logsRoot, usage?.logsBytes ?? 0],
-				["backups", "Backups", locations.backupsRoot, usage?.backupsBytes ?? 0],
-				["runtime_state", "RuntimeState", locations.runtimeStateRoot, usage?.runtimeStateBytes ?? 0]
+				["library", "书库", locations.libraryRoot, usage?.libraryBytes ?? 0],
+				["data", "应用数据", locations.dataRoot, usage?.dataBytes ?? 0],
+				["cache", "缓存", locations.cacheRoot, usage?.cacheBytes ?? 0],
+				["logs", "日志", locations.logsRoot, usage?.logsBytes ?? 0],
+				["backups", "备份", locations.backupsRoot, usage?.backupsBytes ?? 0],
+				["runtime_state", "运行时状态", locations.runtimeStateRoot, usage?.runtimeStateBytes ?? 0]
 			]
 		: [];
 
 	onMount(() => {
 		stopSubscription = settingsOpen.subscribe((open) => {
-			if (open) void loadPanel();
+			if (open) {
+				advancedOpen = false;
+				advancedLoaded = false;
+				void loadPanel();
+			}
 		});
 		return () => stopSubscription?.();
 	});
@@ -85,18 +96,38 @@
 		panelLoading = true;
 		panelNotice = "";
 		try {
-			[locations, usage, secretStatus, publishRecovery, migrationRuns] = await Promise.all([
+			// Core panel: locations + secret only. Disk usage / recovery load on advanced expand.
+			[locations, secretStatus] = await Promise.all([
 				invoke<StorageLocations>("get_storage_locations"),
-				invoke<StorageUsage>("get_storage_usage"),
-				invoke<SecretStatus>("get_secret_status"),
-				invoke<PublishTransaction[]>("get_publish_recovery_status"),
-				invoke<MigrationRun[]>("get_migration_runs")
+				invoke<SecretStatus>("get_secret_status")
 			]);
 		} catch (error) {
 			panelNotice = `设置状态读取失败：${String(error)}`;
 		} finally {
 			panelLoading = false;
 		}
+	}
+
+	async function ensureAdvancedLoaded() {
+		if (advancedLoaded || advancedLoading) return;
+		advancedLoading = true;
+		try {
+			[usage, publishRecovery, migrationRuns] = await Promise.all([
+				invoke<StorageUsage>("get_storage_usage"),
+				invoke<PublishTransaction[]>("get_publish_recovery_status"),
+				invoke<MigrationRun[]>("get_migration_runs")
+			]);
+			advancedLoaded = true;
+		} catch (error) {
+			panelNotice = `高级状态读取失败：${String(error)}`;
+		} finally {
+			advancedLoading = false;
+		}
+	}
+
+	async function toggleAdvanced() {
+		advancedOpen = !advancedOpen;
+		if (advancedOpen) await ensureAdvancedLoaded();
 	}
 
 	function formatBytes(bytes: number) {
@@ -232,7 +263,7 @@
 			<div class="settings-header">
 				<div>
 					<div class="settings-title">设置</div>
-					<div class="settings-subtitle">{locations?.channel ?? "当前 channel"}</div>
+					<div class="settings-subtitle">外观 · 阅读 · 服务</div>
 				</div>
 				<button class="close-btn" type="button" on:click={() => ($settingsOpen = false)} aria-label="关闭设置">×</button>
 			</div>
@@ -243,7 +274,8 @@
 				<div class="notice" role="status">{panelNotice}</div>
 			{/if}
 
-			<div class="settings-title">主题</div>
+			<div class="settings-title section-title">外观</div>
+			<div class="settings-title nested-title">主题</div>
 			<div class="theme-grid">
 				{#each themePairs as pair}
 					<button
@@ -275,7 +307,7 @@
 				{/each}
 			</div>
 
-			<div class="settings-title typo-title">排版</div>
+			<div class="settings-title section-title">阅读排版</div>
 			<div class="typo-rows">
 				<div class="typo-row">
 					<span class="typo-label">字号</span>
@@ -345,73 +377,95 @@
 				</div>
 			</div>
 
-			<div class="settings-title section-title">存储路径</div>
-			{#if locations}
-				<div class="path-list">
-					{#each storageRows as row}
-						<div class="path-row">
-							<span>{row[1]}</span>
-							<div class="path-value">
-								<code title={row[2]}>{row[2]}</code>
-								<small>{formatBytes(row[3])}</small>
-							</div>
-							<div class="path-actions">
-								<button type="button" class="mini-btn" on:click={() => copyPath(row[2])}>复制</button>
-								<button type="button" class="mini-btn" on:click={() => revealDirectory(row[0])}>打开</button>
-							</div>
-						</div>
-					{/each}
-				</div>
-			{:else}
-				<div class="status-line">路径状态不可用</div>
-			{/if}
-
-			<div class="settings-title section-title">维护与恢复</div>
-			<div class="action-grid">
-				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void clearCache()}>安全清理缓存</button>
-				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void previewMigration()}>刷新迁移预览</button>
-				<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void createStateBackup()}>创建状态备份</button>
-			</div>
-			<div class="settings-title section-title recovery-title">恢复中心</div>
-			{#if migrationPreview}
-				<div class="status-card">
-					<strong>迁移预览（只读）</strong>
-					<span>{migrationPreview.items.length} 项 · {formatBytes(migrationPreview.totalBytes)} · 冲突 {migrationPreview.conflictCount} · 敏感 {migrationPreview.sensitiveItemCount}</span>
-				</div>
-			{/if}
-			{#if migrationRuns.length}
-				<div class="status-card">
-					<strong>迁移恢复记录 {migrationRuns.length}</strong>
-					<span>{migrationRuns.slice(0, 4).map((run) => `${run.scope} · ${run.status}`).join("；")}</span>
-				</div>
-			{:else}
-				<div class="status-card"><strong>迁移恢复</strong><span>没有已记录的 migration run；真实迁移仍需独立授权。</span></div>
-			{/if}
-			{#if backupResult}
-				<div class="status-card">
-					<strong>状态备份已创建</strong>
-					<span>{backupResult.backupPath} · 包含 {backupResult.included.join("、") || "无"} · 排除 {backupResult.skipped.join("、")}</span>
-				</div>
-			{/if}
-			{#if publishRecovery.length}
-				<div class="status-card recovery-card">
-					<strong>待恢复发布事务 {publishRecovery.length}</strong>
-					<span>{publishRecovery.map((item) => `${item.bookId} · ${item.phase}`).join("；")}</span>
-					<button type="button" class="mini-btn" disabled={actionBusy} on:click={() => void recoverPublish()}>执行恢复检查</button>
-				</div>
-			{:else}
-				<div class="status-card"><strong>发布恢复</strong><span>没有待恢复的发布事务。</span></div>
-			{/if}
-
-			<div class="settings-title section-title">凭据</div>
+			<div class="settings-title section-title">AI 服务与书库</div>
 			<div class="credential-row">
-				<span>{secretStatus?.configured ? "DeepSeek Key 已配置" : "未配置 DeepSeek Key"}</span>
+				<span>
+					{#if secretStatus?.configured}
+						DeepSeek 已配置{#if secretStatus.maskedHint}（{secretStatus.maskedHint}）{/if}
+					{:else}
+						未配置 DeepSeek Key
+					{/if}
+				</span>
 				{#if secretStatus?.configured}<button type="button" class="mini-btn danger" disabled={actionBusy} on:click={() => void deleteApiKey()}>删除</button>{/if}
 			</div>
 			<div class="credential-form">
-				<input type="password" bind:value={apiKey} autocomplete="new-password" placeholder="输入 Key（不会显示或写入 JSON）" aria-label="DeepSeek API Key" />
+				<input type="password" bind:value={apiKey} autocomplete="new-password" placeholder="输入 Key（不会显示或写入磁盘）" aria-label="DeepSeek API Key" />
 				<button type="button" class="mini-btn" disabled={actionBusy || !apiKey.trim()} on:click={() => void saveApiKey()}>保存</button>
 			</div>
+			{#if locations}
+				<div class="status-card library-card">
+					<strong>当前书库</strong>
+					<span title={locations.libraryRoot}>{locations.libraryRoot}</span>
+					<button type="button" class="mini-btn" on:click={() => revealDirectory("library")}>打开</button>
+				</div>
+			{/if}
+
+			<button type="button" class="advanced-toggle" aria-expanded={advancedOpen} on:click={() => void toggleAdvanced()}>
+				{advancedOpen ? "收起高级" : "高级：路径、缓存、备份与恢复"}
+			</button>
+			{#if advancedOpen}
+				<div class="advanced-block">
+					{#if advancedLoading}
+						<div class="status-line">正在读取存储与恢复状态…</div>
+					{/if}
+					<div class="settings-title nested-title">存储路径</div>
+					{#if locations}
+						<div class="path-list">
+							{#each storageRows as row}
+								<div class="path-row">
+									<span>{row[1]}</span>
+									<div class="path-value">
+										<code title={row[2]}>{row[2]}</code>
+										<small>{formatBytes(row[3])}</small>
+									</div>
+									<div class="path-actions">
+										<button type="button" class="mini-btn" on:click={() => copyPath(row[2])}>复制</button>
+										<button type="button" class="mini-btn" on:click={() => revealDirectory(row[0])}>打开</button>
+									</div>
+								</div>
+							{/each}
+						</div>
+					{:else}
+						<div class="status-line">路径状态不可用</div>
+					{/if}
+
+					<div class="settings-title nested-title">维护与恢复</div>
+					<div class="action-grid">
+						<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void clearCache()}>安全清理缓存</button>
+						<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void previewMigration()}>刷新迁移预览</button>
+						<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void createStateBackup()}>创建状态备份</button>
+					</div>
+					{#if migrationPreview}
+						<div class="status-card">
+							<strong>迁移预览（只读）</strong>
+							<span>{migrationPreview.items.length} 项 · {formatBytes(migrationPreview.totalBytes)} · 冲突 {migrationPreview.conflictCount} · 敏感 {migrationPreview.sensitiveItemCount}</span>
+						</div>
+					{/if}
+					{#if migrationRuns.length}
+						<div class="status-card">
+							<strong>迁移记录 {migrationRuns.length}</strong>
+							<span>{migrationRuns.slice(0, 4).map((run) => `${run.scope} · ${run.status}`).join("；")}</span>
+						</div>
+					{:else if advancedLoaded}
+						<div class="status-card"><strong>迁移恢复</strong><span>没有已记录的迁移；真实迁移仍需独立授权。</span></div>
+					{/if}
+					{#if backupResult}
+						<div class="status-card">
+							<strong>状态备份已创建</strong>
+							<span>{backupResult.backupPath}</span>
+						</div>
+					{/if}
+					{#if publishRecovery.length}
+						<div class="status-card recovery-card">
+							<strong>待恢复发布 {publishRecovery.length}</strong>
+							<span>{publishRecovery.map((item) => item.bookId).join("；")}</span>
+							<button type="button" class="mini-btn" disabled={actionBusy} on:click={() => void recoverPublish()}>执行恢复检查</button>
+						</div>
+					{:else if advancedLoaded}
+						<div class="status-card"><strong>发布恢复</strong><span>没有待恢复的发布事务。</span></div>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	</div>
 {/if}
@@ -425,6 +479,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		padding: 24px;
+		box-sizing: border-box;
 		animation: fadeIn 0.15s ease;
 	}
 	.settings-panel {
@@ -433,11 +489,42 @@
 		border-radius: 12px;
 		padding: 24px;
 		max-width: 760px;
-		width: min(94vw, 760px);
-		max-height: 90vh;
+		width: min(calc(100vw - 48px), 760px);
+		min-width: 0;
+		max-height: min(calc(100vh - 48px), 90vh);
+		overflow-x: hidden;
 		overflow-y: auto;
 		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
-		animation: scaleIn 0.2s ease;
+	}
+	.nested-title {
+		font-size: 12px;
+		font-weight: 600;
+		margin: 12px 0 10px;
+		color: var(--text-secondary);
+	}
+	.advanced-toggle {
+		margin-top: 22px;
+		width: 100%;
+		border: 1px dashed var(--hr);
+		border-radius: 8px;
+		background: transparent;
+		color: var(--text-secondary);
+		font: inherit;
+		font-size: 12px;
+		padding: 10px 12px;
+		cursor: pointer;
+		text-align: left;
+	}
+	.advanced-toggle:hover {
+		border-color: var(--link);
+		color: var(--text);
+	}
+	.advanced-block {
+		margin-top: 12px;
+		min-width: 0;
+	}
+	.library-card {
+		margin-top: 12px;
 	}
 	.settings-header {
 		display: flex;
@@ -636,9 +723,7 @@
 		font-weight: 500;
 	}
 
-	.typo-title {
-		margin-top: 20px;
-	}
+
 	.typo-rows {
 		display: flex;
 		flex-direction: column;
@@ -735,9 +820,5 @@
 	@keyframes fadeIn {
 		from { opacity: 0; }
 		to { opacity: 1; }
-	}
-	@keyframes scaleIn {
-		from { transform: scale(0.95); opacity: 0; }
-		to { transform: scale(1); opacity: 1; }
 	}
 </style>

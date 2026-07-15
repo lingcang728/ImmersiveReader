@@ -26,6 +26,9 @@
 	$: primary = primaryAction(task);
 	$: secondary = secondaryAction(task);
 	$: friendlyError = friendlyErrorText(task);
+	$: preferReducedMotion =
+		typeof window !== 'undefined' &&
+		window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
 
 	function taskKindLabel(kind: TaskSnapshot['kind']): string {
 		return kind === 'podcast' ? '播客' : '知乎';
@@ -231,10 +234,25 @@
 		class="task-progress"
 		class:flowing
 		class:determinate={percent !== null}
+		class:wave-on={flowing && !preferReducedMotion}
 		aria-label={percent !== null ? `进度 ${Math.round(percent)}%` : '进行中'}
 	>
 		{#if percent !== null}
-			<i class="task-fill" style={`transform:scaleX(${percent / 100})`}></i>
+			<span class="task-fill-clip" style={`transform:scaleX(${percent / 100})`}>
+				<i class="task-fill"></i>
+				{#if flowing && !preferReducedMotion}
+					<svg class="task-wave" viewBox="0 0 120 8" preserveAspectRatio="none" aria-hidden="true">
+						<path
+							d="M0 4 Q 15 0 30 4 T 60 4 T 90 4 T 120 4 V8 H0 Z"
+							fill="currentColor"
+						/>
+					</svg>
+				{/if}
+			</span>
+		{:else if flowing && !preferReducedMotion}
+			<svg class="task-wave full" viewBox="0 0 120 8" preserveAspectRatio="none" aria-hidden="true">
+				<path d="M0 4 Q 15 0 30 4 T 60 4 T 90 4 T 120 4 V8 H0 Z" fill="currentColor" />
+			</svg>
 		{:else}
 			<i class="task-flow" aria-hidden="true"></i>
 		{/if}

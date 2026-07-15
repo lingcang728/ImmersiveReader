@@ -40,6 +40,28 @@
 	let acquireOpen = false;
 	let openCardMenu: string | null = null;
 	let recoverableBytes = 0;
+	/** Progressive chapter list in detail dialog: 40 at a time. */
+	let detailChapterVisible = 40;
+	let detailBookId: string | null = null;
+
+	$: {
+		const bookId = selectedBookDetail?.manifest.bookId ?? null;
+		if (bookId !== detailBookId) {
+			detailBookId = bookId;
+			if (selectedBookDetail) {
+				const chapters = selectedBookDetail.manifest.chapters;
+				const current = selectedBookDetail.progress.current;
+				const currentIndex = current
+					? chapters.findIndex((chapter) => chapter.title === current)
+					: -1;
+				// Always include the current chapter in the first window.
+				const ensureCurrent = currentIndex >= 0 ? currentIndex + 1 : 40;
+				detailChapterVisible = Math.max(40, ensureCurrent);
+			} else {
+				detailChapterVisible = 40;
+			}
+		}
+	}
 
 	$: normalizedQuery = query.trim().toLocaleLowerCase();
 	$: filteredBooks = normalizedQuery
@@ -66,29 +88,6 @@
 			hour: '2-digit',
 			minute: '2-digit'
 		}).format(date);
-	}
-
-	function taskKindLabel(kind: TaskSnapshot['kind']): string {
-		return kind === 'podcast' ? '播客转写' : '知乎归档';
-	}
-
-	function taskStateLabel(task: TaskSnapshot): string {
-		if (task.requiredAction === 'login') return '等待登录';
-		if (task.requiredAction === 'captcha') return '等待验证码';
-		if (task.requiredAction === 'configure_secret') return '需要配置密钥';
-		if (task.requiredAction === 'free_disk_space') return '磁盘空间不足';
-		if (task.requiredAction === 'approve_budget') return '等待预算确认';
-		if (task.lifecycleState === 'terminal') {
-			if (task.outcome === 'success') return '已完成';
-			if (task.outcome === 'partial_success') return '部分完成';
-			if (task.outcome === 'cancelled') return '已取消';
-			if (task.outcome === 'interrupted') return '已中断';
-			return '失败';
-		}
-		if (task.lifecycleState === 'paused') return '已暂停';
-		if (task.lifecycleState === 'pausing') return '正在暂停';
-		if (task.lifecycleState === 'queued') return '等待开始';
-		return task.progress.label ?? '正在处理';
 	}
 
 	$: recoverableBytes = tasks
@@ -390,71 +389,100 @@
 		{/if}
 
 		{#if selectedBookDetail}
+			{@const chapters = selectedBookDetail.manifest.chapters}
+			{@const currentTitle = selectedBookDetail.progress.current || ''}
+			{@const currentIdx = Math.max(
+				0,
+				chapters.findIndex((c) => c.title === currentTitle)
+			)}
 			<div class="book-detail-backdrop" role="presentation">
 				<dialog open class="book-detail-dialog" aria-labelledby="book-detail-title">
 					<header class="book-detail-header">
-									<div>
-										<span class="badge">书目详情</span>
-										<h2 id="book-detail-title">{selectedBookDetail.manifest.title}</h2>
-									</div>
-									{#if selectedBookDetail.manifest.source === 'zhihu' && selectedBookDetail.manifest.sourceId}
-										<button type="button" class="source-link" on:click={() => onOpenSource(selectedBookDetail.manifest.source, selectedBookDetail.manifest.sourceId)}>打开知乎主页</button>
-									{/if}
+						<div class="book-detail-heading">
+							<h2 id="book-detail-title">{selectedBookDetail.manifest.title}</h2>
+							<p class="book-detail-summary">
+								{chapters.length} 章 · 进度 {Math.round(selectedBookDetail.progress.position * 100)}% ·
+								{lastReadLabel(selectedBookDetail.manifest.updatedAt)}
+							</p>
+						</div>
 						<button type="button" class="close-detail" aria-label="关闭详情" on:click={onCloseDetails}>×</button>
 					</header>
 					<div class="book-detail-body">
-						<dl class="book-detail-meta">
-							<div><dt>来源</dt><dd>{selectedBookDetail.manifest.source}</dd></div>
-							<div><dt>sourceId</dt><dd>{selectedBookDetail.manifest.sourceId ?? '未提供'}</dd></div>
-							<div><dt>生成时间</dt><dd>{selectedBookDetail.manifest.generatedAt}</dd></div>
-							<div><dt>更新时间</dt><dd>{selectedBookDetail.manifest.updatedAt}</dd></div>
-							<div><dt>章节</dt><dd>{selectedBookDetail.manifest.chapters.length} 篇</dd></div>
-							<div><dt>当前章节</dt><dd>{selectedBookDetail.progress.current || '未开始'}</dd></div>
-							<div><dt>章节位置</dt><dd>{Math.round(selectedBookDetail.progress.position * 100)}%</dd></div>
-						</dl>
-						{#if selectedBookDetail.provenance}
-							<div class="provenance-grid">
-								<div><span>revision</span><strong>{selectedBookDetail.provenance.revision ?? '未提供'}</strong></div>
-								<div><span>sourceKind</span><strong>{selectedBookDetail.provenance.sourceKind ?? '未提供'}</strong></div>
-								<div><span>创建任务</span><strong>{selectedBookDetail.provenance.createdByTaskId ?? '未提供'}</strong></div>
-								<div><span>最近成功任务</span><strong>{selectedBookDetail.provenance.lastSuccessfulTaskId ?? '未提供'}</strong></div>
-								<div><span>engineVersion</span><strong>{selectedBookDetail.provenance.engineVersion ?? '未提供'}</strong></div>
-								<div><span>manifest SHA-256</span><strong>{selectedBookDetail.provenance.manifestSha256?.slice(0, 16) ?? '未提供'}</strong></div>
-							</div>
-						{:else}
-							<p class="book-detail-note">此书目没有 provenance.json；manifest 与阅读状态仍来自当前 Library。</p>
-						{/if}
-						<ol class="chapter-list">
-						{#each selectedBookDetail.manifest.chapters.slice(0, 20) as chapter}
-							<li><span>{chapter.title}</span><small>{chapter.date ?? ''}</small></li>
-						{/each}
-					</ol>
-					<section class="task-history" aria-label="任务记录">
-						<header class="task-history-header">
-							<h3>任务记录</h3>
-							<span>{selectedBookDetail.taskRecords.length} 条</span>
-						</header>
-						{#if selectedBookDetail.taskRecords.length > 0}
-							<div class="task-history-list">
-								{#each selectedBookDetail.taskRecords as task (task.id)}
-									<article class="task-history-item">
-										<div class="task-history-main">
-											<strong>{taskKindLabel(task.kind)}</strong>
-											<span>{taskStateLabel(task)}</span>
-										</div>
-										<div class="task-history-meta">任务 {task.id} · revision {task.revision}</div>
-										<div class="task-history-meta">{task.engineStage || '未记录'} · {task.updatedAt}</div>
-										{#if task.errorMessage}
-											<p class="task-history-error">{task.errorMessage}</p>
-										{/if}
-									</article>
+						<div class="book-detail-actions">
+							<button
+								type="button"
+								class="detail-primary"
+								on:click={() => onOpenBook(selectedBookDetail.manifest.bookId)}
+							>
+								继续阅读
+							</button>
+							{#if selectedBookDetail.manifest.source === 'zhihu' && selectedBookDetail.manifest.sourceId}
+								<button
+									type="button"
+									class="source-link"
+									on:click={() =>
+										onOpenSource(
+											selectedBookDetail.manifest.source,
+											selectedBookDetail.manifest.sourceId
+										)}>打开知乎主页</button
+								>
+							{/if}
+						</div>
+
+						<section class="chapter-section" aria-label="目录">
+							<header class="chapter-section-header">
+								<h3>目录</h3>
+								<span
+									>{Math.min(detailChapterVisible, chapters.length)} / {chapters.length}</span
+								>
+							</header>
+							<ol class="chapter-list">
+								{#each chapters.slice(0, detailChapterVisible) as chapter, index}
+									<li class:current={index === currentIdx || chapter.title === currentTitle}>
+										<span>{chapter.title}</span>
+										<small>{chapter.date ?? ''}</small>
+									</li>
 								{/each}
-							</div>
-						{:else}
-							<p class="book-detail-note">此书目暂时没有关联的获取任务记录。</p>
-						{/if}
-					</section>
-				</div>
+							</ol>
+							{#if detailChapterVisible < chapters.length}
+								<button
+									type="button"
+									class="load-more-chapters"
+									on:click={() => (detailChapterVisible += 40)}
+								>
+									加载更多（+40）
+								</button>
+							{/if}
+						</section>
+
+						<details class="tech-details">
+							<summary>技术信息</summary>
+							<dl class="book-detail-meta">
+								<div><dt>来源</dt><dd>{sourceLabel(selectedBookDetail.manifest.source)}</dd></div>
+								<div><dt>书目 ID</dt><dd>{selectedBookDetail.manifest.bookId}</dd></div>
+								<div><dt>生成时间</dt><dd>{selectedBookDetail.manifest.generatedAt}</dd></div>
+								<div><dt>更新时间</dt><dd>{selectedBookDetail.manifest.updatedAt}</dd></div>
+								<div><dt>当前章节</dt><dd>{currentTitle || '未开始'}</dd></div>
+							</dl>
+							{#if selectedBookDetail.provenance}
+								<div class="provenance-grid">
+									<div>
+										<span>版本</span>
+										<strong>{selectedBookDetail.provenance.revision ?? '—'}</strong>
+									</div>
+									<div>
+										<span>引擎</span>
+										<strong>{selectedBookDetail.provenance.engineVersion ?? '—'}</strong>
+									</div>
+								</div>
+							{/if}
+							{#if selectedBookDetail.taskRecords.length > 0}
+								<p class="book-detail-note">
+									关联任务 {selectedBookDetail.taskRecords.length} 条（默认折叠）
+								</p>
+							{/if}
+						</details>
+					</div>
 				</dialog>
 			</div>
 		{/if}

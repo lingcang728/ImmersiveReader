@@ -76,19 +76,35 @@ def main() -> int:
             page.get_by_role("button", name="详情").first.click()
             page.wait_for_selector(".book-detail-dialog")
             assert page.locator(".book-detail-dialog h2").inner_text() == "你的ZombieMan · 知乎归档"
-            assert page.get_by_role("button", name="打开知乎主页").count() == 1
-            assert "revision" in page.locator(".provenance-grid").inner_text()
-            assert page.locator(".task-history-item").count() == 1
-            assert "revision 2" in page.locator(".task-history-item").inner_text()
-            assert "已完成" in page.locator(".task-history-item").inner_text()
+            assert page.get_by_role("button", name="继续阅读").count() == 1
+            # Technical fields are folded by default (product: no always-visible revision grid).
+            assert page.locator(".tech-details").count() == 1
+            assert page.locator(".tech-details[open]").count() == 0
+            assert page.locator(".provenance-grid").count() == 0
+            assert page.locator(".task-history-item").count() == 0
+            assert page.locator(".chapter-list li").count() <= 40
+            page.locator(".tech-details summary").click()
+            assert page.locator(".tech-details[open]").count() == 1
+            assert "版本" in page.locator(".tech-details").inner_text()
             detail_target = QA_DIR / "bookshelf-detail-900x700.png"
             page.screenshot(path=str(detail_target), full_page=False)
             screenshots.append(str(detail_target))
             page.get_by_role("button", name="关闭详情").click()
 
-            for width, height in ((900, 700), (1280, 800), (1440, 900)):
+            for width, height in (
+                (600, 400),
+                (900, 700),
+                (1280, 800),
+                (1366, 768),
+                (1440, 900),
+                (1920, 1080),
+            ):
                 page.set_viewport_size({"width": width, "height": height})
                 page.wait_for_timeout(150)
+                metrics = page.evaluate(
+                    "() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth })"
+                )
+                assert metrics["sw"] == metrics["cw"], f"horizontal overflow at {width}x{height}: {metrics}"
                 target = QA_DIR / f"bookshelf-{width}x{height}.png"
                 page.screenshot(path=str(target), full_page=False)
                 screenshots.append(str(target))

@@ -481,22 +481,54 @@
 	font-variant-numeric: tabular-nums;
 }
 
+.task-fill-clip {
+	display: block;
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	transform-origin: left center;
+	overflow: hidden;
+	border-radius: inherit;
+	transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+	will-change: transform;
+}
+
 .task-fill {
 	display: block;
 	width: 100%;
 	height: 100%;
-	transform-origin: left center;
 	border-radius: inherit;
 	background: linear-gradient(
 		90deg,
 		color-mix(in srgb, var(--link, var(--accent)) 70%, transparent),
 		var(--link, var(--accent))
 	);
-	transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
-	will-change: transform;
 }
 
-/* Flowing indeterminate / active stream */
+/* Single clipped SVG wave — translate3d only, no JS timers */
+.task-wave {
+	position: absolute;
+	left: 0;
+	bottom: 0;
+	width: 200%;
+	height: 100%;
+	color: color-mix(in srgb, #fff 35%, transparent);
+	pointer-events: none;
+	transform: translate3d(0, 0, 0);
+}
+
+.task-progress.wave-on .task-wave {
+	animation: task-wave-shift 1.8s linear infinite;
+}
+
+.task-wave.full {
+	color: color-mix(in srgb, var(--link, var(--accent)) 55%, transparent);
+	width: 200%;
+	height: 100%;
+}
+
+/* Flowing indeterminate fallback without wave */
 .task-flow {
 	position: absolute;
 	inset: 0;
@@ -514,22 +546,20 @@
 	will-change: transform;
 }
 
-.task-progress.flowing.determinate .task-fill {
-	/* Soft sheen over the solid fill while still running */
-	background:
-		linear-gradient(
-			90deg,
-			transparent 0%,
-			color-mix(in srgb, #fff 28%, transparent) 50%,
-			transparent 100%
-		),
-		linear-gradient(
-			90deg,
-			color-mix(in srgb, var(--link, var(--accent)) 70%, transparent),
-			var(--link, var(--accent))
-		);
-	background-size: 200% 100%, 100% 100%;
-	animation: task-sheen 2.2s linear infinite;
+@keyframes task-wave-shift {
+	from {
+		transform: translate3d(0, 0, 0);
+	}
+	to {
+		transform: translate3d(-50%, 0, 0);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.task-progress.wave-on .task-wave,
+	.task-flow {
+		animation: none !important;
+	}
 }
 
 .task-ellipsis,
@@ -674,13 +704,15 @@
 	z-index: 30;
 	display: grid;
 	place-items: center;
-	padding: 20px;
+	padding: 24px;
+	box-sizing: border-box;
 	background: rgba(0, 0, 0, 0.34);
 }
 
 .book-detail-dialog {
-	width: min(660px, 100%);
-	max-height: 88vh;
+	width: min(660px, calc(100vw - 48px));
+	min-width: 0;
+	max-height: min(88vh, calc(100vh - 48px));
 	overflow: auto;
 	margin: 0;
 	padding: 0;
@@ -700,10 +732,85 @@
 	border-bottom: 1px solid var(--line);
 }
 
+.book-detail-heading {
+	min-width: 0;
+}
+
 .book-detail-header h2 {
-	margin: 9px 0 0;
+	margin: 0;
 	font: 600 20px/1.35 "Noto Serif SC", "SimSun", serif;
 	color: var(--fg-strong);
+}
+
+.book-detail-summary {
+	margin: 8px 0 0;
+	font-size: 12px;
+	color: var(--fg-muted);
+}
+
+.book-detail-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+}
+
+.detail-primary {
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: var(--link, var(--accent));
+	color: #fff;
+	padding: 8px 14px;
+	font-size: 13px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.chapter-section-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+	margin-bottom: 8px;
+}
+
+.chapter-section-header h3 {
+	margin: 0;
+	font-size: 13px;
+}
+
+.chapter-list li.current {
+	color: var(--fg-strong);
+	font-weight: 600;
+	background: color-mix(in srgb, var(--link, var(--accent)) 12%, transparent);
+	border-radius: 6px;
+	padding-inline: 6px;
+}
+
+.load-more-chapters {
+	margin-top: 10px;
+	width: 100%;
+	border: 1px dashed var(--line);
+	border-radius: 8px;
+	background: transparent;
+	color: var(--fg-muted);
+	padding: 8px;
+	font: inherit;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.tech-details {
+	border-top: 1px solid var(--line);
+	padding-top: 10px;
+	color: var(--fg-muted);
+	font-size: 12px;
+}
+
+.tech-details summary {
+	cursor: pointer;
+	font-weight: 600;
+	color: var(--fg);
+	margin-bottom: 10px;
 }
 
 .close-detail {
