@@ -692,7 +692,7 @@ export async function archiveImagesLocally(markdown: string, authorPath: string)
 
 export async function writeMarkdownFile(extracted: ExtractedContent, outputBaseDir: string): Promise<string> {
   // 1. 创建答主目录
-  const authorDirName = sanitizeFilename(extracted.authorName, extracted.authorId || 'anonymous').replace(/_[^_]+$/, ''); // 去掉作者名最后的 ID 后缀，保持干净
+  const authorDirName = sanitizeFilename(extracted.authorName, extracted.authorId || 'anonymous');
   const authorPath = path.resolve(outputBaseDir, authorDirName);
   if (!fs.existsSync(authorPath)) {
     fs.mkdirSync(authorPath, { recursive: true });

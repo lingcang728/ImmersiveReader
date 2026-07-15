@@ -10,6 +10,7 @@ use crate::{atomic_file, publish};
 use chrono::Utc;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -64,8 +65,9 @@ pub(crate) fn sanitize_podcast_folder_name(raw: &str) -> String {
     }
 }
 
-fn podcast_library_relative_path(display_name: &str) -> String {
-    format!("播客/{}", sanitize_podcast_folder_name(display_name))
+fn podcast_library_relative_path(display_name: &str, source_id: &str) -> String {
+    let suffix = source_id.get(..12).unwrap_or(source_id);
+    format!("播客/{}-{}", sanitize_podcast_folder_name(display_name), suffix)
 }
 
 fn collect_markdown(
@@ -156,6 +158,7 @@ fn copy_outputs(
     let mut chapters = Vec::with_capacity(files.len());
     let mut exported_sources = Vec::with_capacity(files.len());
     let single = files.len() == 1;
+    let mut destination_names = HashSet::new();
     for (index, (relative, source)) in files.into_iter().enumerate() {
         // Flatten into the book folder: one file → "{stem}.md"; multi → keep unique names.
         let file_name = if single {
@@ -167,6 +170,12 @@ fn copy_outputs(
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("chapter-{}.md", index + 1))
         };
+        let collision_key = file_name.to_lowercase();
+        if !destination_names.insert(collision_key) {
+            return Err(format!(
+                "PUBLISH_FAILED: output chapter path collides on Windows: {file_name}"
+            ));
+        }
         let destination = incoming.join(&file_name);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
@@ -307,7 +316,7 @@ pub fn publish_task_result_at(
         .unwrap_or("Podcast")
         .to_string();
     // Human-readable shelf path: 播客/{文件名}/  (not Cache, not hash folders).
-    let final_relative_path = podcast_library_relative_path(&input_name);
+    let final_relative_path = podcast_library_relative_path(&input_name, &source_id);
     let rollback_relative_path = format!(".revisions/{source_id}/{revision}");
     let existing = load_transaction(&locations.library_root, task_id).ok();
     if let Some(committed) = existing
@@ -414,7 +423,7 @@ pub fn publish_task_result_at(
 
 #[cfg(test)]
 mod tests {
-    use super::{publish_task_result_at, sanitize_podcast_folder_name};
+    use super::{podcast_library_relative_path, publish_task_result_at, sanitize_podcast_folder_name};
 
     #[test]
     fn sanitizes_podcast_folder_names_for_windows() {
@@ -427,6 +436,10 @@ mod tests {
             "a b c d"
         );
         assert_eq!(sanitize_podcast_folder_name("..."), "未命名播客");
+        assert_eq!(
+            podcast_library_relative_path("episode", "abcdef1234567890"),
+            "播客/episode-abcdef123456"
+        );
     }
 
     #[test]
@@ -641,16 +654,17 @@ mod tests {
         let repeated = publish_task_result_at(&mut control, &locations, task_id)
             .expect("repeated publish must be idempotent");
         assert_eq!(repeated.phase, crate::publish::PublishPhase::Committed);
+        let shelf_folder = format!("source-{}", &source_id[..12]);
         assert!(locations
             .library_root
             .join("播客")
-            .join("source")
+            .join(&shelf_folder)
             .join("manifest.json")
             .is_file());
         assert!(locations
             .library_root
             .join("播客")
-            .join("source")
+            .join(&shelf_folder)
             .join("source.md")
             .is_file());
         assert!(

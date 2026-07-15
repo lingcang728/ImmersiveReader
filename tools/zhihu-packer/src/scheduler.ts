@@ -589,7 +589,7 @@ export function generateAuthorIndex(
   const items = publishedItems || getAuthorSuccessItems(authorId);
   if (items.length === 0) return;
 
-  const authorDirName = sanitizeFilename(authorName, authorId).replace(/_[^_]+$/, '');
+  const authorDirName = sanitizeFilename(authorName, authorId);
   const authorPath = path.resolve(outputBaseDir, authorDirName);
   const indexPath = path.join(authorPath, 'index.md');
 

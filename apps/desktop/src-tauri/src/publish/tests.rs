@@ -13,12 +13,12 @@ fn root(name: &str) -> PathBuf {
     path
 }
 
-fn write_book(path: &Path, revision: u64, title: &str) {
+fn write_book_with_identity(path: &Path, revision: u64, title: &str, book_id: &str, source_id: &str) {
     fs::create_dir_all(path).expect("book directory must exist");
     fs::write(
         path.join("manifest.json"),
         format!(
-            r#"{{"schemaVersion":1,"bookId":"podcast:abc","title":"{title}","source":"podcast","sourceId":"abc","generatedAt":"2026-07-11","updatedAt":"2026-07-11","chapters":[]}}"#
+            r#"{{"schemaVersion":1,"bookId":"{book_id}","title":"{title}","source":"podcast","sourceId":"{source_id}","generatedAt":"2026-07-11","updatedAt":"2026-07-11","chapters":[]}}"#
         ),
     )
     .expect("manifest must write");
@@ -26,10 +26,14 @@ fn write_book(path: &Path, revision: u64, title: &str) {
     fs::write(
         path.join("provenance.json"),
         format!(
-            r#"{{"schemaVersion":1,"bookId":"podcast:abc","sourceId":"abc","sourceKind":"podcast","createdByTaskId":"task-1","lastSuccessfulTaskId":"task-1","revision":{revision},"manifestSha256":"{manifest_hash}","engineVersion":"test","updatedAt":"2026-07-11"}}"#
+            r#"{{"schemaVersion":1,"bookId":"{book_id}","sourceId":"{source_id}","sourceKind":"podcast","createdByTaskId":"task-1","lastSuccessfulTaskId":"task-1","revision":{revision},"manifestSha256":"{manifest_hash}","engineVersion":"test","updatedAt":"2026-07-11"}}"#
         ),
     )
     .expect("provenance must write");
+}
+
+fn write_book(path: &Path, revision: u64, title: &str) {
+    write_book_with_identity(path, revision, title, "podcast:abc", "abc");
 }
 
 fn prepared(root: &Path) -> PublishTransaction {
@@ -123,5 +127,44 @@ fn rejects_two_active_transactions_for_the_same_book() {
         .expect_err("second transaction for the same book must be rejected");
 
     assert!(error.contains("active for this book"));
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn prepared_validation_failure_preserves_last_successful_book() {
+    let root = root("prepared-validation-failure");
+    write_book(&root.join(r"Podcast\abc"), 1, "old");
+    let transaction = prepared(&root);
+    fs::write(
+        root.join(r".incoming\tx-1\manifest.json"),
+        b"not-json",
+    )
+    .expect("incoming manifest must be corruptible");
+
+    let recovered = commit_transaction(&root, &transaction).expect("failure must be journaled");
+    assert_eq!(recovered.phase, PublishPhase::RolledBack);
+    let old_manifest = fs::read_to_string(root.join(r"Podcast\abc\manifest.json"))
+        .expect("old final must remain readable");
+    assert!(old_manifest.contains(r#""title":"old""#));
+    assert!(!root.join(r".incoming\failed-tx-1").exists());
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn rejects_a_final_path_owned_by_another_book() {
+    let root = root("final-path-identity");
+    write_book_with_identity(
+        &root.join(r"Podcast\abc"),
+        1,
+        "old other",
+        "podcast:other",
+        "other",
+    );
+    let transaction = prepared(&root);
+
+    let error = commit_transaction(&root, &transaction)
+        .expect_err("different book identity must not share a final path");
+    assert!(error.contains("already belongs to another book"));
+    assert!(root.join(r"Podcast\abc").exists());
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

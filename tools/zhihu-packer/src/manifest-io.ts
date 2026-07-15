@@ -26,7 +26,7 @@ export type GenerateAuthorManifestInput = {
 };
 
 export function authorDirectoryName(authorName: string, authorId: string): string {
-  return sanitizeFilename(authorName, authorId).replace(/_[^_]+$/, "");
+  return sanitizeFilename(authorName, authorId);
 }
 
 function resolveArticlePath(projectRoot: string, authorPath: string, outputPath: string): string | null {

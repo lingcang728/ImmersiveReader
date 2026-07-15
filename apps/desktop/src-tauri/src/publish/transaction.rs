@@ -1,7 +1,11 @@
 use super::validation::{managed_relative, validate_book};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+
+static BOOK_CLAIM_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +118,46 @@ fn ensure_single_book_transaction(
     Ok(())
 }
 
+fn ensure_final_path_identity(
+    root: &Path,
+    transaction: &PublishTransaction,
+) -> Result<(), String> {
+    let final_path = managed_relative(root, &transaction.final_relative_path)?;
+    if !final_path.exists() {
+        return Ok(());
+    }
+
+    let manifest_path = final_path.join("manifest.json");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(&manifest_path).map_err(|error| {
+            format!("Final publish path exists but its manifest cannot be read: {error}")
+        })?,
+    )
+    .map_err(|error| format!("Final publish path has invalid metadata: {error}"))?;
+    let existing_book_id = manifest
+        .get("bookId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Final publish path manifest has no bookId".to_string())?;
+    if existing_book_id != transaction.book_id {
+        return Err(format!(
+            "Final publish path already belongs to another book: {existing_book_id}"
+        ));
+    }
+    Ok(())
+}
+
+fn book_claim_lock(root: &Path, book_id: &str) -> Result<Arc<Mutex<()>>, String> {
+    let key = format!("{}\u{0}{book_id}", root.to_string_lossy());
+    let locks = BOOK_CLAIM_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .map_err(|_| "Publish claim lock registry is poisoned".to_string())?;
+    Ok(locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
+
 fn set_phase(
     root: &Path,
     transaction: &mut PublishTransaction,
@@ -134,28 +178,49 @@ fn inject_stop(stop_after: Option<PublishPhase>, phase: PublishPhase) -> Result<
 fn rollback(root: &Path, transaction: &mut PublishTransaction) -> Result<(), String> {
     let final_path = managed_relative(root, &transaction.final_relative_path)?;
     let rollback_path = managed_relative(root, &transaction.rollback_relative_path)?;
-    if final_path.exists() {
-        let failed = root
-            .join(".incoming")
-            .join(format!("failed-{}", transaction.transaction_id));
-        if failed.exists() {
-            return Err("Failed publication quarantine already exists".to_string());
+    match transaction.phase {
+        PublishPhase::Prepared => set_phase(root, transaction, PublishPhase::RolledBack),
+        PublishPhase::OldMoved => {
+            if final_path.exists() {
+                return Err("OldMoved transaction unexpectedly has a final path".to_string());
+            }
+            if !rollback_path.exists() {
+                return Err("OldMoved transaction is missing its rollback path".to_string());
+            }
+            if let Some(parent) = final_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::rename(rollback_path, final_path).map_err(|error| error.to_string())?;
+            set_phase(root, transaction, PublishPhase::RolledBack)
         }
-        fs::create_dir_all(
-            failed
-                .parent()
-                .ok_or_else(|| "Invalid failed publication path".to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        fs::rename(&final_path, failed).map_err(|error| error.to_string())?;
-    }
-    if rollback_path.exists() {
-        if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        PublishPhase::NewMoved => {
+            if final_path.exists() {
+                let failed = root
+                    .join(".incoming")
+                    .join(format!("failed-{}", transaction.transaction_id));
+                if failed.exists() {
+                    return Err("Failed publication quarantine already exists".to_string());
+                }
+                fs::create_dir_all(
+                    failed
+                        .parent()
+                        .ok_or_else(|| "Invalid failed publication path".to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+                fs::rename(&final_path, failed).map_err(|error| error.to_string())?;
+            }
+            if !rollback_path.exists() {
+                return Err("NewMoved transaction is missing its rollback path".to_string());
+            }
+            if let Some(parent) = final_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::rename(rollback_path, final_path).map_err(|error| error.to_string())?;
+            set_phase(root, transaction, PublishPhase::RolledBack)
         }
-        fs::rename(rollback_path, final_path).map_err(|error| error.to_string())?;
+        PublishPhase::Committed => Err("Committed transaction cannot be rolled back".to_string()),
+        PublishPhase::RolledBack => Ok(()),
     }
-    set_phase(root, transaction, PublishPhase::RolledBack)
 }
 
 fn advance(
@@ -219,16 +284,27 @@ pub fn commit_transaction(
     root: &Path,
     transaction: &PublishTransaction,
 ) -> Result<PublishTransaction, String> {
-    let mut current = if journal_path(root, &transaction.transaction_id)?.exists() {
-        load_transaction(root, &transaction.transaction_id)?
+    let journal = journal_path(root, &transaction.transaction_id)?;
+    let mut current;
+    if journal.exists() {
+        current = load_transaction(root, &transaction.transaction_id)?;
     } else {
         if transaction.phase != PublishPhase::Prepared {
             return Err("New publish transaction must be prepared".to_string());
         }
-        ensure_single_book_transaction(root, transaction)?;
-        save_transaction(root, transaction)?;
-        transaction.clone()
-    };
+        let lock = book_claim_lock(root, &transaction.book_id)?;
+        let _claim_guard = lock
+            .lock()
+            .map_err(|_| "Publish claim lock is poisoned".to_string())?;
+        if journal.exists() {
+            current = load_transaction(root, &transaction.transaction_id)?;
+        } else {
+            ensure_single_book_transaction(root, transaction)?;
+            ensure_final_path_identity(root, transaction)?;
+            save_transaction(root, transaction)?;
+            current = transaction.clone();
+        }
+    }
     advance(root, &mut current, None)?;
     Ok(current)
 }

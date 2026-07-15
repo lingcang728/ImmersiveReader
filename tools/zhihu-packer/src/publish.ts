@@ -277,23 +277,27 @@ export function publishTaskStage(
   };
   saveTransaction(root, transaction);
 
+  let oldMoved = false;
+  let newMoved = false;
   try {
     validateMetadata(root, transaction, transaction.incomingRelativePath + "/" + authorDirectory);
     if (fs.existsSync(finalRoot)) {
       ensureDirectory(path.dirname(rollbackRoot));
       fs.renameSync(finalRoot, rollbackRoot);
+      oldMoved = true;
     }
     setPhase(root, transaction, "old_moved");
     ensureDirectory(path.dirname(finalRoot));
     fs.renameSync(incomingAuthor, finalRoot);
+    newMoved = true;
     setPhase(root, transaction, "new_moved");
     validateMetadata(root, transaction, transaction.finalRelativePath);
     setPhase(root, transaction, "committed");
     return { transaction, finalRoot, authorDirectory };
   } catch (error) {
     try {
-      if (fs.existsSync(finalRoot)) fs.rmSync(finalRoot, { recursive: true, force: true });
-      if (fs.existsSync(rollbackRoot)) {
+      if (newMoved && fs.existsSync(finalRoot)) fs.rmSync(finalRoot, { recursive: true, force: true });
+      if (oldMoved && fs.existsSync(rollbackRoot)) {
         ensureDirectory(path.dirname(finalRoot));
         fs.renameSync(rollbackRoot, finalRoot);
       }

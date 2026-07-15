@@ -72,3 +72,33 @@ test("staged partial results stay isolated from the current archive", () => {
   assert.equal(fs.existsSync(taskIncomingRoot(root, taskId)), true);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test("a failed old-final preparation preserves the last successful archive", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "zhihu-publish-old-rename-"));
+  const taskId = "task-old-rename";
+  const incoming = resetTaskIncoming(root, taskId);
+  const author = path.join(incoming, "作者_author-1");
+  fs.mkdirSync(author, { recursive: true });
+  fs.writeFileSync(path.join(author, "new.md"), "new");
+
+  const final = path.join(root, "作者_author-1");
+  fs.mkdirSync(final, { recursive: true });
+  fs.writeFileSync(path.join(final, "old.md"), "old");
+  fs.mkdirSync(path.join(root, ".revisions", "author-1"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".revisions", "author-1", "1"), "occupied");
+
+  assert.throws(() => publishTaskStage(root, taskId, "author-1", {
+    authorName: "作者",
+    items: [{
+      item_id: "answer:1",
+      output_path: `.incoming/${taskId}/作者_author-1/new.md`,
+      author_id: "author-1",
+      author_name: "作者",
+      title: "标题",
+      created_time: 1,
+      voteup_count: 1,
+    } as any],
+  }));
+  assert.equal(fs.readFileSync(path.join(final, "old.md"), "utf8"), "old");
+  fs.rmSync(root, { recursive: true, force: true });
+});
