@@ -34,6 +34,7 @@ if str(ROOT / "scripts") not in sys.path:
 
 # ---- Split-out modules (re-exported for backwards compatibility:
 # `import transcribe_podcasts as tp` keeps exposing these names) ----
+from podcast_transcriber.chunk_plan import ChunkPlan, ChunkSpec  # noqa: E402, F401
 from podcast_transcriber.common import (  # noqa: E402, F401
     CHUNKS_DIR,
     CONFIG_PATH,
@@ -417,34 +418,39 @@ def validate_chunks_metadata(
     chunk_seconds: int,
     logger: logging.Logger,
     ffprobe: str | None = None,
-) -> bool:
+) -> ChunkPlan | None:
     meta_path = chunk_dir / "chunk_metadata.json"
     if not meta_path.exists():
         logger.info("No chunk metadata found; will regenerate chunks.")
-        return False
+        return None
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except Exception:
         logger.warning("Chunk metadata is corrupted; will regenerate chunks.")
-        return False
+        return None
+    try:
+        plan = ChunkPlan.from_metadata(meta.get("chunk_plan"))
+    except (TypeError, ValueError):
+        logger.info("Chunk plan is missing or incompatible; will regenerate chunks.")
+        return None
 
     expected_fp = file_fingerprint(source)
     if meta.get("source_fingerprint") != expected_fp:
         logger.info("Source fingerprint changed; will regenerate chunks.")
-        return False
+        return None
     if int(meta.get("chunk_seconds", 0)) != chunk_seconds:
         logger.info("chunk_seconds config changed; will regenerate chunks.")
-        return False
+        return None
 
     chunk_files = sorted(chunk_dir.glob("chunk_*.wav"))
     if not chunk_files:
         logger.info("No chunk files found despite metadata; will regenerate chunks.")
-        return False
+        return None
 
     actual_count = meta.get("actual_chunks")
     if actual_count is not None and len(chunk_files) != actual_count:
         logger.info("Chunk count mismatch (%s vs %s); will regenerate chunks.", len(chunk_files), actual_count)
-        return False
+        return None
 
     total_chunk_duration = 0.0
     for i, chunk_path in enumerate(chunk_files):
@@ -452,24 +458,33 @@ def validate_chunks_metadata(
             dur = probe_duration(chunk_path, ffprobe, logger)
         except Exception:
             logger.warning("Cannot probe chunk %s; will regenerate chunks.", chunk_path.name)
-            return False
+            return None
         if dur is None or dur <= 0:
             logger.warning("Chunk %s has invalid duration; will regenerate chunks.", chunk_path.name)
-            return False
+            return None
         total_chunk_duration += dur
         if i < len(chunk_files) - 1 and dur < chunk_seconds * 0.5:
             logger.info("Non-last chunk %s unexpectedly short (%ss); will regenerate chunks.", chunk_path.name, dur)
-            return False
+            return None
 
     source_duration = probe_duration(source, ffprobe, logger)
     if source_duration and source_duration > 0:
         ratio = total_chunk_duration / source_duration
         if ratio < 0.95 or ratio > 1.05:
             logger.info("Total chunk duration ratio %.2f outside tolerance; will regenerate chunks.", ratio)
-            return False
+            return None
 
     logger.info("Chunk metadata validated; reusing existing chunks.")
-    return True
+    if len(plan.chunks) != len(chunk_files):
+        logger.info("Chunk plan count does not match files; will regenerate chunks.")
+        return None
+    if any(
+        (chunk_dir / chunk.path).name != chunk_path.name
+        for chunk, chunk_path in zip(plan.chunks, chunk_files, strict=True)
+    ):
+        logger.info("Chunk plan paths do not match files; will regenerate chunks.")
+        return None
+    return plan
 
 
 def quarantine_chunks(chunk_dir: Path, task_id: str, logger: logging.Logger) -> None:
@@ -1745,7 +1760,7 @@ def prepare_chunks(
     ffmpeg_threads: int = 2,
     ffprobe: str | None = None,
     force_reprocess: bool = False,
-) -> list[Path]:
+) -> ChunkPlan:
     chunk_dir = CHUNKS_DIR / task_id
     if force_reprocess and chunk_dir.exists():
         shutil.rmtree(chunk_dir)
@@ -1753,9 +1768,10 @@ def prepare_chunks(
     chunk_dir.mkdir(parents=True, exist_ok=True)
     existing = sorted(chunk_dir.glob("chunk_*.wav"))
     if existing:
-        if validate_chunks_metadata(chunk_dir, source, chunk_seconds, logger, ffprobe):
+        existing_plan = validate_chunks_metadata(chunk_dir, source, chunk_seconds, logger, ffprobe)
+        if existing_plan is not None:
             logger.info("Reusing existing validated chunks: %s", len(existing))
-            return existing
+            return existing_plan
         logger.warning("Existing chunks failed validation; regenerating.")
         quarantine_chunks(chunk_dir, task_id, logger)
         chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -1808,6 +1824,10 @@ def prepare_chunks(
     if not chunks:
         raise RuntimeError("ffmpeg did not produce audio chunks. The file may not contain an audio stream.")
 
+    durations = [probe_duration(chunk, ffprobe, logger) for chunk in chunks]
+    if any(duration is None or duration <= 0 for duration in durations):
+        raise RuntimeError("Unable to build a stable source-time chunk plan")
+    plan = ChunkPlan.from_durations([float(duration) for duration in durations if duration is not None])
     meta = {
         "source_path": str(source),
         "source_size": source.stat().st_size,
@@ -1817,15 +1837,17 @@ def prepare_chunks(
         "split_points": split_points,
         "ffmpeg_command": command,
         "actual_chunks": len(chunks),
+        "chunk_plan": plan.as_dict(),
+        "chunk_plan_signature": plan.signature(),
         "created_at": now_stamp(),
-        "tool_version": "1.0",
+        "tool_version": "2.0",
     }
     try:
         (chunk_dir / "chunk_metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as exc:
         logger.warning("Could not write chunk metadata: %s", exc)
 
-    return chunks
+    return plan
 
 
 def unique_list(items: list[str]) -> list[str]:
@@ -1916,7 +1938,8 @@ def load_whisper_model(config: dict[str, Any], logger: logging.Logger):
 def transcribe_chunk(
     model: Any,
     chunk_path: Path,
-    offset: float,
+    source_start: float,
+    source_end: float,
     state: dict[str, Any],
     chunk_key: str,
     state_path: Path,
@@ -1931,7 +1954,12 @@ def transcribe_chunk(
     language_arg = None if language in (None, "", "auto") else str(language)
     chunk_duration = probe_duration(chunk_path, None, logger)
     state.setdefault("chunks", {})
-    state["chunks"][chunk_key] = {"status": "running", "segments": []}
+    state["chunks"][chunk_key] = {
+        "status": "running",
+        "segments": [],
+        "source_start": source_start,
+        "source_end": source_end,
+    }
     update_task_state(
         state_path,
         state,
@@ -1975,8 +2003,8 @@ def transcribe_chunk(
             for idx, segment in enumerate(segments_iter, 1):
                 item = {
                     "id": len(state.get("segments", [])) + len(chunk_segments) + 1,
-                    "start": round(float(segment.start) + offset, 3),
-                    "end": round(float(segment.end) + offset, 3),
+                    "start": round(float(segment.start) + source_start, 3),
+                    "end": round(float(segment.end) + source_start, 3),
                     "text": segment.text.strip(),
                 }
                 for attr in ("avg_logprob", "compression_ratio", "no_speech_prob"):
@@ -2022,9 +2050,19 @@ def transcribe_chunk(
                 time.sleep(delay)
 
     if cancelled:
-        state["chunks"][chunk_key] = {"status": "cancelled", "segments": chunk_segments}
+        state["chunks"][chunk_key] = {
+            "status": "cancelled",
+            "segments": chunk_segments,
+            "source_start": source_start,
+            "source_end": source_end,
+        }
         return chunk_segments  # Caller must check _job_cancelled_or_deleted
-    state["chunks"][chunk_key] = {"status": "done", "segments": chunk_segments}
+    state["chunks"][chunk_key] = {
+        "status": "done",
+        "segments": chunk_segments,
+        "source_start": source_start,
+        "source_end": source_end,
+    }
     update_task_state(state_path, state, status="transcribing", stage="transcribing", current_chunk=int(chunk_key) + 1, _job_id=_job_id)
     return chunk_segments
 
@@ -2587,7 +2625,7 @@ def process_file(
     _transition_job_db(_job_id, "chunking", "chunking", progress_percent=5)
     update_task_state(state_path, state, status="chunking", stage="chunking", progress_percent=5, _job_id=_job_id)
     try:
-        chunks = prepare_chunks(
+        chunk_plan = prepare_chunks(
             normalized_source,
             task_id,
             chunk_seconds,
@@ -2608,27 +2646,51 @@ def process_file(
         stage="chunking",
         progress_percent=8,
         current_chunk=0,
-        total_chunks=len(chunks),
+        total_chunks=len(chunk_plan.chunks),
         _job_id=_job_id,
     )
+    plan_signature = chunk_plan.signature()
+    if state.get("chunk_plan_signature") != plan_signature:
+        state["chunks"] = {}
+        state["segments"] = []
+        state["chunk_plan_signature"] = plan_signature
+        save_task_state_safe(state_path, state)
     all_segments: list[dict[str, Any]] = []
-    _transition_job_db(_job_id, "transcribing", "transcribing",
-                       progress_percent=8, current_chunk=0, total_chunks=len(chunks))
+    _transition_job_db(
+        _job_id,
+        "transcribing",
+        "transcribing",
+        progress_percent=8,
+        current_chunk=0,
+        total_chunks=len(chunk_plan.chunks),
+    )
 
-    for index, chunk_path in enumerate(chunks):
+    chunk_dir = CHUNKS_DIR / task_id
+    for index, chunk in enumerate(chunk_plan.chunks):
+        chunk_path = chunk_dir / chunk.path
         if _job_cancelled_or_deleted(_job_id):
             logger.info("Job %s was cancelled or deleted by user; aborting during chunk %s.", _job_id, index)
             return {"file": source.name, "status": "cancelled", "task_id": task_id, "error": "cancelled by user"}
 
         chunk_key = f"{index:05d}"
         chunk_state = state.get("chunks", {}).get(chunk_key, {})
-        if chunk_state.get("status") == "done":
+        if (
+            chunk_state.get("status") == "done"
+            and chunk_state.get("source_start") == chunk.source_start
+            and chunk_state.get("source_end") == chunk.source_end
+        ):
             logger.info("Skipping completed chunk %s", chunk_key)
             all_segments.extend(chunk_state.get("segments", []))
             continue
 
-        offset = index * chunk_seconds
-        logger.info("Transcribing chunk %s/%s: %s", index + 1, len(chunks), chunk_path.name)
+        logger.info(
+            "Transcribing chunk %s/%s: %s (%.3f-%.3f)",
+            index + 1,
+            len(chunk_plan.chunks),
+            chunk_path.name,
+            chunk.source_start,
+            chunk.source_end,
+        )
         update_task_state(
             state_path,
             state,
@@ -2636,13 +2698,14 @@ def process_file(
             stage="transcribing",
             progress_percent=float(state.get("progress_percent") or 8),
             current_chunk=index + 1,
-            total_chunks=len(chunks),
+            total_chunks=len(chunk_plan.chunks),
             _job_id=_job_id,
         )
         chunk_segments = transcribe_chunk(
             model,
             chunk_path,
-            offset,
+            chunk.source_start,
+            chunk.source_end,
             state,
             chunk_key,
             state_path,
@@ -2660,7 +2723,7 @@ def process_file(
         state["segments"] = all_segments
         # Stage-local percent from real chunk completion (0–100 of transcribe stage).
         chunk_done = index + 1
-        chunk_total = max(1, len(chunks))
+        chunk_total = max(1, len(chunk_plan.chunks))
         stage_local = (chunk_done / chunk_total) * 100.0
         update_task_state(
             state_path,

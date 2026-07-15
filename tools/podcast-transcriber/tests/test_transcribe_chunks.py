@@ -4,6 +4,7 @@ import logging
 import sys
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -53,3 +54,58 @@ def test_split_spacing_respects_chunk_validation_tolerance() -> None:
     for point in points:
         assert point - previous >= 1800 * 0.5, (point, previous)
         previous = point
+
+
+def test_chunk_plan_uses_actual_cumulative_offsets_for_nonuniform_chunks() -> None:
+    plan = tp.ChunkPlan.from_durations([2.25, 5.5, 1.75])
+
+    assert [(chunk.source_start, chunk.source_end) for chunk in plan.chunks] == [
+        (0.0, 2.25),
+        (2.25, 7.75),
+        (7.75, 9.5),
+    ]
+    assert tp.ChunkPlan.from_metadata(plan.as_dict()).signature() == plan.signature()
+
+
+def test_chunk_plan_rejects_noncontiguous_resume_coordinates() -> None:
+    plan = tp.ChunkPlan.from_durations([2.0, 3.0]).as_dict()
+    plan["chunks"][1]["source_start"] = 4.0
+
+    try:
+        tp.ChunkPlan.from_metadata(plan)
+    except ValueError as error:
+        assert "contiguous" in str(error)
+    else:
+        raise AssertionError("noncontiguous chunk coordinates must be rejected")
+
+
+def test_transcribe_chunk_applies_plan_source_start(tmp_path: Path) -> None:
+    chunk = tmp_path / "chunk.wav"
+    with wave.open(str(chunk), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(16_000)
+        stream.writeframes(b"\x00\x00" * 16_000)
+
+    class Model:
+        def transcribe(self, _path: str, **_kwargs: object):
+            segment = SimpleNamespace(start=0.25, end=0.75, text="hello")
+            return iter([segment]), SimpleNamespace(language="en", language_probability=1.0)
+
+    state: dict[str, object] = {"segments": []}
+    result = tp.transcribe_chunk(
+        Model(),
+        chunk,
+        7.75,
+        8.75,
+        state,
+        "00000",
+        tmp_path / "state.json",
+        {"asr": {"language": "en"}},
+        {"batched": "false"},
+        10.0,
+        logging.getLogger("chunk-offset-test"),
+    )
+
+    assert result[0]["start"] == 8.0
+    assert result[0]["end"] == 8.5
