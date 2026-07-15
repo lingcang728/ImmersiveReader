@@ -173,6 +173,8 @@ def main() -> int:
 
     # Default: resume from completed chunks / translation batches / output checkpoints.
     # Explicit "restart from scratch" paths pass --force via a dedicated entrypoint.
+    from podcast_transcriber.progress_emit import get_emitter, report_stage_progress  # noqa: E402
+
     def emit(payload: dict[str, Any]) -> None:
         """Structured NDJSON for the desktop worker consumer (no secrets/full paths)."""
         safe = {
@@ -193,23 +195,26 @@ def main() -> int:
         }
         print(json.dumps(safe, ensure_ascii=False), flush=True)
 
-    emit(
-        {
-            "type": "progress",
-            "stage": "prepare",
-            "percent": 1,
-            "message": "任务规格已校验，开始转写流水线",
-        }
-    )
-    emit({"type": "heartbeat", "stage": "prepare", "message": "worker alive"})
+    # Unmeasurable prepare stage: heartbeat only — do not invent a percent.
+    report_stage_progress("prepare", message="任务规格已校验，开始转写流水线", force=True)
+    get_emitter().heartbeat("prepare", "worker alive")
+
+    # Bridge polish callbacks (and other stage reporters) onto throttled NDJSON.
+    def _bridge_units(stage: str, done: int, total: int, unit: str) -> None:
+        report_stage_progress(stage, completed=done, total=total, unit=unit)
+
+    os.environ["PODCAST_PROGRESS_BRIDGE"] = "1"
 
     # Install a lightweight logger hook so stage lines also surface as NDJSON.
+    # Prefer structured unit reports from the bridge; log hook is fallback only.
     class _NdjsonHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:  # noqa: A003
             message = record.getMessage()
             stage = "working"
             lower = message.lower()
-            if "chunk" in lower:
+            if "polish" in lower:
+                stage = "polishing"
+            elif "chunk" in lower:
                 stage = "chunking"
             elif "transcrib" in lower:
                 stage = "transcribe"
@@ -221,26 +226,22 @@ def main() -> int:
                 stage = "load_model"
             elif "publish" in lower or "output" in lower:
                 stage = "write_output"
-            percent = None
-            for token in message.replace("%", " % ").split():
-                if token.endswith("%"):
-                    try:
-                        percent = float(token[:-1])
-                    except ValueError:
-                        percent = None
-            payload: dict[str, Any] = {
-                "type": "progress" if percent is not None else "heartbeat",
-                "stage": stage,
-                "message": message[:180],
-            }
-            if percent is not None and math.isfinite(percent):
-                payload["percent"] = max(0.0, min(100.0, percent))
+            # Do not invent percent from log tokens; only stage/heartbeat.
             try:
-                emit(payload)
+                get_emitter().heartbeat(stage, message[:180])
             except Exception:
                 pass
 
     logging.getLogger().addHandler(_NdjsonHandler())
+
+    # Expose unit bridge for polish_interview_markdown progress callback.
+    def _polish_bridge(done: int, total: int) -> None:
+        _bridge_units("polishing", done, total, "块")
+
+    import polish_interview_markdown as _pim  # noqa: E402
+
+    if hasattr(_pim, "set_polish_progress_reporter"):
+        _pim.set_polish_progress_reporter(_polish_bridge)
 
     sys.argv = ["transcribe_podcasts.py", "--no-open-output"]
     try:

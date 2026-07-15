@@ -1242,14 +1242,28 @@ def translate_segments_with_llm(
                 logger.error("Batch translation worker encountered an unhandled error: %s", exc)
             
             with translation_state_lock:
-                pct = (done_count() / max(1, len(translatable))) * 100
+                finished = done_count()
+                total_seg = max(1, len(translatable))
+                pct = (finished / total_seg) * 100
                 logger.info(
                     "[translate %6.2f%%] processed %s/%s failed=%s",
                     pct,
-                    done_count(),
-                    len(translatable),
+                    finished,
+                    total_seg,
                     failed_count(),
                 )
+                try:
+                    from podcast_transcriber.progress_emit import report_stage_progress
+
+                    report_stage_progress(
+                        "translating",
+                        completed=finished,
+                        total=total_seg,
+                        unit="段",
+                        message=f"翻译 {finished}/{total_seg}",
+                    )
+                except Exception:
+                    pass
     state.pop("translation_current_batch", None)
     state.pop("translation_running_batches", None)
     persist_translations()
@@ -2156,6 +2170,19 @@ def write_final_markdown_from_json(json_path: str, logger: logging.Logger, confi
                 save_task_state_safe(state_file, state)
             except Exception:
                 pass
+            # Managed desktop consumer: real block counts, throttled NDJSON.
+            try:
+                from podcast_transcriber.progress_emit import report_stage_progress
+
+                report_stage_progress(
+                    "polishing",
+                    completed=int(done),
+                    total=int(total),
+                    unit="块",
+                    message=f"润色 {done}/{total}",
+                )
+            except Exception:
+                pass
 
         if hasattr(module, "set_polish_progress_reporter"):
             module.set_polish_progress_reporter(report_polish_progress)
@@ -2631,17 +2658,32 @@ def process_file(
             break
         all_segments.extend(chunk_segments)
         state["segments"] = all_segments
-        chunk_progress = ((index + 1) / max(1, len(chunks))) * 90.0
+        # Stage-local percent from real chunk completion (0–100 of transcribe stage).
+        chunk_done = index + 1
+        chunk_total = max(1, len(chunks))
+        stage_local = (chunk_done / chunk_total) * 100.0
         update_task_state(
             state_path,
             state,
             status="transcribing",
             stage="transcribing",
-            progress_percent=min(98.0, 8.0 + chunk_progress),
-            current_chunk=index + 1,
-            total_chunks=len(chunks),
+            progress_percent=stage_local,
+            current_chunk=chunk_done,
+            total_chunks=chunk_total,
             _job_id=_job_id,
         )
+        try:
+            from podcast_transcriber.progress_emit import report_stage_progress
+
+            report_stage_progress(
+                "transcribing",
+                completed=chunk_done,
+                total=chunk_total,
+                unit="块",
+                message=f"转写 {chunk_done}/{chunk_total}",
+            )
+        except Exception:
+            pass
 
     if _job_cancelled_or_deleted(_job_id):
         logger.info("Job cancelled after transcription, skipping postprocess.")

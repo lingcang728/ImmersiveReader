@@ -91,6 +91,29 @@ def main() -> int:
             screenshots.append(str(detail_target))
             page.get_by_role("button", name="关闭详情").click()
 
+            def assert_no_h_overflow(label: str) -> None:
+                metrics = page.evaluate(
+                    "() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth })"
+                )
+                assert metrics["sw"] == metrics["cw"], f"horizontal overflow at {label}: {metrics}"
+
+            def assert_dialog_in_safe_area(selector: str) -> None:
+                box = page.locator(selector).bounding_box()
+                assert box is not None, f"missing dialog {selector}"
+                viewport = page.viewport_size
+                assert viewport is not None
+                margin = 12
+                assert box["x"] >= margin - 1, f"{selector} left out of safe area: {box}"
+                assert box["y"] >= margin - 1, f"{selector} top out of safe area: {box}"
+                assert box["x"] + box["width"] <= viewport["width"] - margin + 1
+                assert box["y"] + box["height"] <= viewport["height"] - margin + 1
+                # Desktop widths: dialog roughly centered horizontally.
+                if viewport["width"] >= 900:
+                    center = box["x"] + box["width"] / 2
+                    assert abs(center - viewport["width"] / 2) < viewport["width"] * 0.12, (
+                        f"{selector} not horizontally centered: {box} vp={viewport}"
+                    )
+
             for width, height in (
                 (600, 400),
                 (900, 700),
@@ -101,13 +124,39 @@ def main() -> int:
             ):
                 page.set_viewport_size({"width": width, "height": height})
                 page.wait_for_timeout(150)
-                metrics = page.evaluate(
-                    "() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth })"
-                )
-                assert metrics["sw"] == metrics["cw"], f"horizontal overflow at {width}x{height}: {metrics}"
+                assert_no_h_overflow(f"{width}x{height}")
                 target = QA_DIR / f"bookshelf-{width}x{height}.png"
                 page.screenshot(path=str(target), full_page=False)
                 screenshots.append(str(target))
+
+            # Font scale 100% / 150% (via CSS var used by the reader shell).
+            page.set_viewport_size({"width": 1280, "height": 800})
+            for scale in (1.0, 1.5):
+                page.evaluate(
+                    """(s) => {
+                      document.documentElement.style.setProperty('--font-scale', String(s));
+                    }""",
+                    scale,
+                )
+                page.wait_for_timeout(100)
+                assert_no_h_overflow(f"font-scale {int(scale * 100)}%")
+
+            # Settings: advanced section default collapsed; dialog in safe area.
+            page.get_by_role("button", name="设置").first.click()
+            page.wait_for_selector(".settings-panel")
+            assert page.locator(".advanced-toggle").count() == 1
+            assert page.locator(".advanced-block").count() == 0
+            assert_dialog_in_safe_area(".settings-panel")
+            page.locator(".advanced-toggle").click()
+            page.wait_for_selector(".advanced-block")
+            assert page.locator(".advanced-block").count() == 1
+            page.get_by_role("button", name="关闭设置").click()
+
+            # Detail dialog safe area + chapter cap already asserted above.
+            page.get_by_role("button", name="详情").first.click()
+            page.wait_for_selector(".book-detail-dialog")
+            assert_dialog_in_safe_area(".book-detail-dialog")
+            page.get_by_role("button", name="关闭详情").click()
 
             loading_page = browser.new_page(viewport={"width": 900, "height": 700}, locale="zh-CN")
             loading_page.on("pageerror", lambda error: browser_errors.append(error.stack or str(error)))

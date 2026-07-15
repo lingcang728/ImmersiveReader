@@ -791,17 +791,18 @@ impl ControlDb {
                 }
             }
         }
-        // Map raw worker % into stage bands so "切分音频" never shows a leftover 100%
-        // from the input-copy phase.
-        let mapped = map_pipeline_percent(&next_stage, next_percent);
-        if next_percent.is_some() || stage_changed {
+        // Map raw worker % into stage bands. Unmeasurable stages stay indeterminate
+        // (no invented mid-band numbers); overall percent never decreases.
+        if let Some(raw) = next_percent {
+            let mapped = map_pipeline_percent(&next_stage, Some(raw));
             snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
-            let floor = if stage_changed {
-                map_pipeline_percent(&next_stage, Some(0.0))
-            } else {
-                snapshot.progress.percent.unwrap_or(0.0)
-            };
-            snapshot.progress.percent = Some(mapped.max(floor).clamp(0.0, 100.0));
+            let floor = snapshot.progress.percent.unwrap_or(0.0);
+            let stage_floor = map_pipeline_percent(&next_stage, Some(0.0));
+            snapshot.progress.percent =
+                Some(mapped.max(floor).max(stage_floor).clamp(0.0, 100.0));
+        } else if stage_changed {
+            // Real work not reported for this stage — do not forge a percent.
+            snapshot.progress.mode = crate::tasks::ProgressMode::Indeterminate;
         } else if snapshot.progress.percent.is_none() {
             snapshot.progress.mode = crate::tasks::ProgressMode::Indeterminate;
         }

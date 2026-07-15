@@ -72,6 +72,34 @@
       };
     }
     if (command === 'load_recent_files') return { json: '[]', store_exists: true };
+    if (command === 'get_storage_locations') {
+      return {
+        channel: 'qa',
+        settingsPath: 'C:\\qa\\settings.json',
+        dataRoot: 'C:\\qa\\Data',
+        cacheRoot: 'C:\\qa\\Cache',
+        logsRoot: 'C:\\qa\\Logs',
+        runtimeStateRoot: 'C:\\qa\\RuntimeState',
+        backupsRoot: 'C:\\qa\\Backups',
+        libraryRoot: 'C:\\qa\\Library',
+        runtimeRoot: 'C:\\qa\\runtime'
+      };
+    }
+    if (command === 'get_secret_status') {
+      return { configured: false, maskedHint: null, lastVerifiedAt: null };
+    }
+    if (command === 'get_storage_usage') {
+      return {
+        libraryBytes: 0,
+        dataBytes: 0,
+        cacheBytes: 0,
+        logsBytes: 0,
+        backupsBytes: 0,
+        runtimeStateBytes: 0
+      };
+    }
+    if (command === 'get_publish_recovery_status') return [];
+    if (command === 'get_migration_runs') return [];
     if (command === 'plugin:event|listen') return nextCallback++;
     return null;
   };
