@@ -443,6 +443,15 @@ mod tests {
     }
 
     #[test]
+    fn same_stem_podcasts_keep_distinct_final_paths() {
+        let first = podcast_library_relative_path("episode", "a".repeat(64).as_str());
+        let second = podcast_library_relative_path("episode", "b".repeat(64).as_str());
+        assert_ne!(first, second);
+        assert_eq!(first, "播客/episode-aaaaaaaaaaaa");
+        assert_eq!(second, "播客/episode-bbbbbbbbbbbb");
+    }
+
+    #[test]
     fn publish_fails_when_final_output_missing_without_internal_fallback() {
         let root = std::env::temp_dir().join(format!(
             "immersive-podcast-publish-no-final-{}",
