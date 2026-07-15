@@ -4289,6 +4289,7 @@
 				onControlZhihuTask={(taskId, action, revision) => void controlZhihuTask(taskId, action, revision)}
 				onChooseLibrary={() => void chooseLibraryRoot()}
 				onOpenTrash={openTrashPanel}
+				onOpenSettings={() => ($settingsOpen = !$settingsOpen)}
 				onRemoveBook={(bookId, title, chapterCount) =>
 					void removeLibraryBook(bookId, title, chapterCount)}
 				onDeleteBook={(bookId, title, chapterCount) =>

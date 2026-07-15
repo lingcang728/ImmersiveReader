@@ -244,6 +244,10 @@
 	function adjustFontScale(direction: number) {
 		$fontScale = clampFontScale($fontScale + direction * FONT_SCALE_STEP);
 	}
+
+	function closePanel() {
+		settingsOpen.set(false);
+	}
 </script>
 
 {#if $settingsOpen}
@@ -251,7 +255,7 @@
 	<!-- svelte-ignore a11y-no-static-element-interactions -->
 	<div
 		class="settings-overlay"
-		on:click={() => ($settingsOpen = false)}
+		on:click={closePanel}
 		role="presentation"
 	>
 		<div
@@ -265,7 +269,7 @@
 					<div class="settings-title">设置</div>
 					<div class="settings-subtitle">外观 · 阅读 · 服务</div>
 				</div>
-				<button class="close-btn" type="button" on:click={() => ($settingsOpen = false)} aria-label="关闭设置">×</button>
+				<button class="close-btn" type="button" on:click={closePanel} aria-label="关闭设置">×</button>
 			</div>
 			{#if panelLoading}
 				<div class="status-line">正在读取本地状态…</div>

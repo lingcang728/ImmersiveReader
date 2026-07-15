@@ -78,16 +78,20 @@
 
 	onMount(() => {
 		void refreshMaximized();
-		void getCurrentWebviewWindow()
-			.onResized(() => {
-				scheduleRefreshMaximized();
-			})
-			.then((fn) => {
-				unlistenResize = fn;
-			})
-			.catch(() => {
-				/* web preview */
-			});
+		try {
+			void getCurrentWebviewWindow()
+				.onResized(() => {
+					scheduleRefreshMaximized();
+				})
+				.then((fn) => {
+					unlistenResize = fn;
+				})
+				.catch(() => {
+					/* web preview */
+				});
+		} catch {
+			/* Web preview without Tauri internals. */
+		}
 		return () => {
 			if (resizeRaf) cancelAnimationFrame(resizeRaf);
 			unlistenResize?.();

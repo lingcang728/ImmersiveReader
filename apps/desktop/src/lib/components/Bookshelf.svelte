@@ -33,6 +33,7 @@
 	export let onControlZhihuTask: (taskId: string, action: 'pause' | 'resume' | 'cancel', revision: number) => void;
 	export let onChooseLibrary: () => void;
 	export let onOpenTrash: () => void;
+	export let onOpenSettings: () => void;
 	export let onRemoveBook: (bookId: string, title: string, chapterCount: number) => void;
 	export let onDeleteBook: (bookId: string, title: string, chapterCount: number) => void;
 
@@ -192,6 +193,25 @@
 					aria-hidden="true"
 					><path d="M21 12a9 9 0 1 1-2.6-6.3" /><path d="M21 3v6h-6" /></svg
 				>
+			</button>
+			<button
+				type="button"
+				class="menu-trigger settings-trigger"
+				on:click={() => runAcquire(onOpenSettings)}
+				title="打开设置"
+				aria-label="设置"
+			>
+				<svg
+					width="15"
+					height="15"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.75"
+					aria-hidden="true"
+					><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg
+				>
+				<span class="settings-label">设置</span>
 			</button>
 			<button type="button" class="menu-trigger" on:click={onOpenTrash}>
 				回收站{trashCount > 0 ? ` ${trashCount}` : ''}

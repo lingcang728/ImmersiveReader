@@ -203,6 +203,14 @@
 	transform: none;
 }
 
+.settings-trigger svg {
+	flex: none;
+}
+
+.settings-label {
+	white-space: nowrap;
+}
+
 .acquire-wrap {
 	position: relative;
 }
@@ -1409,6 +1417,14 @@
 		justify-self: start;
 	}
 	.brand-sub {
+		display: none;
+	}
+	.settings-trigger {
+		width: 36px;
+		padding: 0;
+		justify-content: center;
+	}
+	.settings-label {
 		display: none;
 	}
 	.task-source {
