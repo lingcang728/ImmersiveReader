@@ -636,6 +636,33 @@ impl ControlDb {
         Ok(podcast_task_ids)
     }
 
+    pub fn active_podcast_task_ids(&self) -> Result<Vec<String>, String> {
+        Ok(self
+            .task_snapshots(Some(TaskKind::Podcast))?
+            .into_iter()
+            .filter(|snapshot| is_active_task(&snapshot.lifecycle_state))
+            .map(|snapshot| snapshot.id)
+            .collect())
+    }
+
+    pub fn validate_task_control(
+        &self,
+        task_id: &str,
+        kind: TaskKind,
+        expected_revision: u64,
+    ) -> Result<TaskSnapshot, String> {
+        let snapshot = self
+            .task_snapshot(task_id)?
+            .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
+        if snapshot.kind != kind {
+            return Err("TASK_KIND_CONFLICT".to_string());
+        }
+        if snapshot.revision != expected_revision {
+            return Err("REVISION_CONFLICT".to_string());
+        }
+        Ok(snapshot)
+    }
+
     pub fn mark_task_starting(&mut self, task_id: &str) -> Result<Option<TaskEvent>, String> {
         let Some(mut snapshot) = self.task_snapshot(task_id)? else {
             return Err("TASK_NOT_FOUND".to_string());
@@ -668,6 +695,51 @@ impl ControlDb {
             sequence: snapshot.last_sequence,
             revision: snapshot.revision,
             event_type: "worker_starting".to_string(),
+            snapshot,
+            created_at: now,
+        };
+        self.persist_task_event(&event)?;
+        Ok(Some(event))
+    }
+
+    pub fn rollback_starting_task(
+        &mut self,
+        task_id: &str,
+    ) -> Result<Option<TaskEvent>, String> {
+        let Some(mut snapshot) = self.task_snapshot(task_id)? else {
+            return Err("TASK_NOT_FOUND".to_string());
+        };
+        if snapshot.lifecycle_state != LifecycleState::Starting {
+            return Ok(None);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        snapshot.last_sequence = snapshot
+            .last_sequence
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+        snapshot.lifecycle_state = LifecycleState::Queued;
+        snapshot.outcome = TaskOutcome::None;
+        snapshot.error_code = None;
+        snapshot.error_message = None;
+        snapshot.engine_stage = "queued".to_string();
+        snapshot.engine_status = "waiting".to_string();
+        snapshot.progress.mode = crate::tasks::ProgressMode::Indeterminate;
+        snapshot.progress.percent = None;
+        snapshot.can_pause = false;
+        snapshot.can_resume = false;
+        snapshot.can_retry = false;
+        snapshot.can_cancel = true;
+        snapshot.updated_at = now.clone();
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: snapshot.id.clone(),
+            sequence: snapshot.last_sequence,
+            revision: snapshot.revision,
+            event_type: "worker_start_rejected".to_string(),
             snapshot,
             created_at: now,
         };

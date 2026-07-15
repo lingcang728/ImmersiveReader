@@ -1,6 +1,7 @@
 use encoding_rs::{GB18030, UTF_16BE, UTF_16LE};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -848,13 +849,21 @@ fn schedule_tray_exit_fallback(app: &tauri::AppHandle, delay: Duration) {
 
 #[tauri::command]
 fn cancel_and_discard(app: tauri::AppHandle) -> Result<(), String> {
-    tools::stop_all()?;
     let locations = storage::StorageLocations::current()?;
     let mut control = control::ControlDb::open_current()?;
-    let podcast_task_ids = control.cancel_active_tasks()?;
+    let mut podcast_task_ids = control
+        .active_podcast_task_ids()?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    tools::stop_all()?;
+    let cancellation = control.cancel_active_tasks();
+    if let Ok(cancelled) = &cancellation {
+        podcast_task_ids.extend(cancelled.iter().cloned());
+    }
     for task_id in podcast_task_ids {
         cache::discard_podcast_task_at(&locations, &task_id)?;
     }
+    cancellation?;
     app.exit(0);
     Ok(())
 }
@@ -1034,6 +1043,11 @@ fn control_podcast_task(
         }
         control::CommandClaim::New => {
             let result = (|| {
+                control.validate_task_control(
+                    &task_id,
+                    tasks::TaskKind::Podcast,
+                    expected_revision,
+                )?;
                 match action.as_str() {
                     "pause" => podcast::pause_task(&task_id)?,
                     "resume" => podcast::resume_task(&task_id)?,

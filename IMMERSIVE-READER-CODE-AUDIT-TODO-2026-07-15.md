@@ -38,12 +38,12 @@
 
 | 状态 | 待办 | 证据 |
 |---|---|---|
-| [ ] | 所有 expected revision/CAS 先 reservation，stale 时外部调用为 0 |  |
+| [~] | 所有 expected revision/CAS 先 reservation，stale 时外部调用为 0 | Zhihu start/control 与 Podcast control 已增加 stale gate；真实 HTTP/process adapter 计数用例待补 |
 | [x] | command claim 使用原子 INSERT/冲突重读 fingerprint | `control::tests::concurrent_command_claims_are_deterministic`，15 个 control tests 全绿 |
 | [ ] | pending claim 持久化 owner、lease、state、reconciliation 信息 |  |
 | [ ] | 重启后 pending claim 有领域对账，不盲目重做破坏性操作 |  |
 | [~] | input-copy progress 仅在 DB commit 后推进 sequence/revision 并广播 | 已改为 commit 后推进并禁止广播未落库终态；单次 DB 故障注入用例待补 |
-| [ ] | cancel-and-discard 先固定 task 集合再终止并清理 cache |  |
+| [~] | cancel-and-discard 先固定 task 集合再终止并清理 cache | `active_podcast_task_ids` 在 stop 前捕获并与 cancel 返回集合合并；顺序故障注入待补 |
 | [ ] | supervisor 与 cancel 两种事件顺序都能收敛到正确 terminal state |  |
 | [ ] | Trash move/restore/delete 建 phase journal 并处理冲突/orphan |  |
 

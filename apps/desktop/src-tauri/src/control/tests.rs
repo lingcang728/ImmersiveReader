@@ -636,6 +636,49 @@ fn task_controls_enforce_revision_and_transition_pause_resume_cancel() {
 }
 
 #[test]
+fn start_reservation_can_be_rolled_back_without_losing_the_task() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-start-reservation-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database = ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let mut queued = task_event_for(
+        "zhihu-start",
+        TaskKind::Zhihu,
+        "zhihu:author",
+        1,
+        1,
+    );
+    queued.snapshot.lifecycle_state = LifecycleState::Queued;
+    queued.snapshot.engine_stage = "queued".to_string();
+    queued.snapshot.engine_status = "waiting".to_string();
+    database
+        .persist_task_event(&queued)
+        .expect("queued task must persist");
+    assert_eq!(
+        database
+            .validate_task_control("zhihu-start", TaskKind::Zhihu, 0)
+            .expect_err("stale revision must be rejected"),
+        "REVISION_CONFLICT"
+    );
+    let starting = database
+        .mark_task_starting("zhihu-start")
+        .expect("start reservation must persist")
+        .expect("start event must exist");
+    assert_eq!(starting.snapshot.lifecycle_state, LifecycleState::Starting);
+    let rolled_back = database
+        .rollback_starting_task("zhihu-start")
+        .expect("reservation rollback must persist")
+        .expect("rollback event must exist");
+    assert_eq!(rolled_back.snapshot.lifecycle_state, LifecycleState::Queued);
+    assert_eq!(rolled_back.snapshot.revision, 3);
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
 fn external_snapshot_ignores_identical_progress_but_records_heartbeat() {
     let root = std::env::temp_dir().join(format!(
         "immersive-control-external-heartbeat-{}",

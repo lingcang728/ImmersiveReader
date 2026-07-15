@@ -219,33 +219,37 @@ pub fn start_task(
     app: &AppHandle,
 ) -> Result<TaskSnapshot, String> {
     crate::cache::validate_task_id(task_id)?;
-    let response: ApiResponse<serde_json::Value> = crate::tools::zhihu_post_json(
-        settings,
-        &format!("/api/tasks/{task_id}/start"),
-        &serde_json::json!({}),
-    )?;
+    let mut control = ControlDb::open_current()?;
+    control.validate_task_control(task_id, TaskKind::Zhihu, expected_revision)?;
+    if let Some(event) = control.mark_task_starting(task_id)? {
+        app.emit(TASK_EVENT_NAME, event)
+            .map_err(|error| error.to_string())?;
+    }
+    let response: ApiResponse<serde_json::Value> =
+        match crate::tools::zhihu_post_json(
+            settings,
+            &format!("/api/tasks/{task_id}/start"),
+            &serde_json::json!({}),
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(event) = control.rollback_starting_task(task_id)? {
+                    let _ = app.emit(TASK_EVENT_NAME, event);
+                }
+                return Err(error);
+            }
+        };
     if !response.success {
+        if let Some(event) = control.rollback_starting_task(task_id)? {
+            let _ = app.emit(TASK_EVENT_NAME, event);
+        }
         return Err(response
             .error
             .unwrap_or_else(|| "ZHIHU_TASK_START_FAILED".to_string()));
     }
-    let mut control = ControlDb::open_current()?;
-    let current = control
+    let snapshot = control
         .task_snapshot(task_id)?
         .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
-    if current.kind != TaskKind::Zhihu || current.revision != expected_revision {
-        return Err(if current.revision != expected_revision {
-            "REVISION_CONFLICT".to_string()
-        } else {
-            "TASK_KIND_CONFLICT".to_string()
-        });
-    }
-    let event = control
-        .mark_task_starting(task_id)?
-        .ok_or_else(|| "TASK_NOT_QUEUED".to_string())?;
-    let snapshot = event.snapshot.clone();
-    app.emit(TASK_EVENT_NAME, event)
-        .map_err(|error| error.to_string())?;
     ensure_poller(task_id.to_string(), settings.clone(), app.clone());
     Ok(snapshot)
 }
@@ -292,6 +296,7 @@ pub fn control_task(
         }
         CommandClaim::New => {
             let result = (|| {
+                control.validate_task_control(task_id, TaskKind::Zhihu, expected_revision)?;
                 let path = match action {
                     "pause" => format!("/api/tasks/{task_id}/pause"),
                     "resume" => format!("/api/tasks/{task_id}/start"),
