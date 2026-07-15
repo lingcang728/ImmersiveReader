@@ -129,7 +129,7 @@ def test_batch_polish_applies_to_english_translations(monkeypatch) -> None:
     assert "批量润色后的中文译文。" in markdown
     en_pos = markdown.index("This is the original.")
     zh_pos = markdown.index("批量润色后的中文译文。")
-    assert en_pos < zh_pos
+    assert zh_pos < en_pos
 
 
 def test_batch_polish_applies_to_chinese_originals(monkeypatch) -> None:
@@ -207,7 +207,7 @@ def test_final_markdown_plain_paragraphs_without_speaker_labels() -> None:
     assert "**采访者" not in markdown
     assert "**受访者" not in markdown
     assert "说话人待校对" not in markdown
-    assert "> " not in markdown
+    assert "podcast-original" in markdown
 
 
 def test_speaker_labels_disabled_skips_speaker_role_quality_gate() -> None:

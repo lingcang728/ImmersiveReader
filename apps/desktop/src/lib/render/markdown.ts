@@ -27,6 +27,12 @@ const sanitizeSchema = {
 		div: [
 			...((defaultSchema.attributes?.div as any[]) ?? []),
 			['className', 'math', 'math-inline', 'math-display']
+		],
+		blockquote: [
+			...((defaultSchema.attributes?.blockquote as any[]) ?? []),
+			['className', 'podcast-original'],
+			['lang', 'en'],
+			['tabIndex']
 		]
 	}
 };
@@ -320,6 +326,127 @@ function generateHeadingId(text: string, seenIds: Map<string, number>): string {
 	return id;
 }
 
+function cjkRatio(text: string): number {
+	const cleaned = text.replace(/\s+/g, '');
+	if (!cleaned) return 0;
+	let cjk = 0;
+	let latin = 0;
+	for (const ch of cleaned) {
+		if (/[\u4e00-\u9fff]/.test(ch)) cjk += 1;
+		else if (/[A-Za-z]/.test(ch)) latin += 1;
+	}
+	const total = cjk + latin;
+	return total === 0 ? 0 : cjk / total;
+}
+
+function isMostlyLatin(text: string): boolean {
+	const cleaned = text.replace(/\s+/g, '');
+	if (cleaned.length < 12) return false;
+	return cjkRatio(text) < 0.2 && /[A-Za-z]{3,}/.test(cleaned);
+}
+
+function isMostlyChinese(text: string): boolean {
+	const cleaned = text.replace(/\s+/g, '');
+	if (cleaned.length < 4) return false;
+	// Allow mixed titles (e.g. “欢迎收听 Huberman Lab”) while still requiring real CJK body.
+	const cjk = (cleaned.match(/[\u4e00-\u9fff]/g) ?? []).length;
+	return cjk >= 4 && cjkRatio(text) >= 0.28;
+}
+
+function classListOf(node: any): string[] {
+	const value = node?.properties?.className;
+	if (Array.isArray(value)) return value.map(String);
+	if (typeof value === 'string') return value.split(/\s+/).filter(Boolean);
+	return [];
+}
+
+function markPodcastOriginal(node: any) {
+	if (!node.properties) node.properties = {};
+	const classes = new Set(classListOf(node));
+	classes.add('podcast-original');
+	node.properties.className = [...classes];
+	node.properties.lang = 'en';
+	node.properties.tabIndex = 0;
+}
+
+/**
+ * One-pass HAST normalization for legacy podcast EN/ZH pairs:
+ * - plain EN paragraph + ZH paragraph → ZH then blockquote.podcast-original
+ * - ZH paragraph + untagged blockquote EN → tag the blockquote
+ * Does not rewrite Library files.
+ */
+function rehypeNormalizePodcastBilingual() {
+	return (tree: any) => {
+		const children: any[] = tree.children ?? [];
+		const next: any[] = [];
+		const isWhitespace = (node: any) =>
+			node?.type === 'text' && !String(node.value ?? '').trim();
+
+		const nextElementIndex = (from: number) => {
+			for (let j = from; j < children.length; j += 1) {
+				if (children[j]?.type === 'element') return j;
+				if (!isWhitespace(children[j])) return -1;
+			}
+			return -1;
+		};
+
+		for (let i = 0; i < children.length; i += 1) {
+			const node = children[i];
+			if (isWhitespace(node)) {
+				next.push(node);
+				continue;
+			}
+			if (node?.type === 'element' && node.tagName === 'p') {
+				const followIdx = nextElementIndex(i + 1);
+				const following = followIdx >= 0 ? children[followIdx] : null;
+				if (following?.type === 'element') {
+					const left = textFromHast(node).trim();
+					const right = textFromHast(following).trim();
+					if (following.tagName === 'p' && isMostlyLatin(left) && isMostlyChinese(right)) {
+						const original = {
+							type: 'element',
+							tagName: 'blockquote',
+							properties: {},
+							children: [{ type: 'text', value: left }]
+						};
+						markPodcastOriginal(original);
+						// Preserve interstitial whitespace between the pair.
+						for (let w = i + 1; w < followIdx; w += 1) next.push(children[w]);
+						next.push(following, original);
+						i = followIdx;
+						continue;
+					}
+					if (
+						following.tagName === 'blockquote' &&
+						isMostlyChinese(left) &&
+						isMostlyLatin(right) &&
+						!classListOf(following).includes('podcast-original')
+					) {
+						markPodcastOriginal(following);
+						for (let w = i + 1; w < followIdx; w += 1) next.push(children[w]);
+						next.push(node, following);
+						i = followIdx;
+						continue;
+					}
+				}
+			}
+			if (
+				node?.type === 'element' &&
+				node.tagName === 'blockquote' &&
+				isMostlyLatin(textFromHast(node)) &&
+				!classListOf(node).includes('podcast-original')
+			) {
+				const prev = [...next].reverse().find((item) => item?.type === 'element');
+				if (prev?.tagName === 'p' && isMostlyChinese(textFromHast(prev))) {
+					markPodcastOriginal(node);
+				}
+			}
+			next.push(node);
+		}
+		tree.children = next;
+	};
+}
+
 function rehypeDocumentMetadata(toc: TocItem[]) {
 	const blockTags = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'table', 'ul', 'ol', 'li', 'hr']);
 	const seenIds = new Map<string, number>();
@@ -416,7 +543,8 @@ export async function renderMarkdownDocument(source: string): Promise<RenderedMa
 	pipeline = pipeline
 		.use(remarkRehype, { allowDangerousHtml: true })
 		.use(rehypeRaw)
-		.use(rehypeSanitize, sanitizeSchema);
+		.use(rehypeSanitize, sanitizeSchema)
+		.use(rehypeNormalizePodcastBilingual);
 	if (rehypeKatex) pipeline = pipeline.use(rehypeKatex, { throwOnError: false });
 	pipeline = pipeline.use(rehypeDocumentMetadata, toc).use(rehypeStringify);
 

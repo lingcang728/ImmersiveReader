@@ -58,6 +58,36 @@ describe('renderMarkdown', () => {
 		expect(html).toContain('const');
 	});
 
+	it('keeps podcast-original English blockquotes with lang=en', async () => {
+		const source = [
+			'欢迎收听本期节目。',
+			'',
+			'<blockquote class="podcast-original" lang="en">Welcome to the show.</blockquote>'
+		].join('\n');
+		const html = await renderMarkdown(source);
+		expect(html).toContain('podcast-original');
+		expect(html).toContain('lang="en"');
+		expect(html).toContain('Welcome to the show.');
+		const zh = html.indexOf('欢迎收听本期节目');
+		const en = html.indexOf('Welcome to the show.');
+		expect(zh).toBeGreaterThanOrEqual(0);
+		expect(en).toBeGreaterThan(zh);
+	});
+
+	it('normalizes legacy English-then-Chinese paragraph pairs once in HAST', async () => {
+		const source = [
+			'Welcome to Huberman Lab Essentials for mental health tools.',
+			'',
+			'欢迎收听《Huberman Lab Essentials》，我们聊聊心理健康工具。'
+		].join('\n');
+		const html = await renderMarkdown(source);
+		expect(html).toContain('podcast-original');
+		const zh = html.indexOf('欢迎收听');
+		const en = html.indexOf('Welcome to Huberman');
+		expect(zh).toBeGreaterThanOrEqual(0);
+		expect(en).toBeGreaterThan(zh);
+	});
+
 	it('preserves source position data on highlighted code blocks', async () => {
 		const html = await renderMarkdown('intro\n\n```javascript\nconst x = 1;\n```');
 

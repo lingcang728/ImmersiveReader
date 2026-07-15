@@ -93,7 +93,8 @@ def load_task_spec(path: Path, environment: dict[str, str] | None = None) -> dic
     except ValueError as error:
         raise TaskSpecError("PATH_OUTSIDE_MANAGED_ROOT", "TaskSpec must be inside Podcast Data") from error
     spec = json.loads(resolved_spec.read_text(encoding="utf-8-sig"))
-    if spec.get("schemaVersion") != 1:
+    schema_version = spec.get("schemaVersion")
+    if schema_version not in (1, 2):
         raise TaskSpecError("INVALID_TASK_SPEC", "Unsupported TaskSpec schemaVersion")
     task_id = _required_string(spec.get("taskId"), "taskId")
     if not TASK_ID.fullmatch(task_id) or resolved_spec.parent.name != task_id:
@@ -155,6 +156,9 @@ def main() -> int:
     # true: translate only non-Chinese (en/mixed) segments.
     if "translate" in options:
         os.environ["PODCAST_TRANSCRIBER_FORCE_TRANSLATE"] = "1" if options.get("translate") else "0"
+    # polish: schema v1 / missing field defaults to true for compatibility.
+    polish_enabled = True if "polish" not in options else bool(options.get("polish"))
+    os.environ["PODCAST_TRANSCRIBER_FORCE_POLISH"] = "1" if polish_enabled else "0"
     budget_limit = options.get("budgetLimitCny", options.get("maxApiCostCny"))
     try:
         budget_limit_value = float(budget_limit)

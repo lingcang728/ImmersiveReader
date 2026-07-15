@@ -1869,9 +1869,9 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
 
     # title
     ### HH:MM:SS
-    English paragraph...
-
     Chinese translation...
+
+    <blockquote class="podcast-original" lang="en">English original...</blockquote>
 
     Chinese-only blocks emit polished Chinese only.
     """
@@ -1912,6 +1912,9 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
         ]
     )
     llm_config = dict(final_config.get("llm_polish") or {})
+    force_polish = os.environ.get("PODCAST_TRANSCRIBER_FORCE_POLISH")
+    if force_polish is not None:
+        llm_config["enabled"] = force_polish not in {"0", "false", "False", ""}
     use_llm = bool(llm_config.get("enabled", False))
     only_suspect_llm_blocks = bool(llm_config.get("only_suspect_blocks", True))
     global_polish_context = polish_source_context(data)
@@ -2011,14 +2014,19 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
             translated_text = clean_text(translated_text)
 
         if is_en_like:
-            # English (or mixed source) first, Chinese second.
-            for paragraph in paragraphize(original, en_max_chars):
-                lines.append(paragraph)
-                lines.append("")
+            # Chinese translation on top; English original below in a semantic block.
             if translated_text:
                 for paragraph in paragraphize(translated_text, zh_max_chars):
                     lines.append(paragraph)
                     lines.append("")
+            for paragraph in paragraphize(original, en_max_chars):
+                safe = (
+                    paragraph.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                )
+                lines.append(f'<blockquote class="podcast-original" lang="en">{safe}</blockquote>')
+                lines.append("")
             # Never emit missing placeholders for pure Chinese blocks; en/mixed
             # without translation is caught by final_quality_errors.
         else:

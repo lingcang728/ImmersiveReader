@@ -33,7 +33,14 @@ const ESTIMATE_VERSION: &str = "podcast-budget-v1-deepseek-v4-2026-07-12";
 #[serde(rename_all = "camelCase")]
 pub struct PodcastPreviewOptions {
     pub translate: bool,
+    /// When missing (schema v1 recovery / older clients), default to true.
+    #[serde(default = "default_true")]
+    pub polish: bool,
     pub max_api_cost_cny: f64,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -249,6 +256,7 @@ pub fn preview_podcast_files_at(
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(&files).map_err(|error| error.to_string())?);
     hasher.update([u8::from(options.translate)]);
+    hasher.update([u8::from(options.polish)]);
     hasher.update(options.max_api_cost_cny.to_le_bytes());
     hasher.update(ESTIMATE_VERSION.as_bytes());
     Ok(PodcastFilesPreview {
@@ -714,6 +722,7 @@ mod tests {
         write_one_second_wav(&source);
         let options = PodcastPreviewOptions {
             translate: true,
+            polish: true,
             max_api_cost_cny: 0.0,
         };
 

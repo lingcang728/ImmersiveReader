@@ -1803,6 +1803,12 @@
 				return;
 			}
 
+			const original = target.closest("blockquote.podcast-original") as HTMLElement | null;
+			if (original) {
+				original.classList.toggle("is-revealed");
+				return;
+			}
+
 			if (!$focusMode || editingParagraph) return;
 			focusBlockFromInteraction(target);
 		};
@@ -2590,6 +2596,13 @@
 		const atoms: HTMLElement[] = [];
 		for (const child of Array.from(article.children)) {
 			if (!(child instanceof HTMLElement) || child.offsetHeight <= 0) {
+				continue;
+			}
+			// Semantic English originals under Chinese translations: not focus targets.
+			if (
+				child.tagName === "BLOCKQUOTE" &&
+				(child.classList.contains("podcast-original") || child.getAttribute("lang") === "en")
+			) {
 				continue;
 			}
 
@@ -4654,6 +4667,25 @@
 	}
 	:global(.article blockquote p) {
 		margin: 0.3em 0;
+	}
+
+	/* Podcast English original: soft veil via text-shadow, no filter:blur() */
+	:global(.article blockquote.podcast-original) {
+		margin: 0.35em 0 1.1em;
+		padding: 0.35em 0 0.35em 0.9em;
+		border-left: 2px solid color-mix(in srgb, var(--line) 80%, transparent);
+		background: transparent;
+		color: transparent;
+		text-shadow: 0 0 6px color-mix(in srgb, var(--fg-muted) 70%, transparent);
+		cursor: pointer;
+		transition: color 0.2s ease, text-shadow 0.2s ease;
+	}
+	:global(.article blockquote.podcast-original:hover),
+	:global(.article blockquote.podcast-original:focus),
+	:global(.article blockquote.podcast-original:focus-within),
+	:global(.article blockquote.podcast-original.is-revealed) {
+		color: var(--fg-muted);
+		text-shadow: none;
 	}
 
 	:global(.article code) {

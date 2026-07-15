@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 
 const PIPELINE_VERSION: &str = "podcast-pipeline-v2";
+const TASK_SPEC_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +33,7 @@ struct TaskCompatibility<'a> {
 #[serde(rename_all = "camelCase")]
 struct TaskOptions {
     translate: bool,
+    polish: bool,
     duplicate_policy: DuplicatePolicy,
     max_api_cost_cny: f64,
     budget_limit_cny: f64,
@@ -103,7 +105,7 @@ pub(super) fn write_task_contract(
 ) -> Result<PodcastCompatibility, String> {
     let compatibility = compatibility_for(locations, &request.input.input_sha256, request.options)?;
     let spec = PodcastTaskSpec {
-        schema_version: 1,
+        schema_version: TASK_SPEC_SCHEMA_VERSION,
         task_id: request.task_id,
         input: TaskInput {
             relative_path: &request.input.relative_path,
@@ -119,6 +121,7 @@ pub(super) fn write_task_contract(
         },
         options: TaskOptions {
             translate: request.options.translate,
+            polish: request.options.polish,
             duplicate_policy: request.duplicate_policy,
             max_api_cost_cny: request.options.max_api_cost_cny,
             budget_limit_cny: request

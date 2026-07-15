@@ -109,10 +109,10 @@ def test_final_markdown_zh_en_mixed_and_chapter_headers() -> None:
     assert markdown.startswith("# mixed-show\n")
     assert "### 00:00:00" in markdown
     assert "### 00:10:00" in markdown
-    # English before Chinese for en blocks.
+    # Chinese before English original for en blocks.
     en_pos = markdown.index("Welcome to the show.")
     zh_pos = markdown.index("欢迎收听本期节目。")
-    assert en_pos < zh_pos
+    assert zh_pos < en_pos
     assert "今天我们聊聊技术。" in markdown
     assert "Original:" not in markdown
     assert "Translation:" not in markdown

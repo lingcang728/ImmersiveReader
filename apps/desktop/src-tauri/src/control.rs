@@ -721,8 +721,23 @@ impl ControlDb {
         let next_percent = worker_percent(line);
         let stage_changed = snapshot.engine_stage != next_stage;
         let prev_percent = snapshot.progress.percent.unwrap_or(-1.0);
-        let percent_changed = next_percent.is_some_and(|p| (p - prev_percent).abs() >= 0.5);
-        // Heartbeat-only / log spam: keep at most one UI event every 4s unless stage/% moves.
+        let mapped_preview = map_pipeline_percent(&next_stage, next_percent);
+        // Only advance on whole-percentage progress (or first determinate sample).
+        let percent_advanced = next_percent.is_some_and(|_| {
+            let next_whole = mapped_preview.floor() as i32;
+            let prev_whole = prev_percent.floor() as i32;
+            next_whole > prev_whole || prev_percent < 0.0
+        });
+        // Cap progress-only UI/DB events at 4/s; stage changes and fatals always pass.
+        let rate_ok = snapshot
+            .last_heartbeat_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| {
+                let elapsed = chrono::Utc::now().signed_duration_since(value.with_timezone(&chrono::Utc));
+                elapsed.num_milliseconds() >= 250
+            })
+            .unwrap_or(true);
         let heartbeat_stale = snapshot
             .last_heartbeat_at
             .as_deref()
@@ -732,7 +747,11 @@ impl ControlDb {
                 elapsed.num_milliseconds() >= 4000
             })
             .unwrap_or(true);
-        if !is_fatal && !stage_changed && !percent_changed && !heartbeat_stale {
+        if !is_fatal
+            && !stage_changed
+            && !(percent_advanced && rate_ok)
+            && !heartbeat_stale
+        {
             return Ok(None);
         }
 
@@ -1087,18 +1106,24 @@ fn worker_percent(line: &str) -> Option<f64> {
     None
 }
 
-/// Map a stage-local raw percent (0–100) into overall pipeline progress.
+/// Stage bands for the full podcast pipeline (translate/polish optional).
+/// When a stage is skipped the worker jumps past it; the next stage floor still
+/// keeps overall progress monotonic via `mapped.max(floor)` in apply_worker_line.
 fn map_pipeline_percent(stage: &str, raw: Option<f64>) -> f64 {
     let (lo, hi) = match stage {
-        "input_copy" | "prepare" => (0.0, 8.0),
-        "launching" | "starting" => (8.0, 10.0),
-        "load_model" => (10.0, 15.0),
-        "normalizing" => (15.0, 22.0),
-        "chunking" => (22.0, 30.0),
-        "transcribing" | "transcribe" => (30.0, 72.0),
-        "translating" | "translate" => (72.0, 88.0),
-        "polishing" | "postprocess" => (88.0, 95.0),
-        "writing_output" => (95.0, 98.0),
+        "input_copy" | "prepare" => (0.0, 6.0),
+        "launching" | "starting" => (6.0, 8.0),
+        "load_model" => (8.0, 12.0),
+        "normalizing" => (12.0, 18.0),
+        "chunking" => (18.0, 24.0),
+        // Transcribe is the real heavy stage (audio duration / chunks).
+        "transcribing" | "transcribe" => (24.0, 70.0),
+        // Translation weight only applies when the worker enters this stage.
+        "translating" | "translate" => (70.0, 86.0),
+        // Chinese tasks skip translate and land here after transcribe (~70+).
+        "polishing" => (70.0, 92.0),
+        "postprocess" => (86.0, 94.0),
+        "writing_output" => (94.0, 98.0),
         "publish" => (98.0, 99.5),
         "completed" => (100.0, 100.0),
         _ => (12.0, 90.0),
@@ -1108,6 +1133,7 @@ fn map_pipeline_percent(stage: &str, raw: Option<f64>) -> f64 {
             let t = value.clamp(0.0, 100.0) / 100.0;
             lo + t * (hi - lo)
         }
+        // Unmeasurable stages: stay indeterminate at the band floor without inventing mid-band numbers.
         None => lo,
     }
 }

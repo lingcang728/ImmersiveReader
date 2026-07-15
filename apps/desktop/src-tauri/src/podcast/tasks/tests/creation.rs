@@ -12,6 +12,7 @@ fn queued_task_is_persisted_before_broadcast() {
             preview,
             PodcastPreviewOptions {
                 translate: true,
+            polish: true,
                 max_api_cost_cny: 0.0,
             },
         )
@@ -49,7 +50,9 @@ fn queued_task_is_persisted_before_broadcast() {
         &fs::read_to_string(data_task.join("task.json")).expect("task spec must be readable"),
     )
     .expect("task spec must be valid JSON");
-    assert_eq!(task_json["schemaVersion"], 1);
+    assert_eq!(task_json["schemaVersion"], 2);
+    assert_eq!(task_json["options"]["translate"], true);
+    assert_eq!(task_json["options"]["polish"], true);
     assert_eq!(task_json["taskId"], task_id.as_str());
     assert_eq!(task_json["options"]["budgetLimitCny"], 0.1);
     assert_eq!(
@@ -92,6 +95,7 @@ fn completed_request_replays_without_copying_or_broadcasting() {
             preview,
             PodcastPreviewOptions {
                 translate: false,
+            polish: true,
                 max_api_cost_cny: 0.0,
             },
         )

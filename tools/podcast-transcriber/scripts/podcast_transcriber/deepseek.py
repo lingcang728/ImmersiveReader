@@ -20,7 +20,15 @@ from deepseek_pricing import (
     deepseek_thinking_config,
     is_retryable_http_error,
     normalize_deepseek_model,
+    reserve_budget,
+    settle_budget,
 )
+
+# Re-export for `import transcribe_podcasts as tp` compatibility.
+__all__ = [  # noqa: RUF022 — extended dynamically below for re-exports
+    "reserve_budget",
+    "settle_budget",
+]
 
 DEEPSEEK_PROMPT_TOKEN_LIMIT = 200_000
 

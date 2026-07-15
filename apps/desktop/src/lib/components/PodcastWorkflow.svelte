@@ -48,7 +48,8 @@
 	export let onOpenResult: (taskId: string) => void;
 
 	let selectedPaths: string[] = [];
-	let translate = false;
+	let translate = true;
+	let polish = true;
 	let maxApiCostCny = 0;
 	let duplicatePolicy: DuplicatePolicy = 'reuse_existing';
 	let preview: PodcastFilesPreview | null = null;
@@ -139,7 +140,7 @@
 		try {
 			preview = await invoke<PodcastFilesPreview>('preview_podcast_files', {
 				paths: selectedPaths,
-				options: { translate, maxApiCostCny: Number(maxApiCostCny) || 0 }
+				options: { translate, polish, maxApiCostCny: Number(maxApiCostCny) || 0 }
 			});
 			budgetConfirmed = false;
 		} catch (error) {
@@ -280,7 +281,11 @@
 	<div class="options-grid">
 		<label class="check-row">
 			<input type="checkbox" bind:checked={translate} on:change={resetPreview} />
-			<span>生成中文翻译</span>
+			<span>生成中文译文</span>
+		</label>
+		<label class="check-row">
+			<input type="checkbox" bind:checked={polish} on:change={resetPreview} />
+			<span>润色文稿</span>
 		</label>
 		<label class="wf-field">
 			<span class="wf-label">本次预算上限（元）</span>
