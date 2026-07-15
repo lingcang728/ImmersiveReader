@@ -80,12 +80,13 @@ def main() -> int:
             # Technical fields are folded by default (product: no always-visible revision grid).
             assert page.locator(".tech-details").count() == 1
             assert page.locator(".tech-details[open]").count() == 0
-            assert page.locator(".provenance-grid").count() == 0
+            assert page.locator(".tech-details[open] .provenance-grid").count() == 0
             assert page.locator(".task-history-item").count() == 0
             assert page.locator(".chapter-list li").count() <= 40
             page.locator(".tech-details summary").click()
             assert page.locator(".tech-details[open]").count() == 1
             assert "版本" in page.locator(".tech-details").inner_text()
+            assert page.locator(".provenance-grid").count() == 1
             detail_target = QA_DIR / "bookshelf-detail-900x700.png"
             page.screenshot(path=str(detail_target), full_page=False)
             screenshots.append(str(detail_target))

@@ -690,6 +690,7 @@
 }
 
 .book-detail-dialog {
+	position: relative;
 	width: min(660px, calc(100vw - 48px));
 	min-width: 0;
 	max-height: min(88vh, calc(100vh - 48px));
