@@ -4,6 +4,8 @@ use crate::tasks::{
     TaskProgress, TaskSnapshot,
 };
 use std::fs;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 #[test]
 fn command_result_is_idempotent_across_database_reopen() {
@@ -43,6 +45,50 @@ fn command_result_is_idempotent_across_database_reopen() {
         .expect_err("request id reuse with different input must fail");
     assert!(error.contains("IDEMPOTENCY_KEY_REUSED"));
     drop(reopened);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn concurrent_command_claims_are_deterministic() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-concurrent-claim-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = (0..2)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            thread::spawn(move || {
+                let database = ControlDb::open(&path).expect("control database must open");
+                barrier.wait();
+                database
+                    .claim_command("request-concurrent", "command", "input")
+                    .expect("claim must not fail with a uniqueness error")
+            })
+        })
+        .collect::<Vec<_>>();
+    let claims = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("claim thread must finish"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        claims
+            .iter()
+            .filter(|claim| **claim == CommandClaim::New)
+            .count(),
+        1
+    );
+    assert_eq!(
+        claims
+            .iter()
+            .filter(|claim| matches!(claim, CommandClaim::Existing(_)))
+            .count(),
+        1
+    );
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
 

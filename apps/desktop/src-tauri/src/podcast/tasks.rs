@@ -190,15 +190,18 @@ fn create_tasks(
                 } else {
                     (copied as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
                 };
-                last_revision = last_revision.saturating_add(1);
-                last_sequence = last_sequence.saturating_add(1);
+                let next_revision = last_revision.checked_add(1);
+                let next_sequence = last_sequence.checked_add(1);
+                let (Some(next_revision), Some(next_sequence)) = (next_revision, next_sequence) else {
+                    return;
+                };
                 let label = format!("复制输入 {copied} / {total} 字节");
                 let snapshot = snapshot_for_file(FileSnapshotParams {
                     task_id: task_id.clone(),
                     file,
                     cache_bytes: total,
-                    revision: last_revision,
-                    last_sequence,
+                    revision: next_revision,
+                    last_sequence: next_sequence,
                     stage: "input_copy",
                     status: "copying",
                     label: &label,
@@ -217,6 +220,8 @@ fn create_tasks(
                     snapshot,
                 };
                 if control.persist_task_event(&event).is_ok() {
+                    last_revision = next_revision;
+                    last_sequence = next_sequence;
                     broadcast(&event);
                 }
             };
@@ -232,8 +237,12 @@ fn create_tasks(
         let input = match input {
             Ok(value) => value,
             Err(error) => {
-                last_revision = last_revision.saturating_add(1);
-                last_sequence = last_sequence.saturating_add(1);
+                last_revision = last_revision
+                    .checked_add(1)
+                    .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+                last_sequence = last_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
                 let mut failed = snapshot_for_file(FileSnapshotParams {
                     task_id: task_id.clone(),
                     file,
@@ -263,7 +272,7 @@ fn create_tasks(
                     created_at: failed.updated_at.clone(),
                     snapshot: failed,
                 };
-                let _ = control.persist_task_event(&event);
+                control.persist_task_event(&event)?;
                 broadcast(&event);
                 // Continue remaining files independently.
                 continue;

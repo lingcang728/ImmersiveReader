@@ -142,7 +142,17 @@ impl ControlDb {
         command_name: &str,
         input_hash: &str,
     ) -> Result<CommandClaim, String> {
-        let existing = self
+        let inserted = self
+            .connection
+            .execute(
+                "INSERT INTO command_results(request_id, command_name, input_hash, created_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(request_id) DO NOTHING",
+                params![request_id, command_name, input_hash, chrono::Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| error.to_string())?;
+        if inserted == 1 {
+            return Ok(CommandClaim::New);
+        }
+        let record = self
             .connection
             .query_row(
                 "SELECT request_id, command_name, input_hash, task_id, result_json, error_code, resulting_revision FROM command_results WHERE request_id = ?1",
@@ -160,20 +170,14 @@ impl ControlDb {
                 },
             )
             .optional()
-            .map_err(|error| error.to_string())?;
-        if let Some(record) = existing {
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "COMMAND_CLAIM_MISSING".to_string())?;
+        {
             if record.command_name != command_name || record.input_hash != input_hash {
                 return Err("IDEMPOTENCY_KEY_REUSED".to_string());
             }
-            return Ok(CommandClaim::Existing(record));
         }
-        self.connection
-            .execute(
-                "INSERT INTO command_results(request_id, command_name, input_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![request_id, command_name, input_hash, chrono::Utc::now().to_rfc3339()],
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(CommandClaim::New)
+        Ok(CommandClaim::Existing(record))
     }
 
     pub fn complete_command(
