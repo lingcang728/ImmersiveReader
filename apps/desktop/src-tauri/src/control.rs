@@ -1,7 +1,7 @@
 use crate::tasks::{
     LifecycleState, RequiredAction, TaskErrorCode, TaskEvent, TaskKind, TaskOutcome, TaskSnapshot,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, Error as SqliteError, ErrorCode, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -39,6 +39,14 @@ pub struct ControlDb {
     connection: Connection,
 }
 
+fn is_retryable_initialization_lock(error: &SqliteError) -> bool {
+    matches!(
+        error,
+        SqliteError::SqliteFailure(failure, _)
+            if matches!(failure.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
+}
+
 /// Repair podcast tasks that were interrupted before a task contract existed.
 pub fn repair_orphaned_podcast_tasks() -> Result<u32, String> {
     let locations = crate::storage::StorageLocations::current()?;
@@ -61,9 +69,7 @@ impl ControlDb {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| error.to_string())?;
-        connection
-            .execute_batch(
-                r#"
+        let schema = r#"
                 PRAGMA journal_mode = WAL;
                 PRAGMA foreign_keys = ON;
                 CREATE TABLE IF NOT EXISTS task_snapshots (
@@ -130,10 +136,19 @@ impl ControlDb {
                   completed_at TEXT
                 );
                 PRAGMA user_version = 1;
-                "#,
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(Self { connection })
+                "#;
+        let mut last_lock_error = None;
+        for attempt in 0..=8 {
+            match connection.execute_batch(schema) {
+                Ok(()) => return Ok(Self { connection }),
+                Err(error) if is_retryable_initialization_lock(&error) && attempt < 8 => {
+                    last_lock_error = Some(error.to_string());
+                    std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Err(last_lock_error.unwrap_or_else(|| "Control database initialization failed".to_string()))
     }
 
     pub fn claim_command(
