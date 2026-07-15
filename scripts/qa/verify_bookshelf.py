@@ -15,6 +15,26 @@ DESKTOP = ROOT / "apps" / "desktop"
 QA_DIR = ROOT / "artifacts" / "qa"
 ORIGIN = "http://127.0.0.1:4178"
 MOCK_SCRIPT = (Path(__file__).with_name("bookshelf_mock.js")).read_text(encoding="utf-8")
+READER_NAVIGATION_MOCK = (
+    "(() => {\n"
+    "  const baseInvoke = window.__TAURI_INTERNALS__.invoke;\n"
+    "  window.__TAURI_INTERNALS__.invoke = async (command, args) => {\n"
+    "    if (command === 'get_book_chapter_path') return 'C:\\\\qa\\\\Library\\\\001.md';\n"
+    "    if (command === 'read_markdown_file') {\n"
+    "      return {\n"
+    "        content: '# QA Reader\\\\n\\\\n' + Array.from({ length: 80 }, (_, i) =>\n"
+    "          'Paragraph ' + (i + 1) + ' with enough content to make the reader scroll.'\n"
+    "        ).join('\\\\n\\\\n'),\n"
+    "        encoding: 'utf-8'\n"
+    "      };\n"
+    "    }\n"
+    "    if (command === 'load_reading_state') return { scroll_position: 0, bookmarks: [], progress: 0 };\n"
+    "    if (command === 'save_reading_state' || command === 'save_book_progress' || command === 'close_reader_session') return null;\n"
+    "    if (command === 'get_file_mtime') return 1;\n"
+    "    return baseInvoke(command, args);\n"
+    "  };\n"
+    "})();\n"
+)
 
 
 def wait_for_server(process: subprocess.Popen[str]) -> None:
@@ -158,6 +178,33 @@ def main() -> int:
             page.wait_for_selector(".book-detail-dialog")
             assert_dialog_in_safe_area(".book-detail-dialog")
             page.get_by_role("button", name="关闭详情").click()
+
+            reader_page = browser.new_page(viewport={"width": 1280, "height": 800}, locale="zh-CN")
+            reader_page.on("pageerror", lambda error: browser_errors.append(error.stack or str(error)))
+            reader_page.add_init_script(MOCK_SCRIPT)
+            reader_page.add_init_script(READER_NAVIGATION_MOCK)
+            reader_page.goto(f"{ORIGIN}/?state=ready", wait_until="networkidle")
+            reader_page.get_by_role("button", name="精读").first.click()
+            reader_page.wait_for_selector(".article")
+            reader_page.get_by_role("button", name="专注模式").dispatch_event("click")
+            reader_page.wait_for_timeout(250)
+            reader_page.locator("button.back-btn").dispatch_event("click")
+            reader_page.wait_for_selector(".bookshelf")
+            reader_page.locator(".bs-body").evaluate(
+                "(el) => { const probe = document.createElement('div'); "
+                "probe.dataset.qaProbe = 'reader-return-scroll'; "
+                "probe.style.cssText = 'height:2400px;pointer-events:none;'; "
+                "el.appendChild(probe); }"
+            )
+            reader_page.wait_for_timeout(350)
+            assert "focus-mode" not in (reader_page.locator(".app").get_attribute("class") or "")
+            body_box = reader_page.locator(".bs-body").bounding_box()
+            assert body_box is not None
+            reader_page.mouse.move(body_box["x"] + 300, body_box["y"] + 300)
+            reader_page.mouse.wheel(0, 700)
+            reader_page.wait_for_timeout(250)
+            assert reader_page.locator(".bs-body").evaluate("el => el.scrollTop") > 0
+            reader_page.close()
 
             loading_page = browser.new_page(viewport={"width": 900, "height": 700}, locale="zh-CN")
             loading_page.on("pageerror", lambda error: browser_errors.append(error.stack or str(error)))

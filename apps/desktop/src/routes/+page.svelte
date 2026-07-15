@@ -1353,6 +1353,7 @@
 	async function returnToBookshelf() {
 		if ((await requestNavigationGuard("返回书架")) === "cancel") return;
 		await flushSaveState();
+		resetReaderSurfaceForBookshelf();
 		activeBook = null;
 		trashOpen = false;
 		activeChapterIndex = -1;
@@ -1366,6 +1367,40 @@
 		readingProgress = 0;
 		updateWindowTitle("");
 		await refreshLibrary();
+	}
+
+	function resetReaderSurfaceForBookshelf() {
+		clearFocusStyles();
+		clearFocusScrollActive();
+		setFocusImmediateScrollMode(false);
+		if (focusUpdateFrame !== null) {
+			cancelAnimationFrame(focusUpdateFrame);
+			focusUpdateFrame = null;
+		}
+		queuedFocusIndex = undefined;
+		clearFocusBlockIndex();
+		focusEntryStickyIndices = null;
+		focusEntryStickyUntil = 0;
+		pendingExitAnchor = null;
+		if (focusWheelResetTimer) {
+			clearTimeout(focusWheelResetTimer);
+			focusWheelResetTimer = null;
+		}
+		focusWheelDelta = 0;
+		$focusMode = false;
+		$searchOpen = false;
+		$searchQuery = "";
+		clearSearchHighlights();
+		$tocOpen = false;
+		$settingsOpen = false;
+		closeLightbox();
+		hideFootnotePreview();
+		if (contentEl) {
+			const previousScrollBehavior = contentEl.style.scrollBehavior;
+			contentEl.style.scrollBehavior = "auto";
+			contentEl.scrollTop = 0;
+			contentEl.style.scrollBehavior = previousScrollBehavior;
+		}
 	}
 
 	function clearFocusScrollActive() {
@@ -1668,7 +1703,7 @@
 				noteReadingActivity();
 			}
 
-			if ($focusMode && !e.ctrlKey && !e.metaKey && !e.altKey && !isTextInputTarget(e.target)) {
+			if ($currentFilePath && $focusMode && !e.ctrlKey && !e.metaKey && !e.altKey && !isTextInputTarget(e.target)) {
 				// Short taps move block-by-block; OS key repeat scrolls continuously.
 				if (e.key === "ArrowUp") {
 					e.preventDefault();
@@ -1753,7 +1788,7 @@
 			if (activeBook && readingProgress >= 0.84) void preloadNextBookChapter();
 			if ($currentFilePath) noteReadingActivity();
 
-			if ($focusMode) {
+			if ($currentFilePath && $focusMode) {
 				markFocusScrollActive();
 				if (focusProgrammaticScrollIndex !== null) {
 					const targetReached =
@@ -1784,6 +1819,8 @@
 		};
 
 		const handleWheel = (e: WheelEvent) => {
+			if (!$currentFilePath && !flowReaderSession) return;
+
 			// Ctrl+wheel (and touchpad pinch on Windows) zooms the reader font.
 			if (e.ctrlKey) {
 				e.preventDefault();
@@ -1803,7 +1840,7 @@
 					return;
 				}
 			}
-			if (!contentEl || !$focusMode) return;
+			if (!contentEl || !$currentFilePath || !$focusMode) return;
 			const units = getFocusUnits();
 			if (units.length === 0 || Math.abs(e.deltaY) < 0.01) return;
 
@@ -1977,7 +2014,7 @@
 		contentEl?.addEventListener("mouseout", handleContentMouseOut);
 		const handleResize = () => {
 			invalidateFocusMetrics();
-			if ($focusMode) {
+			if ($currentFilePath && $focusMode) {
 				rebuildFocusMetrics();
 				scheduleFocusUpdate(lastFocusedIdx >= 0 ? lastFocusedIdx : undefined);
 			}
