@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -12,7 +13,6 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[2]
 QA_DIR = ROOT / "artifacts" / "qa"
 URL_FILE = QA_DIR / "reader-server.url"
-MANIFEST_FILE = Path.home() / "Documents" / "沉浸阅读" / "Library" / "知乎" / "Jonathan Z" / "manifest.json"
 
 
 def request_status(url: str, method: str = "GET", body: bytes | None = None, origin: str | None = None) -> int:
@@ -33,7 +33,13 @@ def put_progress(url: str, origin: str, progress: dict[str, object]) -> int:
 
 def main() -> int:
     reader_url = URL_FILE.read_text(encoding="utf-8").strip()
-    manifest = json.loads(MANIFEST_FILE.read_text(encoding="utf-8"))
+    manifest_value = os.environ.get("IMMERSIVE_QA_MANIFEST")
+    if not manifest_value:
+        raise RuntimeError("IMMERSIVE_QA_MANIFEST must point to a synthetic QA manifest")
+    manifest_file = Path(manifest_value).resolve()
+    if not manifest_file.is_file():
+        raise RuntimeError(f"Synthetic QA manifest is missing: {manifest_file}")
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
     chapters = manifest["chapters"]
     parsed = urllib.parse.urlsplit(reader_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
