@@ -90,10 +90,7 @@ impl ReaderService {
 
     fn add_session(&self, session: ReaderSession) -> Result<ReaderSessionDescriptor, String> {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        self.sessions
-            .write()
-            .map_err(|_| "Reader session store is unavailable".to_string())?
-            .insert(token.clone(), session);
+        crate::reader_http::insert_session(&self.sessions, token.clone(), session)?;
         Ok(ReaderSessionDescriptor {
             session_id: token.clone(),
             url: format!("{}/s/{}/reader", self.origin, token),
@@ -101,12 +98,7 @@ impl ReaderService {
     }
 
     fn close_session(&self, session_id: &str) -> Result<bool, String> {
-        Ok(self
-            .sessions
-            .write()
-            .map_err(|_| "Reader session store is unavailable".to_string())?
-            .remove(session_id)
-            .is_some())
+        crate::reader_http::close_session(&self.sessions, session_id)
     }
 }
 
@@ -207,6 +199,40 @@ mod tests {
             ReaderService::start("<html></html>".to_string()).expect("reader service must start");
         assert!(service.origin.starts_with("http://127.0.0.1:"));
         assert!(!service.origin.ends_with(":0"));
+    }
+
+    #[test]
+    fn caps_open_reader_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "immersive-reader-session-cap-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("book root must be created");
+        let manifest: Manifest = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/manifest.valid.json"
+        ))
+        .expect("fixture must deserialize");
+        let service =
+            ReaderService::start("<html></html>".to_string()).expect("reader service must start");
+        for _ in 0..crate::reader_http::MAX_READER_SESSIONS {
+            service
+                .add_session(ReaderSession {
+                    book_root: root.clone(),
+                    manifest: manifest.clone(),
+                })
+                .expect("session must fit within the cap");
+        }
+        assert_eq!(
+            service
+                .add_session(ReaderSession {
+                    book_root: root.clone(),
+                    manifest,
+                })
+                .expect_err("session cap must reject the next session"),
+            "READER_SESSION_LIMIT"
+        );
+        fs::remove_dir_all(root).expect("book root must be removed");
     }
 
     #[test]

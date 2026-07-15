@@ -5,9 +5,12 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, ResponseBox, StatusCode};
 
 const MAX_PROGRESS_BODY: usize = 64 * 1024;
+pub(crate) const MAX_READER_SESSIONS: usize = 16;
+pub(crate) const READER_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone)]
 pub struct ReaderSession {
@@ -15,8 +18,46 @@ pub struct ReaderSession {
     pub manifest: Manifest,
 }
 
-pub type Sessions = Arc<RwLock<HashMap<String, ReaderSession>>>;
+pub type Sessions = Arc<RwLock<HashMap<String, (ReaderSession, Instant)>>>;
 type HttpResponse = ResponseBox;
+
+fn prune_expired_sessions(sessions: &mut HashMap<String, (ReaderSession, Instant)>, now: Instant) {
+    sessions.retain(|_, (_, last_access)| now.duration_since(*last_access) < READER_SESSION_TTL);
+}
+
+pub fn insert_session(
+    sessions: &Sessions,
+    token: String,
+    session: ReaderSession,
+) -> Result<(), String> {
+    let mut sessions = sessions
+        .write()
+        .map_err(|_| "Reader session store is unavailable".to_string())?;
+    let now = Instant::now();
+    prune_expired_sessions(&mut sessions, now);
+    if sessions.len() >= MAX_READER_SESSIONS {
+        return Err("READER_SESSION_LIMIT".to_string());
+    }
+    sessions.insert(token, (session, now));
+    Ok(())
+}
+
+pub fn close_session(sessions: &Sessions, session_id: &str) -> Result<bool, String> {
+    Ok(sessions
+        .write()
+        .map_err(|_| "Reader session store is unavailable".to_string())?
+        .remove(session_id)
+        .is_some())
+}
+
+fn session_for(sessions: &Sessions, session_id: &str) -> Option<ReaderSession> {
+    let mut sessions = sessions.write().ok()?;
+    let now = Instant::now();
+    prune_expired_sessions(&mut sessions, now);
+    let (session, last_access) = sessions.get_mut(session_id)?;
+    *last_access = now;
+    Some(session.clone())
+}
 
 fn add_common_headers<R: Read>(mut value: Response<R>, content_type: &str) -> Response<R> {
     if let Ok(header) = Header::from_bytes("Content-Type", content_type) {
@@ -186,10 +227,7 @@ pub fn handle(mut request: Request, origin: &str, sessions: &Sessions, reader_ht
         let _ = request.respond(response(404, "Not found", "text/plain; charset=utf-8"));
         return;
     }
-    let session = sessions
-        .read()
-        .ok()
-        .and_then(|items| items.get(parts[1]).cloned());
+    let session = session_for(sessions, parts[1]);
     let Some(session) = session else {
         let _ = request.respond(response(
             403,
@@ -221,8 +259,11 @@ pub fn handle(mut request: Request, origin: &str, sessions: &Sessions, reader_ht
 
 #[cfg(test)]
 mod tests {
-    use super::is_book_resource;
+    use super::{is_book_resource, prune_expired_sessions, ReaderSession, READER_SESSION_TTL};
     use crate::contracts::Manifest;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::time::Instant;
 
     #[test]
     fn permits_manifest_chapters_and_assets_only() {
@@ -234,5 +275,27 @@ mod tests {
         assert!(is_book_resource("assets/cover.png", &manifest));
         assert!(!is_book_resource("manifest.json", &manifest));
         assert!(!is_book_resource("private.exe", &manifest));
+    }
+
+    #[test]
+    fn expires_idle_reader_sessions() {
+        let manifest: Manifest = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/manifest.valid.json"
+        ))
+        .expect("fixture must deserialize");
+        let now = Instant::now();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            "expired".to_string(),
+            (
+                ReaderSession {
+                    book_root: PathBuf::from("book"),
+                    manifest,
+                },
+                now - READER_SESSION_TTL - std::time::Duration::from_secs(1),
+            ),
+        );
+        prune_expired_sessions(&mut sessions, now);
+        assert!(sessions.is_empty());
     }
 }
