@@ -37,10 +37,20 @@ export type TemporaryRoot = {
 };
 
 export type AppSettings = {
+  readonly schemaVersion: 3;
+  readonly libraryRoot: string;
+};
+
+export type LegacyAppSettingsV1 = {
   readonly schemaVersion: 1;
   readonly libraryRoot: string;
   readonly companionRoot: string;
   readonly temporaryRoots: readonly TemporaryRoot[];
+};
+
+export type LegacyAppSettingsV2 = {
+  readonly schemaVersion: 2;
+  readonly libraryRoot: string;
 };
 
 export class ContractParseError extends Error {
@@ -71,6 +81,19 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
+function rejectUnknownFields(
+  record: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  field: string,
+): void {
+  const allowedFields = new Set(allowed);
+  for (const key of Object.keys(record)) {
+    if (!allowedFields.has(key)) {
+      throw new ContractParseError(`${field}.${key}`, "unknown field");
+    }
+  }
+}
+
 function requireNonNegativeNumber(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new ContractParseError(field, "must be a finite non-negative number");
@@ -78,10 +101,29 @@ function requireNonNegativeNumber(value: unknown, field: string): number {
   return value;
 }
 
+function requireNonNegativeInteger(value: unknown, field: string): number {
+  const number = requireNonNegativeNumber(value, field);
+  if (!Number.isInteger(number)) {
+    throw new ContractParseError(field, "must be a non-negative integer");
+  }
+  return number;
+}
+
 function requireIsoDate(value: unknown, field: string): string {
   const text = requireString(value, field);
-  if (Number.isNaN(Date.parse(text))) {
-    throw new ContractParseError(field, "must be an ISO-8601 date or timestamp");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(`${text}T00:00:00Z`))) {
+    throw new ContractParseError(field, "must be an ISO-8601 calendar date");
+  }
+  return text;
+}
+
+function requireIsoDateTime(value: unknown, field: string): string {
+  const text = requireString(value, field);
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(text) ||
+    Number.isNaN(Date.parse(text))
+  ) {
+    throw new ContractParseError(field, "must be an RFC-3339 date-time");
   }
   return text;
 }
@@ -119,12 +161,17 @@ function parseSource(value: unknown, field: string): BookSource {
 function parseChapter(value: unknown, index: number): Chapter {
   const field = `chapters[${index}]`;
   const record = requireRecord(value, field);
+  rejectUnknownFields(
+    record,
+    ["id", "path", "title", "date", "voteCount", "wordCount", "metadataStatus"],
+    field,
+  );
   const base = {
     id: requireString(record.id, `${field}.id`),
     path: requireRelativePath(record.path, `${field}.path`),
     title: requireString(record.title, `${field}.title`),
-    voteCount: requireNonNegativeNumber(record.voteCount, `${field}.voteCount`),
-    wordCount: requireNonNegativeNumber(record.wordCount, `${field}.wordCount`),
+    voteCount: requireNonNegativeInteger(record.voteCount, `${field}.voteCount`),
+    wordCount: requireNonNegativeInteger(record.wordCount, `${field}.wordCount`),
   };
   const date = record.date === undefined ? undefined : requireIsoDate(record.date, `${field}.date`);
   const metadataStatus = record.metadataStatus;
@@ -140,6 +187,11 @@ function parseChapter(value: unknown, index: number): Chapter {
 
 export function parseManifest(value: unknown): BookManifest {
   const record = requireRecord(value, "manifest");
+  rejectUnknownFields(
+    record,
+    ["schemaVersion", "bookId", "title", "source", "sourceId", "generatedAt", "updatedAt", "chapters"],
+    "manifest",
+  );
   if (!Array.isArray(record.chapters) || record.chapters.length === 0) {
     throw new ContractParseError("chapters", "must contain at least one chapter");
   }
@@ -158,14 +210,15 @@ export function parseManifest(value: unknown): BookManifest {
     title: requireString(record.title, "title"),
     source: parseSource(record.source, "source"),
     ...(sourceId === undefined ? {} : { sourceId }),
-    generatedAt: requireIsoDate(record.generatedAt, "generatedAt"),
-    updatedAt: requireIsoDate(record.updatedAt, "updatedAt"),
+    generatedAt: requireIsoDateTime(record.generatedAt, "generatedAt"),
+    updatedAt: requireIsoDateTime(record.updatedAt, "updatedAt"),
     chapters,
   };
 }
 
 export function parseReadingState(value: unknown): ReadingState {
   const record = requireRecord(value, "readingState");
+  rejectUnknownFields(record, ["schemaVersion", "current", "position", "read", "updated"], "readingState");
   const position = requireNonNegativeNumber(record.position, "position");
   if (position > 1) {
     throw new ContractParseError("position", "must be between 0 and 1");
@@ -173,14 +226,29 @@ export function parseReadingState(value: unknown): ReadingState {
   if (!Array.isArray(record.read)) {
     throw new ContractParseError("read", "must be an array");
   }
-  const read = [...new Set(record.read.map((item, index) => requireString(item, `read[${index}]`)))];
+  const read = record.read.map((item, index) => requireString(item, `read[${index}]`));
+  if (new Set(read).size !== read.length) {
+    throw new ContractParseError("read", "must not contain duplicate chapter ids");
+  }
   return {
     schemaVersion: requireSchemaV1(record.schemaVersion, "schemaVersion"),
     current: requireString(record.current, "current"),
     position,
     read,
-    updated: requireIsoDate(record.updated, "updated"),
+    updated: requireIsoDateTime(record.updated, "updated"),
   };
+}
+
+export function validateReadingState(state: ReadingState, manifest: BookManifest): void {
+  const chapterIds = new Set(manifest.chapters.map((chapter) => chapter.id));
+  if (!chapterIds.has(state.current)) {
+    throw new ContractParseError("current", "must reference a chapter in the manifest");
+  }
+  for (const [index, id] of state.read.entries()) {
+    if (!chapterIds.has(id)) {
+      throw new ContractParseError(`read[${index}]`, "must reference a chapter in the manifest");
+    }
+  }
 }
 
 export function calculateOverallProgress(chapterCount: number, state: ReadingState): number {

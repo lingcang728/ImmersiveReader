@@ -25,6 +25,9 @@ function Assert-NoLegacyRuntimeReferences {
     $sourceFiles = & git -C $root ls-files -- apps packages tools |
         Where-Object { $_ -match '\.(rs|ts|svelte|py|ps1)$' } |
         ForEach-Object { Join-Path $root $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "无法读取 Git 源文件清单，退出码 $LASTEXITCODE"
+    }
     foreach ($legacy in $legacyRoots) {
         $matches = $sourceFiles | Select-String -SimpleMatch -Pattern $legacy
         if ($matches) {
@@ -44,14 +47,30 @@ function Assert-NoLegacyRuntimeReferences {
     Write-Output '[verify] no legacy runtime paths or junctions'
 }
 
+function Remove-FreshGeneratedDirectory {
+    param([Parameter(Mandatory)][string]$RelativePath)
+
+    $path = Join-Path $root $RelativePath
+    $resolvedRoot = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+    $resolvedPath = [IO.Path]::GetFullPath($path)
+    if (-not $resolvedPath.StartsWith($resolvedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "生成物路径越界：$RelativePath"
+    }
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Recurse -Force
+    }
+}
+
 $root = Get-RepoRoot
 $npm = Require-Command -Name 'npm.cmd'
 $cargo = Require-Command -Name 'cargo.exe'
 $python = Get-PodcastPython
 Assert-NoLegacyRuntimeReferences
+Invoke-Checked 'contract schema parity' { & $python $root\scripts\verify_contract_parity.py }
 
 Push-Location (Join-Path $root 'packages\contracts')
 try {
+    Remove-FreshGeneratedDirectory 'packages\contracts\dist'
     Invoke-Checked 'contracts tests' { node --test tests/*.test.ts }
     Invoke-Checked 'contracts build' { tsc -p tsconfig.json }
 } finally {
@@ -78,6 +97,7 @@ try {
 
 Push-Location (Join-Path $root 'tools\zhihu-packer')
 try {
+    Remove-FreshGeneratedDirectory 'tools\zhihu-packer\dist'
     Invoke-Checked 'Zhihu tests' { & $npm test }
     Invoke-Checked 'Zhihu TypeScript build' { & $npm run build }
     Invoke-Checked 'Zhihu Reader compile' { & $npm run compile-reader }

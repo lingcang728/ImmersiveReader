@@ -25,8 +25,8 @@
           "path": { "type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$)).+$" },
           "title": { "type": "string", "minLength": 1 },
           "date": { "type": "string", "format": "date" },
-          "voteCount": { "type": "number", "minimum": 0 },
-          "wordCount": { "type": "number", "minimum": 0 },
+          "voteCount": { "type": "integer", "minimum": 0 },
+          "wordCount": { "type": "integer", "minimum": 0 },
           "metadataStatus": { "enum": ["complete", "inferred"] }
         }
       }

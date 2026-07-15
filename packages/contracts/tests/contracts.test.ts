@@ -6,6 +6,7 @@ import {
   calculateOverallProgress,
   parseManifest,
   parseReadingState,
+  validateReadingState,
 } from "../src/index.ts";
 
 const validManifest = {
@@ -67,15 +68,33 @@ test("rejects unsupported schemas and incomplete manifests", () => {
   assert.throws(() => parseManifest(incomplete), ContractParseError);
 });
 
-test("normalizes reading state and deduplicates read ids", () => {
+test("rejects duplicate reading ids and unknown fields", () => {
+  assert.throws(
+    () =>
+      parseReadingState({
+        schemaVersion: 1,
+        current: "answer:2",
+        position: 0.4,
+        read: ["answer:1", "answer:1"],
+        updated: "2026-07-10T01:00:00.000Z",
+      }),
+    ContractParseError,
+  );
+  assert.throws(
+    () => parseManifest({ ...validManifest, unexpected: true }),
+    ContractParseError,
+  );
+});
+
+test("validates reading ids against the manifest", () => {
   const state = parseReadingState({
     schemaVersion: 1,
     current: "answer:2",
     position: 0.4,
-    read: ["answer:1", "answer:1"],
+    read: ["answer:1"],
     updated: "2026-07-10T01:00:00.000Z",
   });
-  assert.deepEqual(state.read, ["answer:1"]);
+  validateReadingState(state, parseManifest(validManifest));
   assert.equal(calculateOverallProgress(validManifest.chapters.length, state), 0.7);
 });
 
@@ -91,4 +110,14 @@ test("rejects invalid progress values", () => {
       }),
     ContractParseError,
   );
+});
+
+test("rejects non-canonical dates and fractional counts", () => {
+  assert.throws(
+    () => parseManifest({ ...validManifest, generatedAt: "2026-07-10" }),
+    ContractParseError,
+  );
+  const fractional = structuredClone(validManifest);
+  fractional.chapters[0] = { ...fractional.chapters[0], wordCount: 1.5 };
+  assert.throws(() => parseManifest(fractional), ContractParseError);
 });

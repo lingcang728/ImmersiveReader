@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "current": "answer:fixture-1",
+  "position": 0.5,
+  "read": ["answer:fixture-1", "answer:fixture-1"],
+  "updated": "2026-07-10T01:00:00.000Z"
+}

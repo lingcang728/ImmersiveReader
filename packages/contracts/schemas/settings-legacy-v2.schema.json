@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://immersive-reader.local/schemas/settings-v3.json",
-  "title": "Immersive Reader Settings v3",
+  "$id": "https://immersive-reader.local/schemas/settings-legacy-v2.json",
+  "title": "Immersive Reader Settings legacy v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "libraryRoot"],
   "properties": {
-    "schemaVersion": { "const": 3 },
+    "schemaVersion": { "const": 2 },
     "libraryRoot": { "type": "string", "minLength": 1 }
   }
 }

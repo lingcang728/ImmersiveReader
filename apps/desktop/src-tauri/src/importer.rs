@@ -117,6 +117,7 @@ pub fn import_markdown_folder(source: &Path, library_root: &Path) -> Result<Mani
                 date: None,
                 vote_count: 0,
                 word_count,
+                metadata_status: None,
             });
         }
         let now = Utc::now().to_rfc3339();

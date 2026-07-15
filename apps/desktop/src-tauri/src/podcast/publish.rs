@@ -209,6 +209,7 @@ fn copy_outputs(
             date: None,
             vote_count: 0,
             word_count,
+            metadata_status: None,
         });
     }
     Ok((chapters, exported_sources))

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "libraryRoot": "C:/Users/example/Documents/ImmersiveReader/Library",
+  "companionRoot": "C:/Users/example/Documents/ImmersiveReader/Companion",
+  "temporaryRoots": [
+    {
+      "source": "podcast",
+      "path": "C:/Users/example/Documents/ImmersiveReader/Podcast"
+    }
+  ]
+}

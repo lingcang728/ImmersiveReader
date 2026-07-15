@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://immersive-reader.local/schemas/settings-legacy-v1.json",
+  "title": "Immersive Reader Settings legacy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "libraryRoot", "companionRoot", "temporaryRoots"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "libraryRoot": { "type": "string", "minLength": 1 },
+    "companionRoot": { "type": "string", "minLength": 1 },
+    "temporaryRoots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "path"],
+        "properties": {
+          "source": { "const": "podcast" },
+          "path": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}
