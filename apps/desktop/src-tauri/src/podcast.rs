@@ -1009,7 +1009,7 @@ mod tests {
             can_retry: true,
             can_cancel: false,
             book_id: Some(book_id.clone()),
-            source_id: Some(source_id),
+            source_id: Some(source_id.clone()),
             display_name: None,
             cache_lease_bytes: 0,
             created_at: now.clone(),
@@ -1038,10 +1038,11 @@ mod tests {
         assert_eq!(result.lifecycle_state, LifecycleState::Terminal);
         assert!(!result.can_retry);
         assert_eq!(result.book_id.as_deref(), Some(book_id.as_str()));
+        let shelf_folder = format!("episode-{}", &source_id[..12]);
         assert!(locations
             .library_root
             .join("播客")
-            .join("episode")
+            .join(shelf_folder)
             .join("manifest.json")
             .is_file());
 
