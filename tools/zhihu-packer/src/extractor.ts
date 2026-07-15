@@ -1,7 +1,12 @@
 import { Page } from 'playwright-core';
+import { lookup } from 'node:dns/promises';
 import * as path from 'path';
 import * as fs from 'fs';
 import { createHash } from 'crypto';
+import { isIP } from 'node:net';
+import { request } from 'node:https';
+import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
 import { logger, sanitizeFilename, evaluateClean } from './utils.js';
 
 export interface ExtractedContent {
@@ -632,11 +637,151 @@ export async function scrapeArticle(page: Page, targetUrl: string): Promise<Extr
  * 将抓取到的数据写入 Obsidian 格式的 Markdown 文件
  */
 const MARKDOWN_IMAGE_RE = /!\[\]\((https?:\/\/[^\s)]+)\)/g;
+const IMAGE_MAX_BYTES = 16 * 1024 * 1024;
+const IMAGE_ITEM_MAX_BYTES = 64 * 1024 * 1024;
+const IMAGE_MAX_COUNT = 100;
+const IMAGE_MAX_REDIRECTS = 3;
+const IMAGE_TIMEOUT_MS = 20_000;
+const IMAGE_CDN_HOST = /^pic\d+\.zhimg\.com$/i;
+const IMAGE_MIME_EXTENSIONS: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+};
 
-function imageFileNameFor(url: string): string {
+function imageHostAllowed(hostname: string): boolean {
+  return IMAGE_CDN_HOST.test(hostname.toLowerCase());
+}
+
+export function isAllowedImageUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:'
+      && url.username === ''
+      && url.password === ''
+      && url.port === ''
+      && imageHostAllowed(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function ipv4Parts(address: string): number[] | null {
+  if (isIP(address) !== 4) return null;
+  const parts = address.split('.').map(Number);
+  return parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+    ? parts
+    : null;
+}
+
+export function isBlockedImageAddress(address: string): boolean {
+  const ipv4 = ipv4Parts(address);
+  if (ipv4) {
+    const [a, b] = ipv4;
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127)
+      || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && (b === 0 || b === 168)) || (a === 198 && b >= 18 && b <= 19)
+      || (a === 203 && b === 0) || a >= 224;
+  }
+  if (isIP(address) !== 6) return true;
+  const normalized = address.toLowerCase();
+  return normalized === '::1' || normalized === '::'
+    || normalized.startsWith('fc') || normalized.startsWith('fd')
+    || normalized.startsWith('fe8') || normalized.startsWith('fe9')
+    || normalized.startsWith('fea') || normalized.startsWith('feb')
+    || normalized.startsWith('ff') || normalized.startsWith('2001:db8')
+    || normalized.startsWith('2001:10') || normalized.startsWith('2001:20');
+}
+
+async function approvedAddress(url: URL): Promise<string> {
+  if (!isAllowedImageUrl(url.toString())) {
+    throw new Error('image URL is not an approved HTTPS CDN');
+  }
+  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
+  const approved = addresses.find((entry) => !isBlockedImageAddress(entry.address));
+  if (!approved) throw new Error('image host resolves only to a blocked address');
+  return approved.address;
+}
+
+function requestPinnedImage(url: URL, address: string): Promise<import('node:http').IncomingMessage> {
+  return new Promise((resolve, reject) => {
+    const client = request(url, {
+      headers: {
+        Referer: 'https://www.zhihu.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+      },
+      timeout: IMAGE_TIMEOUT_MS,
+      servername: url.hostname,
+      lookup: (_hostname, _options, callback) => callback(null, address, isIP(address)),
+    }, resolve);
+    client.once('timeout', () => client.destroy(new Error('image request timed out')));
+    client.once('error', reject);
+    client.end();
+  });
+}
+
+function imageMagic(prefix: Buffer): string | null {
+  if (prefix.length >= 8 && prefix.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'image/png';
+  if (prefix.length >= 3 && prefix.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) return 'image/jpeg';
+  if (prefix.length >= 4 && prefix.subarray(0, 4).toString('ascii') === 'GIF8') return 'image/gif';
+  if (prefix.length >= 12 && prefix.subarray(0, 4).toString('ascii') === 'RIFF' && prefix.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
+}
+
+async function downloadImageToTemp(url: string, tempPath: string): Promise<{ bytes: number; mime: string }> {
+  let current = new URL(url);
+  for (let redirects = 0; redirects <= IMAGE_MAX_REDIRECTS; redirects += 1) {
+    const address = await approvedAddress(current);
+    const response = await requestPinnedImage(current, address);
+    if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400) {
+      const location = response.headers.location;
+      response.resume();
+      if (!location) throw new Error('image redirect has no location');
+      if (redirects === IMAGE_MAX_REDIRECTS) throw new Error('too many image redirects');
+      current = new URL(location, current);
+      continue;
+    }
+    if (response.statusCode !== 200) {
+      response.resume();
+      throw new Error(`HTTP ${response.statusCode ?? 0}`);
+    }
+    const mime = String(response.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase();
+    if (!(mime in IMAGE_MIME_EXTENSIONS)) {
+      response.resume();
+      throw new Error('unsupported image content type');
+    }
+    const contentLength = Number(response.headers['content-length']);
+    if (Number.isFinite(contentLength) && contentLength > IMAGE_MAX_BYTES) {
+      response.resume();
+      throw new Error('image exceeds size limit');
+    }
+    let bytes = 0;
+    let prefix = Buffer.alloc(0);
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        bytes += chunk.length;
+        if (bytes > IMAGE_MAX_BYTES) {
+          callback(new Error('image exceeds size limit'));
+          return;
+        }
+        if (prefix.length < 16) prefix = Buffer.concat([prefix, chunk]).subarray(0, 16);
+        callback(null, chunk);
+      },
+    });
+    await pipeline(response, limiter, fs.createWriteStream(tempPath, { flags: 'wx' }));
+    if (bytes === 0 || imageMagic(prefix) !== mime) throw new Error('image MIME does not match file signature');
+    return { bytes, mime };
+  }
+  throw new Error('image redirect resolution failed');
+}
+
+function imageFileNameFor(url: string, mime?: string): string {
   const hash = createHash('md5').update(url).digest('hex').slice(0, 12);
   const match = url.match(/\.(jpg|jpeg|png|gif|webp)(?:[?#]|$)/i);
-  const ext = match ? match[1].toLowerCase() : 'jpg';
+  const ext = mime && IMAGE_MIME_EXTENSIONS[mime]
+    ? IMAGE_MIME_EXTENSIONS[mime]
+    : match ? match[1].toLowerCase() : 'jpg';
   return `${hash}.${ext}`;
 }
 
@@ -655,33 +800,41 @@ export async function archiveImagesLocally(markdown: string, authorPath: string)
   fs.mkdirSync(assetsDir, { recursive: true });
 
   let downloaded = 0;
-  for (const url of urls) {
-    const fileName = imageFileNameFor(url);
+  let totalBytes = 0;
+  for (const [index, url] of urls.entries()) {
+    if (index >= IMAGE_MAX_COUNT || !isAllowedImageUrl(url)) {
+      logger.warn(`图片下载被安全策略拒绝: ${url}`);
+      continue;
+    }
+    const existingPrefix = createHash('md5').update(url).digest('hex').slice(0, 12);
+    const existing = fs.readdirSync(assetsDir).find((name) => name.startsWith(`${existingPrefix}.`));
+    const fileName = existing || imageFileNameFor(url);
     const filePath = path.join(assetsDir, fileName);
     try {
       if (!fs.existsSync(filePath)) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 20000);
+        const tempPath = path.join(assetsDir, `.${existingPrefix}.tmp-${process.pid}-${Date.now()}`);
         try {
-          const response = await fetch(url, {
-            headers: {
-              'Referer': 'https://www.zhihu.com/',
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            signal: controller.signal
-          });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const buffer = Buffer.from(await response.arrayBuffer());
-          if (buffer.length === 0) throw new Error('empty body');
-          fs.writeFileSync(filePath, buffer);
+          const downloadedImage = await downloadImageToTemp(url, tempPath);
+          if (totalBytes + downloadedImage.bytes > IMAGE_ITEM_MAX_BYTES) {
+            throw new Error('item image byte limit exceeded');
+          }
+          totalBytes += downloadedImage.bytes;
+          const finalName = imageFileNameFor(url, downloadedImage.mime);
+          const finalPath = path.join(assetsDir, finalName);
+          if (!fs.existsSync(finalPath)) fs.renameSync(tempPath, finalPath);
+          else fs.rmSync(tempPath, { force: true });
+          result = result.split(`![](${url})`).join(`![](assets/${finalName})`);
+          downloaded++;
         } finally {
-          clearTimeout(timer);
+          if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true });
         }
+      } else {
+        result = result.split(`![](${url})`).join(`![](assets/${fileName})`);
+        downloaded++;
       }
-      result = result.split(`![](${url})`).join(`![](assets/${fileName})`);
-      downloaded++;
-    } catch (e: any) {
-      logger.warn(`图片下载失败，保留远程链接: ${url} (${e.message})`);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      logger.warn(`图片下载失败，保留远程链接: ${url} (${message})`);
     }
   }
   if (downloaded > 0) {
