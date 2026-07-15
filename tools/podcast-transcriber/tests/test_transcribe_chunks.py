@@ -109,3 +109,72 @@ def test_transcribe_chunk_applies_plan_source_start(tmp_path: Path) -> None:
 
     assert result[0]["start"] == 8.0
     assert result[0]["end"] == 8.5
+
+
+def test_normalized_audio_cache_requires_source_and_format_metadata(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "episode.mp3"
+    source.write_bytes(b"source-audio")
+    task_dir = tmp_path / "task"
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], _logger, timeout: int) -> None:
+        calls.append(command)
+        Path(command[-1]).write_bytes(b"normalized-audio")
+
+    monkeypatch.setattr(tp, "run_command", fake_run)
+    logger = logging.getLogger("normalization-cache-test")
+    config = {"audio": {"sample_rate": 16_000, "channels": 1}}
+
+    tp.normalize_audio(source, task_dir, config, "ffmpeg", logger)
+    tp.normalize_audio(source, task_dir, config, "ffmpeg", logger)
+    tp.normalize_audio(source, task_dir, {"audio": {"sample_rate": 16_000, "channels": 2}}, "ffmpeg", logger)
+
+    assert len(calls) == 2
+
+
+def test_cuda_inference_failure_retries_the_file_with_cpu(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "episode.mp3"
+    source.write_bytes(b"source-audio")
+    monkeypatch.setattr(tp, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(tp, "OUT_LOGS", tmp_path / "logs")
+    monkeypatch.setattr(tp, "setup_file_logger", lambda _name: logging.getLogger("cuda-fallback-test"))
+    calls: list[str] = []
+
+    def fake_process_file(_source, _config, _manifest, _model, runtime, *_args, **_kwargs):
+        calls.append(runtime["device"])
+        if runtime["device"] == "cuda":
+            raise RuntimeError("CUDA execution failed during inference")
+        return {"_type": "audio_context", "all_segments": []}
+
+    monkeypatch.setattr(tp, "process_file", fake_process_file)
+    monkeypatch.setattr(
+        tp,
+        "load_whisper_model",
+        lambda _config, _logger: (object(), {"device": "cpu"}, []),
+    )
+
+    result, failures = tp.process_source_with_fallback(
+        source,
+        {"asr": {"device_preference": "cuda"}},
+        {},
+        object(),
+        {"device": "cuda"},
+        None,
+        None,
+        False,
+        logging.getLogger("cuda-fallback-test"),
+        _audio_only=True,
+    )
+
+    assert calls == ["cuda", "cpu"]
+    assert result["fallback_from"] == "cuda"
+    assert any("CUDA inference" in failure for failure in failures)
+
+
+def test_usable_sidecar_subtitle_does_not_require_whisper(tmp_path: Path) -> None:
+    source = tmp_path / "episode.mp4"
+    source.write_bytes(b"video")
+    subtitle = tmp_path / "episode.srt"
+    subtitle.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+
+    assert tp.has_usable_sidecar_subtitle(source, {}, None, logging.getLogger("subtitle-preflight")) is True

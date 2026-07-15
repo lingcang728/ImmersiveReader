@@ -1540,13 +1540,24 @@ def discover_audio_files() -> list[Path]:
 
 def normalize_audio(source: Path, task_dir: Path, config: dict[str, Any], ffmpeg: str | None, logger: logging.Logger) -> Path:
     target = task_dir / "source.wav"
+    metadata_path = task_dir / "source.wav.meta.json"
     task_dir.mkdir(parents=True, exist_ok=True)
-    if target.exists() and target.stat().st_size > 0:
+    cfg = audio_config(config)
+    expected_metadata = {
+        "schema_version": 1,
+        "source_fingerprint": file_fingerprint(source),
+        "sample_rate": int(cfg.get("sample_rate", 16000)),
+        "channels": int(cfg.get("channels", 1)),
+    }
+    if (
+        target.exists()
+        and target.stat().st_size > 0
+        and load_json(metadata_path, {}) == expected_metadata
+    ):
         logger.info("Reusing normalized audio: %s", target)
         return target
     if not ffmpeg:
         raise RuntimeError("ffmpeg is required to normalize input audio.")
-    cfg = audio_config(config)
     command = [
         ffmpeg,
         "-y",
@@ -1566,6 +1577,7 @@ def normalize_audio(source: Path, task_dir: Path, config: dict[str, Any], ffmpeg
             "ffmpeg did not produce normalized source.wav. The input may have no audio track; "
             "for a video without audio, place a same-stem .srt/.ass subtitle next to it."
         )
+    save_json(metadata_path, expected_metadata)
     return target
 
 
@@ -1674,6 +1686,22 @@ def parse_subtitle_to_segments(sub_path: Path, ffmpeg: str | None, logger: loggi
     for idx, segment in enumerate(segments, 1):
         segment["id"] = idx
     return segments
+
+
+def has_usable_sidecar_subtitle(
+    source: Path,
+    config: dict[str, Any],
+    ffmpeg: str | None,
+    logger: logging.Logger,
+) -> bool:
+    sidecar = find_sidecar_subtitle(source, config)
+    if sidecar is None:
+        return False
+    try:
+        return bool(parse_subtitle_to_segments(sidecar, ffmpeg, logger))
+    except Exception as exc:
+        logger.warning("Sidecar subtitle preflight failed for %s: %s", sidecar.name, exc)
+        return False
 
 
 def setup_file_logger(name: str) -> logging.Logger:
@@ -3241,7 +3269,7 @@ def process_source_with_fallback(
     except Exception:
         pass
     try:
-        state = load_json(
+        load_json(
             state_path,
             {
                 "task_id": task_id,
@@ -3254,68 +3282,8 @@ def process_source_with_fallback(
             },
         )
     except Exception as exc:
-        name = sanitize_name(source.stem)
-        logger = setup_file_logger(name)
-        logger.exception("Failed to process %s", source.name)
-        task_id = file_fingerprint(source)
-        state_path = STATE_DIR / f"{task_id}.json"
-        state = load_json(state_path, {"task_id": task_id, "source_path": str(source), "source_file": source.name})
-        if state.get("status") not in TERMINAL_TASK_STATUSES:
-            mark_task_failed(state_path, state, exc, stage=str(state.get("stage") or "failed"), logger=logger, _job_id=_job_id)
-        _transition_job_db(_job_id, "failed", str(state.get("stage") or "failed"),
-                           error_message=str(exc), event_type="job_failed")
-
-        if runtime.get("device") == "cuda" and is_gpu_runtime_error(exc):
-            failure = f"CUDA runtime failed during transcription; switching this file to CPU. Error: {exc}"
-            run_logger.warning(failure)
-            local_failures.append(failure)
-            cpu_config = copy.deepcopy(config)
-            cpu_config["asr"] = dict(asr_config(config))
-            cpu_config["asr"]["device_preference"] = "cpu"
-            try:
-                cpu_model, cpu_runtime, cpu_failures = load_whisper_model(cpu_config, run_logger)
-                local_failures.extend(cpu_failures)
-                result = process_file(
-                    source,
-                    cpu_config,
-                    manifest,
-                    cpu_model,
-                    dict(cpu_runtime),
-                    ffmpeg,
-                    ffprobe,
-                    force_reprocess=force_reprocess,
-                    _return_context=_audio_only,
-                    _job_id=_job_id,
-                )
-                if _audio_only and isinstance(result, dict) and result.get("_type") == "audio_context":
-                    result["fallback_from"] = "cuda"
-                    return result, local_failures
-                if _audio_only:
-                    return result, local_failures
-                # Sequential fallback: run postprocess inline
-                if isinstance(result, dict) and result.get("_type") == "audio_context":
-                    pp_result, pp_failures = process_postprocess_stage(result, config, run_logger, _job_id=_job_id)
-                    local_failures.extend(pp_failures)
-                    pp_result["fallback_from"] = "cuda"
-                    return pp_result, local_failures
-                return result, local_failures
-            except Exception as cpu_exc:
-                logger.exception("CPU fallback also failed for %s", source.name)
-                local_failures.append(f"CPU fallback failed: {cpu_exc}")
-                _transition_job_db(_job_id, "failed", "failed",
-                                   error_message=f"CUDA failed: {exc}; CPU fallback failed: {cpu_exc}",
-                                   event_type="job_failed")
-                return (
-                    {
-                        "file": source.name,
-                        "status": "failed",
-                        "error": f"CUDA failed: {exc}; CPU fallback failed: {cpu_exc}",
-                        "task_id": file_fingerprint(source),
-                    },
-                    local_failures,
-                )
-
-        return ({"file": source.name, "status": "failed", "error": str(exc), "task_id": file_fingerprint(source)}, local_failures)
+        logger.exception("Failed to load Podcast task state for %s", source.name)
+        return {"file": source.name, "status": "failed", "error": str(exc), "task_id": task_id}, local_failures
 
     # Normal path: call process_file
     try:
@@ -3333,6 +3301,60 @@ def process_source_with_fallback(
         )
     except Exception as exc:
         logger.exception("Failed to process %s", source.name)
+        fallback_logger = run_logger or logger
+        if runtime.get("device") == "cuda" and is_gpu_runtime_error(exc):
+            failure = f"CUDA inference failed; switching this file to CPU. Error: {exc}"
+            fallback_logger.warning(failure)
+            local_failures.append(failure)
+            cpu_config = copy.deepcopy(config)
+            cpu_config["asr"] = dict(asr_config(config))
+            cpu_config["asr"]["device_preference"] = "cpu"
+            try:
+                cpu_model, cpu_runtime, cpu_failures = load_whisper_model(cpu_config, fallback_logger)
+                local_failures.extend(cpu_failures)
+                result = process_file(
+                    source,
+                    cpu_config,
+                    manifest,
+                    cpu_model,
+                    dict(cpu_runtime),
+                    ffmpeg,
+                    ffprobe,
+                    force_reprocess=force_reprocess,
+                    _return_context=_audio_only,
+                    _job_id=_job_id,
+                )
+                if _audio_only:
+                    if isinstance(result, dict) and result.get("_type") == "audio_context":
+                        result["fallback_from"] = "cuda"
+                    return result, local_failures
+                if isinstance(result, dict) and result.get("_type") == "audio_context":
+                    pp_result, pp_failures = process_postprocess_stage(
+                        result,
+                        config,
+                        fallback_logger,
+                        _job_id=_job_id,
+                    )
+                    local_failures.extend(pp_failures)
+                    pp_result["fallback_from"] = "cuda"
+                    return pp_result, local_failures
+                return result, local_failures
+            except Exception as cpu_exc:
+                logger.exception("CPU fallback also failed for %s", source.name)
+                local_failures.append(f"CPU fallback failed: {cpu_exc}")
+                _transition_job_db(
+                    _job_id,
+                    "failed",
+                    "failed",
+                    error_message=f"CUDA failed: {exc}; CPU fallback failed: {cpu_exc}",
+                    event_type="job_failed",
+                )
+                return {
+                    "file": source.name,
+                    "status": "failed",
+                    "error": f"CUDA failed: {exc}; CPU fallback failed: {cpu_exc}",
+                    "task_id": task_id,
+                }, local_failures
         _transition_job_db(_job_id, "failed", "failed", error_message=str(exc), event_type="job_failed")
         return {"file": source.name, "status": "failed", "error": str(exc), "task_id": file_fingerprint(source)}, []
 
@@ -3403,20 +3425,32 @@ def main() -> int:
         or not config.get("skip_processed_files", True)
     )
 
-    # Load model
+    subtitle_only_sources = {
+        source
+        for source in audio_files
+        if has_usable_sidecar_subtitle(source, config, ffmpeg, run_logger)
+    }
+
     results: list[dict[str, Any]] = []
     runtime: dict[str, str] | None = None
     failures: list[str] = []
     model = None
 
-    try:
-        model, runtime, load_failures = load_whisper_model(config, run_logger)
-        failures.extend(load_failures)
-    except Exception as exc:
-        run_logger.exception("Could not load any model runtime.")
-        results.append({"file": "model", "status": "failed", "error": str(exc)})
-        write_run_summary(results, None, failures)
-        return 3
+    if len(subtitle_only_sources) == len(audio_files):
+        runtime = {"model": "subtitle", "device": "subtitle", "compute_type": "none"}
+        run_logger.info("All inputs have usable sidecar subtitles; skipping Whisper model load.")
+    else:
+        try:
+            model, runtime, load_failures = load_whisper_model(config, run_logger)
+            failures.extend(load_failures)
+        except Exception as exc:
+            run_logger.exception("Could not load any model runtime.")
+            if not subtitle_only_sources:
+                results.append({"file": "model", "status": "failed", "error": str(exc)})
+                write_run_summary(results, None, failures)
+                return 3
+            runtime = {"model": "unavailable", "device": "unavailable", "compute_type": "none"}
+            failures.append(f"Whisper unavailable; subtitle-only inputs continue: {exc}")
 
     # Process files with two-phase pipeline:
     # Phase 1: Audio transcription (GPU-bound, serialized by MODEL_TRANSCRIBE_LOCK)
