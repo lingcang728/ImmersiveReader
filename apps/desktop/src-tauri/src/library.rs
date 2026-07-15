@@ -229,13 +229,14 @@ fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingPr
     let mut paths = Vec::new();
     collect_manifests(root, 0, &mut paths)?;
     for path in paths {
-        let Ok((manifest, progress)) = load_book_at(&path) else {
+        let Ok(manifest) = read_manifest(&path) else {
             continue;
         };
         if manifest.book_id == book_id {
             let book_root = path
                 .parent()
                 .ok_or_else(|| "Manifest has no book directory".to_string())?;
+            let progress = load_progress(book_root, &manifest)?;
             return Ok((book_root.to_path_buf(), manifest, progress));
         }
     }
