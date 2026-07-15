@@ -747,11 +747,7 @@ impl ControlDb {
                 elapsed.num_milliseconds() >= 4000
             })
             .unwrap_or(true);
-        if !is_fatal
-            && !stage_changed
-            && !(percent_advanced && rate_ok)
-            && !heartbeat_stale
-        {
+        if !(is_fatal || stage_changed || heartbeat_stale || (percent_advanced && rate_ok)) {
             return Ok(None);
         }
 
