@@ -62,10 +62,10 @@ fn snapshot_for_file(params: FileSnapshotParams<'_>) -> TaskSnapshot {
             } else {
                 ProgressMode::Indeterminate
             },
-            // input_copy is only the first ~8% of the whole pipeline.
+            // input_copy occupies the first pipeline band (0–6%), matching control::map_pipeline_percent.
             percent: percent.map(|value| {
                 if stage == "input_copy" {
-                    (value.clamp(0.0, 100.0) / 100.0) * 8.0
+                    (value.clamp(0.0, 100.0) / 100.0) * 6.0
                 } else {
                     value
                 }
