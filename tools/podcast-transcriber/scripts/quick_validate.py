@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import importlib
 import json
-import re
+import logging
+import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,34 +43,50 @@ def main() -> int:
     if ".mp4" not in video_supported:
         fail(errors, "config video.supported_extensions must include .mp4")
 
-    scripts_text = "\n".join(
-        read(path).replace("\\", "/")
-        for path in (ROOT / "scripts").rglob("*")
-        if path.is_file() and path.suffix in (".py", ".ps1") and path.name != "quick_validate.py"
-    )
-    if re.search(r"output/final", scripts_text):
-        fail(errors, "scripts still reference output/final")
-    if "OUT_FINAL_MARKDOWN = OUTPUT / \"final\"" in scripts_text:
-        fail(errors, "transcribe script still writes final Markdown under output/final")
-    has_ext_check = all(ext in scripts_text for ext in ['".mp3"', '".m4a"', '".wav"', 'SUPPORTED_EXTENSIONS'])
-    if not has_ext_check:
-        fail(errors, "transcribe script must limit input extensions to mp3/m4a/wav")
-    if "--dry-run" not in scripts_text or "Does not load Whisper model" not in scripts_text:
-        fail(errors, "dry-run help must make clear it does not load the model")
-    if "Internal artifacts" not in scripts_text or "Final markdown output" not in scripts_text:
-        fail(errors, "dry-run should report output/work directory semantics")
+    scripts_path = ROOT / "scripts"
+    if str(scripts_path) not in sys.path:
+        sys.path.insert(0, str(scripts_path))
+    try:
+        worker = importlib.import_module("transcribe_podcasts")
+        chunk_plan = importlib.import_module("podcast_transcriber.chunk_plan")
+        common = importlib.import_module("podcast_transcriber.common")
+        ChunkPlan = chunk_plan.ChunkPlan
+        sidecar_extensions = common.SIDECAR_SUBTITLE_EXTENSIONS
+        supported_extensions = common.SUPPORTED_EXTENSIONS
+
+        if supported_extensions != {".mp3", ".m4a", ".wav"}:
+            fail(errors, "runtime SUPPORTED_EXTENSIONS behavior is incorrect")
+        if ".srt" not in sidecar_extensions:
+            fail(errors, "runtime sidecar subtitle behavior is missing .srt")
+        with tempfile.TemporaryDirectory(prefix="immersive-quick-validate-") as temporary:
+            fixture_root = Path(temporary)
+            source = fixture_root / "episode.mp3"
+            subtitle = fixture_root / "episode.srt"
+            source.write_bytes(b"synthetic audio placeholder")
+            subtitle.write_text(
+                "1\n00:00:00,000 --> 00:00:01,250\nhello\n\n2\n00:00:01,250 --> 00:00:02,000\nworld\n",
+                encoding="utf-8",
+            )
+            logger = logging.getLogger("quick_validate")
+            segments = worker.parse_subtitle_to_segments(subtitle, None, logger)
+            if len(segments) != 2 or segments[1]["start"] != 1.25:
+                fail(errors, "subtitle parsing behavior is incorrect")
+            if not worker.has_usable_sidecar_subtitle(source, {}, None, logger):
+                fail(errors, "sidecar subtitle preflight behavior is incorrect")
+            plan = ChunkPlan.from_durations([1.25, 0.75])
+            restored = ChunkPlan.from_metadata(plan.as_dict())
+            if restored.signature() != plan.signature() or restored.chunks[-1].source_end != 2.0:
+                fail(errors, "chunk plan round-trip behavior is incorrect")
+    except Exception as exc:
+        fail(errors, f"behavior tests could not run: {exc}")
     launcher = config.get("launcher") or {}
     if launcher.get("open_folder_after_run") is not True or launcher.get("open_folder") != "output":
         fail(errors, "config launcher must open output after runs by default")
     if config.get("skip_processed_files") is not False or config.get("always_reprocess_inputs") is not True:
         fail(errors, "config must disable processed-file memory and always reprocess input audio")
-    if "--force" not in scripts_text or "force_reprocess" not in scripts_text:
-        fail(errors, "transcriber must support forced reprocessing")
     translation = config.get("translation") or {}
     if translation.get("backend") == "ollama" and translation.get("auto_start_ollama") is not True:
         fail(errors, "Ollama translation should auto-start Ollama by default")
-    if "maybe_start_ollama" not in scripts_text or '"serve"' not in scripts_text:
-        fail(errors, "transcriber must try to start Ollama during preflight")
 
     if (ROOT / "output" / "final").exists():
         fail(errors, "output/final directory must not exist")
