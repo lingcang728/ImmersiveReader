@@ -1,4 +1,4 @@
-use super::{list, move_book, permanently_delete, restore, restore_idempotent};
+use super::{list, move_book, permanently_delete, reconcile, restore, restore_idempotent};
 use crate::contracts::Manifest;
 use crate::control::ControlDb;
 use std::fs;
@@ -97,5 +97,84 @@ fn restored_result_replays_after_database_reopen() {
     };
 
     assert_eq!(replay, first);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn reconcile_repairs_renamed_move_without_metadata() {
+    let (root, book, manifest) = fixture("move-journal");
+    let moved = move_book(&root, &book, &manifest).expect("book must move to trash");
+    let entry = root
+        .join(".trash")
+        .join(&moved.trash_id)
+        .join("trash-entry.json");
+    fs::remove_file(&entry).expect("metadata must be removed for crash simulation");
+    super::write_journal(
+        &root,
+        &super::TrashJournal {
+            schema_version: 1,
+            operation: "move".to_string(),
+            trash_id: moved.trash_id.clone(),
+            phase: "renamed".to_string(),
+            item: moved.clone(),
+        },
+    )
+    .expect("journal must write");
+
+    let items = list(&root).expect("reconciliation must complete the move");
+    assert_eq!(items, vec![moved]);
+    assert!(entry.exists());
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn reconcile_restores_metadata_after_restore_crash() {
+    let (root, book, manifest) = fixture("restore-journal");
+    let moved = move_book(&root, &book, &manifest).expect("book must move to trash");
+    let item_root = root.join(".trash").join(&moved.trash_id);
+    fs::remove_file(item_root.join("trash-entry.json"))
+        .expect("metadata must be removed for crash simulation");
+    super::write_journal(
+        &root,
+        &super::TrashJournal {
+            schema_version: 1,
+            operation: "restore".to_string(),
+            trash_id: moved.trash_id.clone(),
+            phase: "metadata_removed".to_string(),
+            item: moved.clone(),
+        },
+    )
+    .expect("journal must write");
+
+    reconcile(&root).expect("reconciliation must restore metadata");
+    assert!(item_root.join("trash-entry.json").exists());
+    assert_eq!(list(&root).expect("trash must list").len(), 1);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn reconcile_removes_completed_delete_journal() {
+    let (root, book, manifest) = fixture("delete-journal");
+    let moved = move_book(&root, &book, &manifest).expect("book must move to trash");
+    let item_root = root.join(".trash").join(&moved.trash_id);
+    fs::remove_dir_all(&item_root).expect("content must be removed for crash simulation");
+    super::write_journal(
+        &root,
+        &super::TrashJournal {
+            schema_version: 1,
+            operation: "permanent_delete".to_string(),
+            trash_id: moved.trash_id.clone(),
+            phase: "prepared".to_string(),
+            item: moved.clone(),
+        },
+    )
+    .expect("journal must write");
+
+    reconcile(&root).expect("reconciliation must remove completed journal");
+    assert!(!root
+        .join(".trash")
+        .join(".journal")
+        .join(format!("{}.json", moved.trash_id))
+        .exists());
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

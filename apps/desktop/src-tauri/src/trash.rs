@@ -8,6 +8,7 @@ mod commands;
 pub use commands::{delete_idempotent, restore_idempotent};
 
 const ENTRY_FILE: &str = "trash-entry.json";
+const JOURNAL_DIR: &str = ".journal";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +35,16 @@ pub struct TrashRestoreResult {
 pub struct TrashDeleteResult {
     pub deleted_items: u64,
     pub released_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrashJournal {
+    schema_version: u32,
+    operation: String,
+    trash_id: String,
+    phase: String,
+    item: TrashItem,
 }
 
 fn validate_id(value: &str) -> Result<(), String> {
@@ -86,6 +97,90 @@ fn item_root(root: &Path, trash_id: &str) -> Result<PathBuf, String> {
     Ok(root.join(".trash").join(trash_id))
 }
 
+fn journal_root(root: &Path) -> Result<PathBuf, String> {
+    let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
+    let journal = canonical_root.join(".trash").join(JOURNAL_DIR);
+    fs::create_dir_all(&journal).map_err(|error| error.to_string())?;
+    let canonical_journal = journal.canonicalize().map_err(|error| error.to_string())?;
+    if canonical_journal != canonical_root.join(".trash").join(JOURNAL_DIR) {
+        return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
+    }
+    Ok(canonical_journal)
+}
+
+fn journal_path(root: &Path, trash_id: &str) -> Result<PathBuf, String> {
+    validate_id(trash_id)?;
+    Ok(journal_root(root)?.join(format!("{trash_id}.json")))
+}
+
+fn write_journal(root: &Path, journal: &TrashJournal) -> Result<(), String> {
+    let path = journal_path(root, &journal.trash_id)?;
+    let data = serde_json::to_vec_pretty(journal).map_err(|error| error.to_string())?;
+    crate::atomic_file::write(&path, &data)
+}
+
+fn remove_journal(root: &Path, trash_id: &str) {
+    if let Ok(path) = journal_path(root, trash_id) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn write_entry(destination: &Path, item: &TrashItem) -> Result<(), String> {
+    let data = serde_json::to_vec_pretty(item).map_err(|error| error.to_string())?;
+    crate::atomic_file::write(&destination.join(ENTRY_FILE), &data)
+}
+
+pub fn reconcile(root: &Path) -> Result<(), String> {
+    let trash_root = root.join(".trash");
+    if !trash_root.exists() {
+        return Ok(());
+    }
+    let journal_root = journal_root(root)?;
+    for entry in fs::read_dir(&journal_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry.file_type().map_err(|error| error.to_string())?.is_file() {
+            continue;
+        }
+        let journal: TrashJournal = match fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|raw| serde_json::from_str::<TrashJournal>(&raw).ok())
+        {
+            Some(value) if value.schema_version == 1 => value,
+            _ => continue,
+        };
+        let item_root = trash_root.join(&journal.trash_id);
+        match journal.operation.as_str() {
+            "move" => {
+                if item_root.is_dir() {
+                    write_entry(&item_root, &journal.item)?;
+                    remove_journal(root, &journal.trash_id);
+                } else if root.join(parse_relative(&journal.item.original_relative_path)?).exists() {
+                    remove_journal(root, &journal.trash_id);
+                }
+            }
+            "restore" => {
+                let destination = root.join(parse_relative(&journal.item.original_relative_path)?);
+                if destination.exists() {
+                    remove_journal(root, &journal.trash_id);
+                } else if item_root.is_dir() {
+                    let entry_path = item_root.join(ENTRY_FILE);
+                    if !entry_path.exists() {
+                        write_entry(&item_root, &journal.item)?;
+                    }
+                    remove_journal(root, &journal.trash_id);
+                }
+            }
+            "permanent_delete" => {
+                if !item_root.exists() {
+                    remove_journal(root, &journal.trash_id);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn managed_trash_root(root: &Path) -> Result<PathBuf, String> {
     let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
     let trash_root = root.join(".trash");
@@ -122,6 +217,7 @@ fn load(root: &Path, trash_id: &str) -> Result<(PathBuf, TrashItem), String> {
 
 pub fn move_book(root: &Path, book_root: &Path, manifest: &Manifest) -> Result<TrashItem, String> {
     fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    reconcile(root)?;
     let original_relative_path = normalized_relative(root, book_root)?;
     let trash_id = Uuid::new_v4().simple().to_string();
     let trash_root = root.join(".trash");
@@ -138,13 +234,29 @@ pub fn move_book(root: &Path, book_root: &Path, manifest: &Manifest) -> Result<T
         deleted_at: chrono::Utc::now().to_rfc3339(),
         revision: 1,
     };
-    let data = serde_json::to_vec_pretty(&item).map_err(|error| error.to_string())?;
+    write_journal(
+        root,
+        &TrashJournal {
+            schema_version: 1,
+            operation: "move".to_string(),
+            trash_id: trash_id.clone(),
+            phase: "prepared".to_string(),
+            item: item.clone(),
+        },
+    )?;
     fs::rename(book_root, &destination).map_err(|error| error.to_string())?;
-    if let Err(error) = crate::atomic_file::write(&destination.join(ENTRY_FILE), &data) {
-        fs::rename(&destination, book_root)
-            .map_err(|rollback| format!("{error}; failed to roll back trash move: {rollback}"))?;
-        return Err(error);
-    }
+    let _ = write_journal(
+        root,
+        &TrashJournal {
+            schema_version: 1,
+            operation: "move".to_string(),
+            trash_id: trash_id.clone(),
+            phase: "renamed".to_string(),
+            item: item.clone(),
+        },
+    );
+    write_entry(&destination, &item)?;
+    remove_journal(root, &trash_id);
     Ok(item)
 }
 
@@ -153,6 +265,7 @@ pub fn list(root: &Path) -> Result<Vec<TrashItem>, String> {
     if !trash_root.exists() {
         return Ok(Vec::new());
     }
+    reconcile(root)?;
     let trash_root = managed_trash_root(root)?;
     let mut items = Vec::new();
     for entry in fs::read_dir(trash_root).map_err(|error| error.to_string())? {
@@ -178,6 +291,7 @@ pub fn restore(
     trash_id: &str,
     expected_revision: u64,
 ) -> Result<TrashRestoreResult, String> {
+    reconcile(root)?;
     let (source, item) = load(root, trash_id)?;
     if item.revision != expected_revision {
         return Err("REVISION_CONFLICT".to_string());
@@ -195,13 +309,35 @@ pub fn restore(
     if !canonical_parent.starts_with(&canonical_root) {
         return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
     }
+    write_journal(
+        root,
+        &TrashJournal {
+            schema_version: 1,
+            operation: "restore".to_string(),
+            trash_id: trash_id.to_string(),
+            phase: "prepared".to_string(),
+            item: item.clone(),
+        },
+    )?;
     let metadata_path = source.join(ENTRY_FILE);
     let metadata = fs::read(&metadata_path).map_err(|error| error.to_string())?;
     fs::remove_file(&metadata_path).map_err(|error| error.to_string())?;
+    let _ = write_journal(
+        root,
+        &TrashJournal {
+            schema_version: 1,
+            operation: "restore".to_string(),
+            trash_id: trash_id.to_string(),
+            phase: "metadata_removed".to_string(),
+            item: item.clone(),
+        },
+    );
     if let Err(error) = fs::rename(&source, &destination) {
         crate::atomic_file::write(&metadata_path, &metadata)?;
+        remove_journal(root, trash_id);
         return Err(error.to_string());
     }
+    remove_journal(root, trash_id);
     Ok(TrashRestoreResult {
         book_id: item.book_id,
         relative_path: item.original_relative_path,
@@ -228,12 +364,24 @@ pub fn permanently_delete(
     trash_id: &str,
     expected_revision: u64,
 ) -> Result<TrashDeleteResult, String> {
+    reconcile(root)?;
     let (source, item) = load(root, trash_id)?;
     if item.revision != expected_revision {
         return Err("REVISION_CONFLICT".to_string());
     }
+    write_journal(
+        root,
+        &TrashJournal {
+            schema_version: 1,
+            operation: "permanent_delete".to_string(),
+            trash_id: trash_id.to_string(),
+            phase: "prepared".to_string(),
+            item,
+        },
+    )?;
     let (deleted_items, released_bytes) = measure(&source)?;
     fs::remove_dir_all(source).map_err(|error| error.to_string())?;
+    remove_journal(root, trash_id);
     Ok(TrashDeleteResult {
         deleted_items,
         released_bytes,
