@@ -2,10 +2,10 @@ use crate::contracts::{is_safe_relative_path, Manifest, ReadingProgress};
 use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use tiny_http::{Header, Method, Request, Response, StatusCode};
+use tiny_http::{Header, Method, Request, Response, ResponseBox, StatusCode};
 
 const MAX_PROGRESS_BODY: usize = 64 * 1024;
 
@@ -16,10 +16,9 @@ pub struct ReaderSession {
 }
 
 pub type Sessions = Arc<RwLock<HashMap<String, ReaderSession>>>;
-type HttpResponse = Response<Cursor<Vec<u8>>>;
+type HttpResponse = ResponseBox;
 
-fn response(status: u16, body: impl Into<Vec<u8>>, content_type: &str) -> HttpResponse {
-    let mut value = Response::from_data(body).with_status_code(StatusCode(status));
+fn add_common_headers<R: Read>(mut value: Response<R>, content_type: &str) -> Response<R> {
     if let Ok(header) = Header::from_bytes("Content-Type", content_type) {
         value.add_header(header);
     }
@@ -30,6 +29,18 @@ fn response(status: u16, body: impl Into<Vec<u8>>, content_type: &str) -> HttpRe
         value.add_header(header);
     }
     value
+}
+
+fn response(status: u16, body: impl Into<Vec<u8>>, content_type: &str) -> HttpResponse {
+    add_common_headers(
+        Response::from_data(body).with_status_code(StatusCode(status)),
+        content_type,
+    )
+    .boxed()
+}
+
+fn file_response(file: fs::File, content_type: &str) -> HttpResponse {
+    add_common_headers(Response::from_file(file), content_type).boxed()
 }
 
 fn json<T: serde::Serialize>(value: &T) -> HttpResponse {
@@ -117,8 +128,8 @@ fn content_response(session: &ReaderSession, raw_relative: &str) -> HttpResponse
             "text/plain; charset=utf-8",
         );
     }
-    match fs::read(&canonical_file) {
-        Ok(data) => response(200, data, mime_type(&canonical_file)),
+    match fs::File::open(&canonical_file) {
+        Ok(file) => file_response(file, mime_type(&canonical_file)),
         Err(error) => response(500, error.to_string(), "text/plain; charset=utf-8"),
     }
 }
