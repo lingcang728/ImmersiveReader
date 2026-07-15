@@ -177,6 +177,7 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
     let writable = fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(true)
         .open(root.join(".write-test"))
         .and_then(|_| fs::remove_file(root.join(".write-test")))
         .is_ok();
@@ -307,7 +308,7 @@ mod tests {
     use super::{delete_book, progress_value, remove_book, scan_library};
     use crate::contracts::{Manifest, ReadingProgress};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_library(name: &str) -> PathBuf {
@@ -321,7 +322,7 @@ mod tests {
         root
     }
 
-    fn write_fixture_book(library: &PathBuf, book_id: &str, folder: &str) {
+    fn write_fixture_book(library: &Path, book_id: &str, folder: &str) {
         let book = library.join("手动").join(folder);
         fs::create_dir_all(&book).expect("book dir");
         let mut manifest: Manifest = serde_json::from_str(include_str!(

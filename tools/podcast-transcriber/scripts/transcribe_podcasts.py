@@ -16,23 +16,16 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from deepseek_pricing import (
     DEEPSEEK_DEFAULT_MODEL,
-    DEEPSEEK_MODEL_PRICING_PER_MILLION,
     PodcastUpstreamError,
     PromptBudgetError,
     classify_upstream_error,
-    deepseek_chat_completions_url,
-    is_retryable_http_error,
-    normalize_deepseek_model,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
@@ -41,87 +34,87 @@ if str(ROOT / "scripts") not in sys.path:
 
 # ---- Split-out modules (re-exported for backwards compatibility:
 # `import transcribe_podcasts as tp` keeps exposing these names) ----
-from podcast_transcriber.common import (  # noqa: F401
+from podcast_transcriber.common import (  # noqa: E402, F401
+    CHUNKS_DIR,
+    CONFIG_PATH,
+    CURRENT_RUN_ID,
+    DEFAULT_AUTO_TRANSLATE_LANGUAGES,
     INBOX,
-    OUTPUT,
+    INTERNAL,
+    INVALID_FILENAME_CHARS,
+    LIFECYCLE_LOG_PATH,
+    MANIFEST_PATH,
+    MODELS_DIR,
+    NORMALIZED_DIR,
     OUT_FINAL,
     OUT_FINAL_MARKDOWN,
-    WORK,
-    INTERNAL,
-    OUT_MARKDOWN,
-    OUT_MARKDOWN_BILINGUAL,
-    OUT_SRT,
     OUT_JSON,
     OUT_LOGS,
+    OUT_MARKDOWN,
+    OUT_MARKDOWN_BILINGUAL,
     OUT_REPORTS,
-    STATE_DIR,
-    CHUNKS_DIR,
-    NORMALIZED_DIR,
-    MODELS_DIR,
-    resolve_model_reference,
-    CONFIG_PATH,
-    MANIFEST_PATH,
+    OUT_SRT,
+    OUTPUT,
     RUN_LOCK_PATH,
-    LIFECYCLE_LOG_PATH,
-    CURRENT_RUN_ID,
+    SIDECAR_SUBTITLE_EXTENSIONS,
+    STATE_DIR,
+    STATE_IO_LOCK,
     SUPPORTED_EXTENSIONS,
     VIDEO_EXTENSIONS,
-    SIDECAR_SUBTITLE_EXTENSIONS,
-    INVALID_FILENAME_CHARS,
-    DEFAULT_AUTO_TRANSLATE_LANGUAGES,
-    STATE_IO_LOCK,
-    now_stamp,
+    WORK,
     ensure_dirs,
-    load_json,
-    save_json,
     iso_now,
+    load_json,
+    now_stamp,
+    resolve_model_reference,
+    save_json,
 )
-from podcast_transcriber.state import (  # noqa: F401
-    MANIFEST_LOCK,
-    append_lifecycle_log,
-    ACTIVE_TASK_STATUSES,
-    TERMINAL_TASK_STATUSES,
-    save_task_state_safe,
-    _state_is_owned_terminal_on_disk,
-    update_task_state,
-    touch_task_heartbeat,
-    TaskHeartbeat,
-    mark_task_failed,
-    load_manifest,
-    update_manifest_entry,
-    update_manifest_processed,
-)
-from podcast_transcriber.deepseek import (  # noqa: F401
-    DEEPSEEK_PROMPT_TOKEN_LIMIT,
-    DEEPSEEK_PROMPT_TOKEN_HARD_LIMIT,
-    DEFAULT_OLLAMA_TRANSLATION_BATCH_SEGMENTS,
-    DEFAULT_DEEPSEEK_TRANSLATION_BATCH_SEGMENTS,
-    DEFAULT_OLLAMA_TRANSLATION_BATCH_CHARS,
-    DEFAULT_DEEPSEEK_TRANSLATION_BATCH_CHARS,
-    DeepSeekApiLimiter,
+from podcast_transcriber.deepseek import (  # noqa: E402, F401
+    DEEPSEEK_API_CONFIG_LIMIT,
     DEEPSEEK_API_SEMAPHORE,
     DEEPSEEK_API_SEMAPHORE_LOCK,
-    DEEPSEEK_API_CONFIG_LIMIT,
-    deepseek_api_semaphore,
-    estimate_text_tokens,
-    deepseek_prompt_limit,
-    assert_deepseek_prompt_budget,
-    text_hash,
-    provider_name,
-    has_api_entry,
-    effective_provider_name,
-    positive_int,
-    translation_batch_segments,
-    translation_batch_char_limit,
-    model_label,
-    resolve_api_key,
-    estimate_deepseek_cost,
-    record_deepseek_usage,
-    reserve_budget,
-    settle_budget,
+    DEEPSEEK_PROMPT_TOKEN_HARD_LIMIT,
+    DEEPSEEK_PROMPT_TOKEN_LIMIT,
+    DEFAULT_DEEPSEEK_TRANSLATION_BATCH_CHARS,
+    DEFAULT_DEEPSEEK_TRANSLATION_BATCH_SEGMENTS,
+    DEFAULT_OLLAMA_TRANSLATION_BATCH_CHARS,
+    DEFAULT_OLLAMA_TRANSLATION_BATCH_SEGMENTS,
+    DeepSeekApiLimiter,
     DeepSeekLengthTruncatedError,
     _dynamic_throttle_deepseek,
+    assert_deepseek_prompt_budget,
+    deepseek_api_semaphore,
     deepseek_chat_completion,
+    deepseek_prompt_limit,
+    effective_provider_name,
+    estimate_deepseek_cost,
+    estimate_text_tokens,
+    has_api_entry,
+    model_label,
+    positive_int,
+    provider_name,
+    record_deepseek_usage,
+    reserve_budget,
+    resolve_api_key,
+    settle_budget,
+    text_hash,
+    translation_batch_char_limit,
+    translation_batch_segments,
+)
+from podcast_transcriber.state import (  # noqa: E402, F401
+    ACTIVE_TASK_STATUSES,
+    MANIFEST_LOCK,
+    TERMINAL_TASK_STATUSES,
+    TaskHeartbeat,
+    _state_is_owned_terminal_on_disk,
+    append_lifecycle_log,
+    load_manifest,
+    mark_task_failed,
+    save_task_state_safe,
+    touch_task_heartbeat,
+    update_manifest_entry,
+    update_manifest_processed,
+    update_task_state,
 )
 
 # DB_PATH removed — SQLite job store is no longer used
@@ -337,7 +330,7 @@ def process_is_running(pid: int) -> bool:
         return False
     if sys.platform == "win32":
         try:
-            import ctypes
+            import ctypes  # noqa: E402
             kernel32 = ctypes.windll.kernel32
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -590,7 +583,7 @@ def should_translate_for_language(config: dict[str, Any], detected_language: Any
         return False
     force = force_translate_override()
     if segments is not None:
-        from podcast_transcriber.language import assign_language_classes, segment_needs_translation
+        from podcast_transcriber.language import assign_language_classes, segment_needs_translation  # noqa: E402
 
         assign_language_classes(segments, detected_language)
         if any(segment_needs_translation(segment) for segment in segments):
@@ -605,7 +598,7 @@ def should_translate_for_language(config: dict[str, Any], detected_language: Any
 
 
 def has_missing_translations(segments: list[dict[str, Any]]) -> bool:
-    from podcast_transcriber.language import assign_language_classes, segment_needs_translation
+    from podcast_transcriber.language import assign_language_classes, segment_needs_translation  # noqa: E402
 
     assign_language_classes(segments, None)
     return any(
@@ -615,7 +608,7 @@ def has_missing_translations(segments: list[dict[str, Any]]) -> bool:
 
 
 def has_invalid_translations(segments: list[dict[str, Any]]) -> bool:
-    from podcast_transcriber.language import assign_language_classes, segment_needs_translation
+    from podcast_transcriber.language import assign_language_classes, segment_needs_translation  # noqa: E402
 
     assign_language_classes(segments, None)
     return any(
@@ -802,7 +795,7 @@ def validate_translation_payload(payload: Any, batch_segments: list[dict[str, An
 
     if len(items) != len(batch_segments):
         raise RuntimeError(f"Expected {len(batch_segments)} translations, got {len(items)}.")
-    for item_id, item in zip(expected_ids, items):
+    for item_id, item in zip(expected_ids, items, strict=True):
         text = clean_translation_text(item)
         if not is_valid_translation_text(text):
             empty_ids.append(item_id)
@@ -821,7 +814,7 @@ def parse_translation_lines(response: str, expected_count: int, strict: bool = T
         batch = [{"id": index + 1, "text": ""} for index in range(expected_count)]
         by_id = validate_translation_payload(payload, batch)
         return [by_id[index + 1] for index in range(expected_count)]
-    except RuntimeError as exc:
+    except RuntimeError:
         if strict:
             raise
 
@@ -932,7 +925,7 @@ def translate_segments_with_llm(
     max_single_retries = 2
     translation_state_lock = threading.RLock()
 
-    from podcast_transcriber.language import assign_language_classes, segment_needs_translation
+    from podcast_transcriber.language import assign_language_classes, segment_needs_translation  # noqa: E402
 
     translated = [dict(segment) for segment in segments]
     assign_language_classes(translated, state.get("detected_language") or (config.get("asr") or {}).get("language"))
@@ -1464,7 +1457,7 @@ def probe_duration(path: Path, ffprobe: str | None, logger: logging.Logger) -> f
             logger.warning("ffprobe duration check failed: %s", exc)
 
     try:
-        import av
+        import av  # noqa: E402
 
         with av.open(str(path)) as container:
             if container.duration:
@@ -1474,7 +1467,7 @@ def probe_duration(path: Path, ffprobe: str | None, logger: logging.Logger) -> f
 
     if path.suffix.lower() == ".wav":
         try:
-            import wave
+            import wave  # noqa: E402
 
             with wave.open(str(path), "rb") as stream:
                 frame_rate = stream.getframerate()
@@ -1698,7 +1691,7 @@ def detect_silence_points(
     output = result.stderr or ""
     starts = [float(m) for m in re.findall(r"silence_start:\s*([0-9.]+)", output)]
     ends = [float(m) for m in re.findall(r"silence_end:\s*([0-9.]+)", output)]
-    pairs = list(zip(starts, ends))
+    pairs = list(zip(starts, ends, strict=True))
     logger.info("silencedetect found %s silence intervals in %s.", len(pairs), source.name)
     return pairs
 
@@ -1854,7 +1847,7 @@ def is_gpu_runtime_error(exc: BaseException) -> bool:
 
 def load_whisper_model(config: dict[str, Any], logger: logging.Logger):
     configure_nvidia_dll_paths(logger)
-    from faster_whisper import BatchedInferencePipeline, WhisperModel
+    from faster_whisper import BatchedInferencePipeline, WhisperModel  # noqa: E402
 
     acfg = asr_config(config)
     models = unique_list([acfg.get("model", "large-v3")] + acfg.get("fallback_models", []))
@@ -2045,7 +2038,7 @@ def write_outputs(
         "transcribed_at": now_stamp(),
         "segments": segments,
     }
-    from podcast_transcriber.language import assign_language_classes
+    from podcast_transcriber.language import assign_language_classes  # noqa: E402
 
     assign_language_classes(segments, runtime.get("detected_language"))
     payload["segments"] = segments
@@ -2126,7 +2119,7 @@ def write_outputs(
 
 def write_final_markdown_from_json(json_path: str, logger: logging.Logger, config: dict[str, Any]) -> str | None:
     try:
-        import importlib.util
+        import importlib.util  # noqa: E402
 
         scripts_dir = ROOT / "scripts"
         scripts_dir_text = str(scripts_dir)
@@ -2726,7 +2719,7 @@ def process_postprocess_stage(
     """Run postprocess for a completed audio transcription: translate, write output, finalize.
 
     Called either from the postprocess executor (parallel mode) or inline
-    from process_file() (sequential mode).
+    from process_file() (sequential mode).  # noqa: E402
 
     Args:
         context: AudioContext dict from process_file() with _return_context=True.
@@ -2993,13 +2986,11 @@ def translate_existing_outputs(config: dict[str, Any], force: bool = False, no_o
 
 def write_run_summary(results: list[dict[str, Any]], runtime: dict[str, str] | None, failures: list[str]) -> Path:
     success = sum(1 for item in results if item["status"] == "success")
-    partial = sum(1 for item in results if item["status"] == "partial_success")
     skipped = sum(1 for item in results if item["status"] == "skipped")
     failed = sum(1 for item in results if item["status"] == "failed")
     trans_success = sum(1 for item in results if item.get("translation_status") == "success")
     trans_partial = sum(1 for item in results if item.get("translation_status") == "partial_success")
     trans_failed = sum(1 for item in results if item.get("translation_status") == "failed")
-    trans_skipped = sum(1 for item in results if item.get("translation_status") in ("skipped", None, ""))
     path = OUT_REPORTS / "run_summary.md"
     lines = [
         "# 本轮转写摘要",
@@ -3129,9 +3120,7 @@ def process_source_with_fallback(
     task_id = file_fingerprint(source)
     safe_stem = sanitize_name(source.stem)
     logger = setup_file_logger(safe_stem)
-    task_work_dir = WORK / safe_stem
     state_path = STATE_DIR / f"{task_id}.json"
-    started_at = now_stamp()
     log_path = OUT_LOGS / f"{safe_stem}.log"
     # Write log_path into state early so the GUI can read per-task logs
     # even before process_file() sets it during the preparing stage.

@@ -262,7 +262,7 @@ fn launch(tool: &str, settings: &AppSettings) -> Result<(), String> {
 
 #[cfg(windows)]
 fn zhihu_client(settings: &AppSettings) -> Result<SidecarHttpClient, String> {
-    let _ = launch("zhihu", settings)?;
+    launch("zhihu", settings)?;
     let mut manager = TOOL_MANAGER
         .get_or_init(|| Mutex::new(ToolManager::default()))
         .lock()
@@ -285,7 +285,7 @@ pub(crate) fn ensure_zhihu_ready(settings: &AppSettings) -> Result<(), String> {
     #[cfg(windows)]
     {
         let _client = zhihu_client(settings)?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -301,7 +301,7 @@ pub(crate) fn zhihu_get_json<O: DeserializeOwned>(
     #[cfg(windows)]
     {
         let client = zhihu_client(settings)?;
-        return tauri::async_runtime::block_on(client.get_json(path));
+        tauri::async_runtime::block_on(client.get_json(path))
     }
     #[cfg(not(windows))]
     {
@@ -318,7 +318,7 @@ pub(crate) fn zhihu_post_json<I: Serialize, O: DeserializeOwned>(
     #[cfg(windows)]
     {
         let client = zhihu_client(settings)?;
-        return tauri::async_runtime::block_on(client.post_json(path, body));
+        tauri::async_runtime::block_on(client.post_json(path, body))
     }
     #[cfg(not(windows))]
     {

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import json
-import socket
 import sys
 import urllib.error
 from pathlib import Path
@@ -65,7 +64,7 @@ def test_classifies_server_error_and_timeout() -> None:
     assert unavailable.code == "UPSTREAM_UNAVAILABLE"
     assert unavailable.retry_after_seconds == 4
 
-    timeout = classify_upstream_error(urllib.error.URLError(socket.timeout("timed out")))
+    timeout = classify_upstream_error(urllib.error.URLError(TimeoutError("timed out")))
     assert timeout is not None
     assert timeout.code == "UPSTREAM_TIMEOUT"
 

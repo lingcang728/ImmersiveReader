@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import polish_interview_markdown as pim  # noqa: E402
+import transcribe_podcasts as tp  # noqa: E402
 from podcast_transcriber.language import (  # noqa: E402
     assign_language_classes,
     classify_segment_language,
     segment_needs_translation,
 )
-import polish_interview_markdown as pim  # noqa: E402
-import transcribe_podcasts as tp  # noqa: E402
 
 
 def test_classify_chinese_english_mixed_and_short() -> None:

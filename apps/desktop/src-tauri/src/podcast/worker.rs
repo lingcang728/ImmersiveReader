@@ -83,7 +83,7 @@ fn podcast_worker_command(
         )
         .env(
             "IMMERSIVE_PODCAST_PYTHON",
-            &locations.runtime_root.join("podcast/python/python.exe"),
+            locations.runtime_root.join("podcast/python/python.exe"),
         )
         .env(
             "PATH",
@@ -313,7 +313,7 @@ pub fn stop_all() -> Result<(), String> {
 fn terminate_task(pid: u32, _child: &ChildHandle) -> Result<(), String> {
     #[cfg(windows)]
     {
-        return crate::job_object::terminate_process(pid);
+        crate::job_object::terminate_process(pid)
     }
     #[cfg(not(windows))]
     {

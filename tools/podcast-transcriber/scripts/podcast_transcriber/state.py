@@ -19,7 +19,6 @@ from podcast_transcriber.common import (
     save_json,
 )
 
-
 MANIFEST_LOCK = threading.Lock()
 
 
@@ -216,7 +215,7 @@ class TaskHeartbeat:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def __enter__(self) -> "TaskHeartbeat":
+    def __enter__(self) -> TaskHeartbeat:
         touch_task_heartbeat(self.state_path, self.state, status=self.status, stage=self.stage, _job_id=self._job_id)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()

@@ -552,7 +552,7 @@ export async function scrapePeopleIndex(
   const beforeDomSize = collected.size;
   {
     try {
-      const domItems = await page.evaluate((type) => {
+      const domItems = await page.evaluate(() => {
         const results: any[] = [];
         const cards = document.querySelectorAll('.ContentItem');
         
@@ -580,14 +580,13 @@ export async function scrapePeopleIndex(
           });
         });
         return results;
-      }, itemType);
+      });
 
       for (const raw of domItems) {
         const norm = normalizeUrl(raw.url);
         if (norm.type === 'unknown') continue;
 
         const itemId = norm.id;
-        const rawId = itemId.split(':')[1];
         if (norm.type === 'answer') {
           collected.set(itemId, {
             id: itemId,

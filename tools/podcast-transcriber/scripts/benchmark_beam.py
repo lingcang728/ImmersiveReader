@@ -24,9 +24,8 @@ def load_config() -> dict:
 
 
 def load_model(asr: dict):
-    from faster_whisper import WhisperModel
-
     import transcribe_podcasts as tp
+    from faster_whisper import WhisperModel
 
     tp.configure_nvidia_dll_paths()
 
@@ -93,7 +92,7 @@ def main() -> int:
         results.append({"beam": beam, "elapsed": elapsed, "segments": segment_count, "chars": chars, "text": text})
 
     report_lines = [
-        f"# beam_size 基准报告",
+        "# beam_size 基准报告",
         "",
         f"- 音频: {audio.name}",
         f"- 范围: 前 {args.minutes} 分钟",

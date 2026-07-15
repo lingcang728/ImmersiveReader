@@ -270,12 +270,13 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if child.try_wait().expect("child status must load").is_some() {
-                child.wait().expect("terminated child must be reaped");
+                let _ = child.wait();
                 return;
             }
             thread::sleep(Duration::from_millis(25));
         }
         let _ = child.kill();
+        let _ = child.wait();
         panic!("closing the Job Object did not terminate the assigned process");
     }
 

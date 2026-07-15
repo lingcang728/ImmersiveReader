@@ -118,11 +118,13 @@ fn resolve_markdown_roots(task_cache_root: &Path) -> Vec<PathBuf> {
     vec![task_cache_root.join("output")]
 }
 
+type CopiedOutputs = (Vec<Chapter>, Vec<(String, PathBuf)>);
+
 fn copy_outputs(
     output_root: &Path,
     incoming: &Path,
     preferred_stem: &str,
-) -> Result<(Vec<Chapter>, Vec<(String, PathBuf)>), String> {
+) -> Result<CopiedOutputs, String> {
     let task_cache_root = output_root
         .parent()
         .map(Path::to_path_buf)
@@ -203,16 +205,28 @@ fn copy_outputs(
     Ok((chapters, exported_sources))
 }
 
-fn write_book_metadata(
-    incoming: &Path,
-    task_id: &str,
-    book_id: &str,
-    source_id: &str,
-    title: &str,
+struct BookMetadataInput<'a> {
+    incoming: &'a Path,
+    task_id: &'a str,
+    book_id: &'a str,
+    source_id: &'a str,
+    title: &'a str,
     revision: u64,
-    engine_version: &str,
+    engine_version: &'a str,
     chapters: Vec<Chapter>,
-) -> Result<(String, String), String> {
+}
+
+fn write_book_metadata(input: BookMetadataInput<'_>) -> Result<(String, String), String> {
+    let BookMetadataInput {
+        incoming,
+        task_id,
+        book_id,
+        source_id,
+        title,
+        revision,
+        engine_version,
+        chapters,
+    } = input;
     let now = Utc::now().to_rfc3339();
     let manifest = Manifest {
         schema_version: 1,
@@ -338,16 +352,16 @@ pub fn publish_task_result_at(
             return Err(error);
         }
     };
-    let (manifest_sha256, provenance_sha256) = match write_book_metadata(
-        &incoming,
+    let (manifest_sha256, provenance_sha256) = match write_book_metadata(BookMetadataInput {
+        incoming: &incoming,
         task_id,
-        &book_id,
-        &source_id,
-        &input_name,
+        book_id: &book_id,
+        source_id: &source_id,
+        title: &input_name,
         revision,
         engine_version,
         chapters,
-    ) {
+    }) {
         Ok(value) => value,
         Err(error) => {
             let _ = fs::remove_dir_all(&incoming);
@@ -639,12 +653,11 @@ mod tests {
             .join("source")
             .join("source.md")
             .is_file());
-        assert_eq!(
-            read_podcast_recovery(&locations, task_id)
+        assert!(
+            !read_podcast_recovery(&locations, task_id)
                 .expect("recovery must load")
                 .expect("recovery must exist")
-                .lease_held,
-            false
+                .lease_held
         );
         drop(control);
         fs::remove_dir_all(root).expect("fixture must remove");

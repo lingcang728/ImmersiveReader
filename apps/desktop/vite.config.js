@@ -1,7 +1,6 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 const decodeNamedCharacterReference = decodeURIComponent(
   new URL("./node_modules/decode-named-character-reference/index.js", import.meta.url).pathname,

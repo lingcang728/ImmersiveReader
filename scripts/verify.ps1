@@ -58,12 +58,20 @@ try {
     Pop-Location
 }
 
+$ruff = Get-Command ruff.exe -ErrorAction SilentlyContinue
+if (-not $ruff) {
+    throw '未找到本机 ruff.exe（请复用全局安装，勿在项目内重复安装）'
+}
+
 Push-Location (Join-Path $root 'apps\desktop')
 try {
     Invoke-Checked 'desktop tests' { & $npm test }
     Invoke-Checked 'desktop Svelte check' { & $npm run check }
     Invoke-Checked 'desktop Rust tests' { & $cargo test --manifest-path src-tauri\Cargo.toml }
     Invoke-Checked 'desktop Rust check' { & $cargo check --manifest-path src-tauri\Cargo.toml }
+    Invoke-Checked 'desktop Rust clippy' {
+        & $cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets --all-features -- -D warnings
+    }
 } finally {
     Pop-Location
 }
@@ -79,6 +87,7 @@ try {
 
 Push-Location (Join-Path $root 'tools\podcast-transcriber')
 try {
+    Invoke-Checked 'Podcast Ruff' { & $ruff.Source check scripts tests }
     if ((Split-Path -Leaf $python) -ieq 'py.exe') {
         Invoke-Checked 'Podcast tests' { & $python -3 -m pytest -q }
         Invoke-Checked 'Podcast quick validation' { & $python -3 scripts\quick_validate.py }

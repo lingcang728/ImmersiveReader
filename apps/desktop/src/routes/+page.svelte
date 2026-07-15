@@ -97,7 +97,6 @@
 	const RECENT_FILES_KEY = "mmbook.recentFiles";
 	const RECENT_FILES_LIMIT = 8;
 	let recentFiles: RecentFile[] = [];
-	let continueProgress = 0;
 
 	function isRecord(value: unknown): value is Record<string, unknown> {
 		return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -150,7 +149,7 @@
 		}
 	}
 
-	async function persistRecentFiles(files: RecentFile[], refreshContinue = false): Promise<RecentFile[]> {
+	async function persistRecentFiles(files: RecentFile[]): Promise<RecentFile[]> {
 		const limited = files.slice(0, RECENT_FILES_LIMIT);
 		try {
 			const cleanedJson = await invoke<string>("save_recent_files", {
@@ -163,7 +162,6 @@
 			} catch {
 				// ignore
 			}
-			if (refreshContinue) await loadContinueInfo();
 			return cleaned;
 		} catch {
 			recentFiles = limited;
@@ -172,7 +170,6 @@
 			} catch {
 				// ignore
 			}
-			if (refreshContinue) await loadContinueInfo();
 			return limited;
 		}
 	}
@@ -186,54 +183,6 @@
 		void persistRecentFiles(nextFiles);
 	}
 
-	async function markdownFileStillExists(path: string): Promise<boolean> {
-		try {
-			return await invoke<boolean>("markdown_file_exists", { path });
-		} catch {
-			return true;
-		}
-	}
-
-	async function removeRecentFile(path: string, showNotice = false) {
-		recentFiles = recentFiles.filter((f) => f.path !== path);
-		void invoke("delete_reading_state", { path }).catch(() => {});
-		await persistRecentFiles(recentFiles, true);
-		if (showNotice) {
-			showAppNotice("文件不存在或已移动，已从历史记录中移除");
-		}
-	}
-
-	async function openRecentFile(path: string) {
-		if (!(await markdownFileStillExists(path))) {
-			await removeRecentFile(path, true);
-			return;
-		}
-
-		const opened = await openFile(path, { suppressFailureNotice: true });
-		if (opened) return;
-
-		if (!(await markdownFileStillExists(path))) {
-			await removeRecentFile(path, true);
-			return;
-		}
-
-		showAppNotice("无法打开文件，请检查路径或权限");
-		if (contentEl) contentEl.scrollTop = 0;
-	}
-
-	async function loadContinueInfo() {
-		continueProgress = 0;
-		const first = recentFiles[0];
-		if (!first) return;
-		try {
-			const state = await invoke<{ progress?: number }>("load_reading_state", {
-				path: first.path,
-			});
-			continueProgress = Math.max(0, Math.min(1, state.progress ?? 0));
-		} catch {
-			// 没有阅读状态就不显示进度
-		}
-	}
 	let fileName = "";
 	let fileEncoding = 'utf-8';
 	let fileError = "";
@@ -2020,7 +1969,6 @@
 
 		void loadRecentFiles().then((files) => {
 			recentFiles = files;
-			void loadContinueInfo();
 		});
 
 		// 外部变更自动重载：每 2s 轮询当前文件 mtime；

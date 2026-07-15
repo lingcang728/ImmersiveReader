@@ -82,7 +82,7 @@ def assign_language_classes(
         right = next((provisional[i] for i in range(index + 1, len(provisional)) if provisional[i]), None)
         provisional[index] = left or right or file_lang or "en"
 
-    for segment, language_class in zip(segments, provisional):
+    for segment, language_class in zip(segments, provisional, strict=True):
         segment["languageClass"] = language_class or file_lang or "en"
     return segments
 

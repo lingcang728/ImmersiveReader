@@ -20,10 +20,7 @@ from deepseek_pricing import (
     deepseek_thinking_config,
     is_retryable_http_error,
     normalize_deepseek_model,
-    reserve_budget,
-    settle_budget,
 )
-
 
 DEEPSEEK_PROMPT_TOKEN_LIMIT = 200_000
 

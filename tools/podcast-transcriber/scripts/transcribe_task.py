@@ -124,8 +124,8 @@ def load_task_spec(path: Path, environment: dict[str, str] | None = None) -> dic
         try:
             budget_limit_value = float(budget_limit)
             estimated_budget = float(budget.get("estimatedApiCostUpperCny", 0.0))
-        except (TypeError, ValueError):
-            raise TaskSpecError("INVALID_TASK_SPEC", "Budget limit must be finite")
+        except (TypeError, ValueError) as err:
+            raise TaskSpecError("INVALID_TASK_SPEC", "Budget limit must be finite") from err
         if not math.isfinite(budget_limit_value) or budget_limit_value < 0:
             raise TaskSpecError("INVALID_TASK_SPEC", "Budget limit must be non-negative")
         if not math.isfinite(estimated_budget) or estimated_budget < 0 or budget_limit_value + 1e-9 < estimated_budget:

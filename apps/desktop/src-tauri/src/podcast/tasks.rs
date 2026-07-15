@@ -17,20 +17,36 @@ use uuid::Uuid;
 const COMMAND_NAME: &str = "add_podcast_files";
 pub const TASK_EVENT_NAME: &str = "acquisition://task-event";
 
-fn snapshot_for_file(
+struct FileSnapshotParams<'a> {
     task_id: String,
-    file: &super::PodcastFilePreview,
+    file: &'a super::PodcastFilePreview,
     cache_bytes: u64,
     revision: u64,
     last_sequence: u64,
-    stage: &str,
-    status: &str,
-    label: &str,
+    stage: &'a str,
+    status: &'a str,
+    label: &'a str,
     percent: Option<f64>,
     completed_units: Option<u64>,
     total_units: Option<u64>,
     created_at: Option<String>,
-) -> TaskSnapshot {
+}
+
+fn snapshot_for_file(params: FileSnapshotParams<'_>) -> TaskSnapshot {
+    let FileSnapshotParams {
+        task_id,
+        file,
+        cache_bytes,
+        revision,
+        last_sequence,
+        stage,
+        status,
+        label,
+        percent,
+        completed_units,
+        total_units,
+        created_at,
+    } = params;
     let now = chrono::Utc::now().to_rfc3339();
     TaskSnapshot {
         id: task_id,
@@ -94,20 +110,20 @@ pub(crate) fn queued_event(
     file: &super::PodcastFilePreview,
     cache_bytes: u64,
 ) -> TaskEvent {
-    let snapshot = snapshot_for_file(
+    let snapshot = snapshot_for_file(FileSnapshotParams {
         task_id,
         file,
         cache_bytes,
-        1,
-        1,
-        "queued",
-        "waiting",
-        "等待转写",
-        None,
-        None,
-        None,
-        None,
-    );
+        revision: 1,
+        last_sequence: 1,
+        stage: "queued",
+        status: "waiting",
+        label: "等待转写",
+        percent: None,
+        completed_units: None,
+        total_units: None,
+        created_at: None,
+    });
     TaskEvent {
         schema_version: 1,
         task_id: snapshot.id.clone(),
@@ -138,20 +154,20 @@ fn create_tasks(
         }
         let task_id = Uuid::new_v4().simple().to_string();
         // Visible snapshot first so UI shows copy progress within 1s.
-        let preparing = snapshot_for_file(
-            task_id.clone(),
+        let preparing = snapshot_for_file(FileSnapshotParams {
+            task_id: task_id.clone(),
             file,
-            file.bytes,
-            1,
-            1,
-            "input_copy",
-            "copying",
-            "正在复制输入",
-            Some(0.0),
-            Some(0),
-            Some(file.bytes),
-            None,
-        );
+            cache_bytes: file.bytes,
+            revision: 1,
+            last_sequence: 1,
+            stage: "input_copy",
+            status: "copying",
+            label: "正在复制输入",
+            percent: Some(0.0),
+            completed_units: Some(0),
+            total_units: Some(file.bytes),
+            created_at: None,
+        });
         let preparing_event = TaskEvent {
             schema_version: 1,
             task_id: preparing.id.clone(),
@@ -176,20 +192,21 @@ fn create_tasks(
                 };
                 last_revision = last_revision.saturating_add(1);
                 last_sequence = last_sequence.saturating_add(1);
-                let snapshot = snapshot_for_file(
-                    task_id.clone(),
+                let label = format!("复制输入 {copied} / {total} 字节");
+                let snapshot = snapshot_for_file(FileSnapshotParams {
+                    task_id: task_id.clone(),
                     file,
-                    total,
-                    last_revision,
+                    cache_bytes: total,
+                    revision: last_revision,
                     last_sequence,
-                    "input_copy",
-                    "copying",
-                    &format!("复制输入 {copied} / {total} 字节"),
-                    Some(percent),
-                    Some(copied),
-                    Some(total),
-                    Some(created_at.clone()),
-                );
+                    stage: "input_copy",
+                    status: "copying",
+                    label: &label,
+                    percent: Some(percent),
+                    completed_units: Some(copied),
+                    total_units: Some(total),
+                    created_at: Some(created_at.clone()),
+                });
                 let event = TaskEvent {
                     schema_version: 1,
                     task_id: snapshot.id.clone(),
@@ -217,20 +234,20 @@ fn create_tasks(
             Err(error) => {
                 last_revision = last_revision.saturating_add(1);
                 last_sequence = last_sequence.saturating_add(1);
-                let mut failed = snapshot_for_file(
-                    task_id.clone(),
+                let mut failed = snapshot_for_file(FileSnapshotParams {
+                    task_id: task_id.clone(),
                     file,
-                    file.bytes,
-                    last_revision,
+                    cache_bytes: file.bytes,
+                    revision: last_revision,
                     last_sequence,
-                    "input_copy_failed",
-                    "exited",
-                    "输入复制失败",
-                    None,
-                    None,
-                    Some(file.bytes),
-                    Some(created_at.clone()),
-                );
+                    stage: "input_copy_failed",
+                    status: "exited",
+                    label: "输入复制失败",
+                    percent: None,
+                    completed_units: None,
+                    total_units: Some(file.bytes),
+                    created_at: Some(created_at.clone()),
+                });
                 failed.lifecycle_state = LifecycleState::Terminal;
                 failed.outcome = TaskOutcome::Failed;
                 failed.error_code = Some(crate::tasks::TaskErrorCode::InputCopyFailed);
@@ -268,20 +285,20 @@ fn create_tasks(
         set_podcast_recovery_compatibility(locations, &task_id, compatibility)?;
         last_revision = last_revision.saturating_add(1);
         last_sequence = last_sequence.saturating_add(1);
-        let ready = snapshot_for_file(
+        let ready = snapshot_for_file(FileSnapshotParams {
             task_id,
             file,
-            input.bytes,
-            last_revision,
+            cache_bytes: input.bytes,
+            revision: last_revision,
             last_sequence,
-            "queued",
-            "waiting",
-            "输入就绪，等待转写",
-            Some(100.0),
-            Some(input.bytes),
-            Some(input.bytes),
-            Some(created_at),
-        );
+            stage: "queued",
+            status: "waiting",
+            label: "输入就绪，等待转写",
+            percent: Some(100.0),
+            completed_units: Some(input.bytes),
+            total_units: Some(input.bytes),
+            created_at: Some(created_at),
+        });
         let event = TaskEvent {
             schema_version: 1,
             task_id: ready.id.clone(),

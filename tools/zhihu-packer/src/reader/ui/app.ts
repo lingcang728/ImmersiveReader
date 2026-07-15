@@ -1,7 +1,7 @@
 import { VirtualFile, readText } from '../core/scanner.js';
 import { ArticleMetadata } from '../core/metadata.js';
 import { renderMarkdown } from '../core/markdown-renderer.js';
-import { manageImageCache, clearAllImageCache, revokeArticleImages } from '../core/image-resolver.js';
+import { manageImageCache, clearAllImageCache } from '../core/image-resolver.js';
 import { saveReadingProgress, getReadingProgress } from '../core/storage.js';
 import { buildSearchIndex, searchArticles, SearchIndexItem } from '../core/search.js';
 import { buildServedContentUrl } from '../modes/served-mode.js';
@@ -389,20 +389,6 @@ export class ReaderApp {
     });
   }
 
-  private unloadArticleBody(index: number) {
-    const card = document.getElementById(`article-${index}`);
-    if (!card || card.getAttribute('data-rendered') !== 'true') return;
-    const body = card.querySelector('.article-body');
-    if (!body) return;
-    revokeArticleImages(this.articles[index].articleId);
-    body.textContent = '';
-    const placeholder = document.createElement('div');
-    placeholder.className = 'article-loading-placeholder';
-    placeholder.textContent = '正文已暂存，滚动回来时自动加载...';
-    body.appendChild(placeholder);
-    card.setAttribute('data-rendered', 'false');
-  }
-
   private getNeighborIds(): string[] {
     const neighbors: string[] = [];
     const activeIndex = this.getSafeActiveIndex();
@@ -648,7 +634,7 @@ export class ReaderApp {
       if (finalTarget !== null && finalTarget !== this.getSafeActiveIndex()) {
         const isAdjacent = Math.abs(finalTarget - this.getSafeActiveIndex()) === 1;
         // 如果是相邻文章切换，传入 accurate=false 只预加载前后一篇以提高速度；跨多篇则传入 accurate=true 以确保定位百分百精确
-        this.scrollToArticle(finalTarget, undefined, undefined, true, !isAdjacent);
+        this.scrollToArticle(finalTarget, undefined, undefined, !isAdjacent);
       }
     }, 75); // 75ms 防抖，合并连续快速按键
   }
@@ -657,7 +643,6 @@ export class ReaderApp {
     index: number,
     targetScrollTop?: number,
     headingAnchorId?: string,
-    useTransition: boolean = false,
     accurate: boolean = true
   ) {
     if (index < 0 || index >= this.articles.length) return;

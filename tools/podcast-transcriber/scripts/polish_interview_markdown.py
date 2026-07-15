@@ -6,10 +6,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +56,7 @@ def get_deepseek_semaphore(config: dict[str, Any]) -> Any:
         _EXTERNAL_DEEPSEEK_SEMAPHORE = threading.Semaphore(limit)
         return _EXTERNAL_DEEPSEEK_SEMAPHORE
 
-from deepseek_pricing import (
+from deepseek_pricing import (  # noqa: E402
     DEEPSEEK_DEFAULT_MODEL,
     DEEPSEEK_MODEL_PRICING_PER_MILLION,
     PromptBudgetError,
@@ -68,9 +68,8 @@ from deepseek_pricing import (
     reserve_budget,
     settle_budget,
 )
-from podcast_transcriber.common import (
+from podcast_transcriber.common import (  # noqa: E402
     CONFIG_PATH,
-    OUT_FINAL,
     OUT_FINAL_MARKDOWN,
     OUT_JSON,
     STATE_DIR,
@@ -642,7 +641,7 @@ def exclusive_file_lock(path: Path):
     handle = path.open("a+b")
     try:
         if os.name == "nt":
-            import msvcrt
+            import msvcrt  # noqa: E402
 
             if handle.seek(0, os.SEEK_END) == 0:
                 handle.write(b"\0")
@@ -650,19 +649,19 @@ def exclusive_file_lock(path: Path):
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
         else:
-            import fcntl
+            import fcntl  # noqa: E402
 
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         yield
     finally:
         try:
             if os.name == "nt":
-                import msvcrt
+                import msvcrt  # noqa: E402
 
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
             else:
-                import fcntl
+                import fcntl  # noqa: E402
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
@@ -1022,7 +1021,7 @@ def split_mixed_dialogue_segments(segments: list[dict[str, Any]]) -> list[dict[s
         end_time = float(segment.get("end", start_time))
         duration = max(0.0, end_time - start_time)
         parts: list[tuple[int, int]] = []
-        for left, right in zip(ordered, ordered[1:]):
+        for left, right in zip(ordered, ordered[1:], strict=True):
             part = original[left:right].strip(" ，")
             if part:
                 parts.append((left, right))
@@ -1473,7 +1472,7 @@ def polish_blocks_batch(
     Returns: {block_index: polished_text}
     """
     items = []
-    for i, (block, idx) in enumerate(zip(blocks, block_indices)):
+    for _i, (block, idx) in enumerate(zip(blocks, block_indices, strict=True)):
         speaker = label_for_speaker(block["speaker"], labels)
         text = block_text_for_polish(block, is_english)
         if not text.strip():
@@ -1567,7 +1566,7 @@ def should_add_break(text: str) -> bool:
 
 
 def build_turns(segments: list[dict[str, Any]], detected_language: str | None = None) -> list[dict[str, Any]]:
-    from podcast_transcriber.language import assign_language_classes, classify_segment_language
+    from podcast_transcriber.language import assign_language_classes, classify_segment_language  # noqa: E402
 
     turns: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
@@ -1889,7 +1888,7 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
     render_turns = [turn for turn in turns if not (sponsor_mode == "drop" and turn.get("is_sponsor"))]
     for turn in render_turns:
         if not turn.get("languageClass"):
-            from podcast_transcriber.language import classify_segment_language
+            from podcast_transcriber.language import classify_segment_language  # noqa: E402
 
             turn["languageClass"] = classify_segment_language(str(turn.get("original", ""))) or (
                 "en" if is_english else "zh"

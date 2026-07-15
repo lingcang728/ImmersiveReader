@@ -82,7 +82,7 @@ app.post('/api/login/start', requireLocalToken, (_req, res) => {
 });
 
 // API：获取任务列表
-app.get('/api/tasks', requireLocalToken, (req, res) => {
+app.get('/api/tasks', requireLocalToken, (_req, res) => {
   try {
     const tasks = getTasks();
     res.json({ success: true, data: tasks });
