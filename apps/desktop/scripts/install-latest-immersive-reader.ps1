@@ -84,6 +84,12 @@ if ($Build) {
     "-RefreshApps"
   )
   Assert-RuntimeAppHashes
+  $verifyRuntime = Join-Path $monorepoRoot "scripts\verify-runtime.ps1"
+  Invoke-CheckedCommand -FilePath "powershell.exe" -Arguments @(
+    "-ExecutionPolicy", "Bypass",
+    "-File", $verifyRuntime,
+    "-RuntimeRoot", (Join-Path $monorepoRoot "runtime")
+  )
   Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "tauri", "build", "--", "--no-sign", "--bundles", "nsis")
 }
 
@@ -133,6 +139,13 @@ foreach ($required in @(
     throw "Installed runtime is incomplete: $required"
   }
 }
+$verifyRuntime = Join-Path $monorepoRoot "scripts\verify-runtime.ps1"
+Invoke-CheckedCommand -FilePath "powershell.exe" -Arguments @(
+  "-ExecutionPolicy", "Bypass",
+  "-File", $verifyRuntime,
+  "-RuntimeRoot", $targetRuntime,
+  "-ManifestPath", (Join-Path $targetRuntime "manifest.json")
+)
 
 if ($RegisterMarkdownAssociations) {
   $progId = "ImmersiveReader.Markdown"

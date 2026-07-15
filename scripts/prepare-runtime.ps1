@@ -76,6 +76,67 @@ function Reset-AppDestination {
     }
 }
 
+function Get-CriticalRuntimeFiles {
+    param([Parameter(Mandatory)][string]$RuntimeRoot)
+
+    $codeRoots = @(
+        (Join-Path $RuntimeRoot 'zhihu\app'),
+        (Join-Path $RuntimeRoot 'podcast\app'),
+        (Join-Path $RuntimeRoot 'packages\contracts')
+    )
+    $binaryRoots = @(
+        (Join-Path $RuntimeRoot 'zhihu\node'),
+        (Join-Path $RuntimeRoot 'zhihu\chromium'),
+        (Join-Path $RuntimeRoot 'podcast\python'),
+        (Join-Path $RuntimeRoot 'podcast\ffmpeg')
+    )
+    $files = @()
+    foreach ($codeRoot in $codeRoots) {
+        if (Test-Path -LiteralPath $codeRoot) {
+            $files += Get-ChildItem -LiteralPath $codeRoot -File -Recurse
+        }
+    }
+    foreach ($binaryRoot in $binaryRoots) {
+        if (Test-Path -LiteralPath $binaryRoot) {
+            $files += Get-ChildItem -LiteralPath $binaryRoot -File -Recurse |
+                Where-Object { $_.Extension.ToLowerInvariant() -in @('.exe', '.dll', '.pyd', '.pak', '.bin', '.dat') }
+        }
+    }
+    $modelRoot = Join-Path $RuntimeRoot 'podcast\models'
+    if (Test-Path -LiteralPath $modelRoot) {
+        $files += Get-ChildItem -LiteralPath $modelRoot -File -Recurse
+    }
+    $files | Sort-Object -Property FullName -Unique
+}
+
+function Write-CriticalRuntimeManifest {
+    param([Parameter(Mandatory)][string]$RuntimeRoot)
+
+    $fullRuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
+    $entries = @(Get-CriticalRuntimeFiles -RuntimeRoot $fullRuntimeRoot | ForEach-Object {
+        $item = Get-Item -LiteralPath $_.FullName
+        [ordered]@{
+            path = $item.FullName.Substring($fullRuntimeRoot.Length).TrimStart('\').Replace('\', '/')
+            bytes = $item.Length
+            sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+        }
+    })
+    if ($entries.Count -eq 0) {
+        throw "没有找到受管运行时 critical 文件：$fullRuntimeRoot"
+    }
+    $manifest = [ordered]@{
+        schemaVersion = 2
+        generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+        entryCount = $entries.Count
+        entries = $entries
+    }
+    $manifestPath = Join-Path $fullRuntimeRoot 'manifest.json'
+    $temporaryPath = "$manifestPath.tmp"
+    $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+    Move-Item -LiteralPath $temporaryPath -Destination $manifestPath -Force
+    Write-Output "[runtime] critical manifest contains $($entries.Count) entries"
+}
+
 if ($RefreshApps) {
     foreach ($requiredRuntime in @(
         (Join-Path $runtime 'zhihu\node\node.exe'),
@@ -99,6 +160,7 @@ if ($RefreshApps) {
         -ExcludeFiles @('config.json', '*.log', '*.pyc')
     Copy-Tree -Source $contractsSource -Destination $contractsRuntime `
         -ExcludeDirectories @('.git', 'node_modules')
+    Write-CriticalRuntimeManifest -RuntimeRoot $runtime
     Write-Output '[runtime] application code refreshed without rebuilding large assets'
     exit 0
 }
@@ -160,23 +222,7 @@ Copy-Item -LiteralPath $ffmpeg -Destination (Join-Path $podcastRuntime 'ffmpeg\f
 Copy-Item -LiteralPath $ffprobe -Destination (Join-Path $podcastRuntime 'ffmpeg\ffprobe.exe')
 Copy-Tree -Source $podcastModels -Destination (Join-Path $podcastRuntime 'models')
 
-$hashTargets = @(
-    (Join-Path $zhihuRuntime 'node\node.exe'),
-    (Join-Path $zhihuRuntime 'chromium\msedge.exe'),
-    (Join-Path $podcastRuntime 'python\python.exe'),
-    (Join-Path $podcastRuntime 'ffmpeg\ffmpeg.exe'),
-    (Join-Path $podcastRuntime 'ffmpeg\ffprobe.exe')
-) + @(Get-ChildItem -LiteralPath (Join-Path $podcastRuntime 'models') -File -Recurse | Select-Object -ExpandProperty FullName)
-
-$manifest = $hashTargets | ForEach-Object {
-    $item = Get-Item -LiteralPath $_
-    [ordered]@{
-        path = $item.FullName.Substring($stagingRuntime.Length).TrimStart('\\')
-        bytes = $item.Length
-        sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
-    }
-}
-$manifest | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $stagingRuntime 'manifest.json') -Encoding UTF8
+Write-CriticalRuntimeManifest -RuntimeRoot $stagingRuntime
 if (Test-Path -LiteralPath $fullRuntime) {
     Remove-Item -LiteralPath $fullRuntime -Recurse -Force
 }

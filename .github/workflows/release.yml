@@ -14,6 +14,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Acquire verified managed runtime bundle
+        env:
+          RUNTIME_BUNDLE_URL: ${{ secrets.IMMERSIVE_READER_RUNTIME_BUNDLE_URL }}
+        shell: pwsh
+        run: |
+          if (-not $env:RUNTIME_BUNDLE_URL) {
+            throw "IMMERSIVE_READER_RUNTIME_BUNDLE_URL must point to a versioned runtime bundle outside Git"
+          }
+          Invoke-WebRequest -Uri $env:RUNTIME_BUNDLE_URL -OutFile runtime-bundle.zip
+          if (Test-Path -LiteralPath runtime) { Remove-Item -LiteralPath runtime -Recurse -Force }
+          Expand-Archive -LiteralPath runtime-bundle.zip -DestinationPath .runtime-unpack -Force
+          $nested = Join-Path (Get-Location) ".runtime-unpack\runtime"
+          if (Test-Path -LiteralPath $nested) {
+            Move-Item -LiteralPath $nested -Destination runtime
+          } else {
+            Move-Item -LiteralPath (Join-Path (Get-Location) ".runtime-unpack") -Destination runtime
+          }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-runtime.ps1
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -32,6 +51,19 @@ jobs:
       - name: Install desktop dependencies
         run: npm ci --prefix apps/desktop
 
+      - name: Install Zhihu build dependencies
+        run: npm ci --prefix tools/zhihu-packer
+
+      - name: Build contracts and Zhihu reader
+        shell: pwsh
+        run: |
+          npm exec --yes --package=typescript@5.7.3 -- tsc -p packages/contracts/tsconfig.json
+          npm exec --yes --package=tsx@4.19.2 -- node --import tsx --test packages/contracts/tests/*.test.ts
+          npm run build --prefix tools/zhihu-packer
+          npm run compile-reader --prefix tools/zhihu-packer
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\prepare-runtime.ps1 -RefreshApps
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-runtime.ps1
+
       - name: Build draft Windows release
         uses: tauri-apps/tauri-action@v1
         env:
@@ -45,3 +77,14 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --no-sign --bundles nsis
+
+      - name: Package verified runtime bundle
+        shell: pwsh
+        run: tar.exe -a -c -f runtime-bundle.zip -C runtime .
+
+      - name: Upload runtime bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immersive-reader-runtime-${{ github.ref_name }}
+          path: runtime-bundle.zip
+          if-no-files-found: error
