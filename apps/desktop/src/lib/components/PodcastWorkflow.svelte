@@ -182,6 +182,7 @@
 	}
 
 	onMount(() => {
+		let disposed = false;
 		let unlisten: (() => void) | undefined;
 		void getCurrentWebviewWindow()
 			.onDragDropEvent((event) => {
@@ -195,9 +196,21 @@
 				}
 			})
 			.then((cleanup) => {
+				if (disposed) {
+					cleanup();
+					return;
+				}
 				unlisten = cleanup;
+			})
+			.catch((error) => {
+				if (!disposed) errorText = `拖放监听注册失败：${String(error)}`;
 			});
-		return () => unlisten?.();
+		return () => {
+			disposed = true;
+			const cleanup = unlisten;
+			unlisten = undefined;
+			cleanup?.();
+		};
 	});
 </script>
 

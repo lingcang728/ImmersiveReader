@@ -94,12 +94,19 @@ export function chapterTocItems(chapters: readonly BookChapter[]): TocItem[] {
 	}));
 }
 
+export function findChapterIndexById(
+	chapters: readonly BookChapter[],
+	chapterId: string,
+): number {
+	return chapters.findIndex((chapter) => chapter.id === chapterId);
+}
+
 export function resolveChapterIndex(
 	chapters: readonly BookChapter[],
 	current: string,
 	read: readonly string[],
 ): number {
-	const currentIndex = chapters.findIndex((chapter) => chapter.id === current);
+	const currentIndex = findChapterIndexById(chapters, current);
 	if (currentIndex >= 0) return currentIndex;
 
 	const readIds = new Set(read);

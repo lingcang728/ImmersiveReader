@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import type { TaskSnapshot } from '$lib/tasks/sync';
 	import { displayTaskPercent, taskDisplayTitle } from '$lib/tasks/queueList';
 
@@ -27,12 +28,14 @@
 	$: secondary = secondaryAction(task);
 	$: friendlyError = friendlyErrorText(task);
 	let documentHidden = false;
-	if (typeof document !== 'undefined') {
+	onMount(() => {
 		documentHidden = document.hidden;
-		document.addEventListener('visibilitychange', () => {
+		const handleVisibilityChange = () => {
 			documentHidden = document.hidden;
-		});
-	}
+		};
+		document.addEventListener('visibilitychange', handleVisibilityChange);
+		return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+	});
 
 	$: preferReducedMotion =
 		typeof window !== 'undefined' &&

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	calculateBookProgress,
 	chapterTocItems,
+	findChapterIndexById,
 	resolveChapterIndex,
 	type BookChapter,
 } from './books';
@@ -45,5 +46,18 @@ describe('book reading helpers', () => {
 		expect(resolveChapterIndex(chapters, 'missing', ['a'])).toBe(1);
 		expect(resolveChapterIndex(chapters, 'missing', ['a', 'b', 'c'])).toBe(0);
 		expect(resolveChapterIndex([], 'missing', [])).toBe(-1);
+	});
+
+	it('matches current chapters by id even when titles repeat deep in the book', () => {
+		const manyChapters = Array.from({ length: 60 }, (_, index) => ({
+			id: `chapter-${index + 1}`,
+			path: `${String(index + 1).padStart(3, '0')}.md`,
+			title: index % 2 === 0 ? '重复标题' : `第 ${index + 1} 章`,
+			voteCount: 0,
+			wordCount: 1,
+		}));
+
+		expect(findChapterIndexById(manyChapters, 'chapter-47')).toBe(46);
+		expect(findChapterIndexById(manyChapters, 'missing')).toBe(-1);
 	});
 });

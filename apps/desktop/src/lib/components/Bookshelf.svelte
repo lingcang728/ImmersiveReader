@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { BookDetail, BookSummary, LibraryIssue, TemporaryItem } from '$lib/library/books';
+	import { findChapterIndexById, type BookDetail, type BookSummary, type LibraryIssue, type TemporaryItem } from '$lib/library/books';
 	import type { TaskEvent, TaskSnapshot } from '$lib/tasks/sync';
 	import TaskQueue from './TaskQueue.svelte';
 	import './bookshelf.css';
@@ -51,9 +51,7 @@
 			if (selectedBookDetail) {
 				const chapters = selectedBookDetail.manifest.chapters;
 				const current = selectedBookDetail.progress.current;
-				const currentIndex = current
-					? chapters.findIndex((chapter) => chapter.title === current)
-					: -1;
+				const currentIndex = current ? findChapterIndexById(chapters, current) : -1;
 				// Always include the current chapter in the first window.
 				const ensureCurrent = currentIndex >= 0 ? currentIndex + 1 : 40;
 				detailChapterVisible = Math.max(40, ensureCurrent);
@@ -390,10 +388,12 @@
 
 		{#if selectedBookDetail}
 			{@const chapters = selectedBookDetail.manifest.chapters}
-			{@const currentTitle = selectedBookDetail.progress.current || ''}
+			{@const currentChapterId = selectedBookDetail.progress.current || ''}
+			{@const currentChapterIndex = findChapterIndexById(chapters, currentChapterId)}
+			{@const currentChapterTitle = currentChapterIndex >= 0 ? chapters[currentChapterIndex]?.title ?? '' : ''}
 			{@const currentIdx = Math.max(
 				0,
-				chapters.findIndex((c) => c.title === currentTitle)
+				currentChapterIndex
 			)}
 			<div class="book-detail-backdrop" role="presentation">
 				<dialog open class="book-detail-dialog" aria-labelledby="book-detail-title">
@@ -438,7 +438,7 @@
 							</header>
 							<ol class="chapter-list">
 								{#each chapters.slice(0, detailChapterVisible) as chapter, index}
-									<li class:current={index === currentIdx || chapter.title === currentTitle}>
+									<li class:current={index === currentIdx || chapter.id === currentChapterId}>
 										<span>{chapter.title}</span>
 										<small>{chapter.date ?? ''}</small>
 									</li>
@@ -462,7 +462,7 @@
 								<div><dt>书目 ID</dt><dd>{selectedBookDetail.manifest.bookId}</dd></div>
 								<div><dt>生成时间</dt><dd>{selectedBookDetail.manifest.generatedAt}</dd></div>
 								<div><dt>更新时间</dt><dd>{selectedBookDetail.manifest.updatedAt}</dd></div>
-								<div><dt>当前章节</dt><dd>{currentTitle || '未开始'}</dd></div>
+								<div><dt>当前章节</dt><dd>{currentChapterTitle || '未开始'}</dd></div>
 							</dl>
 							{#if selectedBookDetail.provenance}
 								<div class="provenance-grid">
