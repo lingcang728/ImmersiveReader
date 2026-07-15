@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { JSDOM } from "jsdom";
+import { marked } from "marked";
+import createDOMPurify from "dompurify";
 
 import { cleanReaderMarkdown } from "../src/reader/core/markdown-cleaner.ts";
+import { renderMarkdown } from "../src/reader/core/markdown-renderer.ts";
 
 test("removes the archive title only when it matches the chapter title", () => {
   const markdown = [
@@ -31,4 +35,40 @@ test("keeps ordinary markdown headings and removes YAML front matter", () => {
   const markdown = "---\ntitle: 示例\n---\n# 正文标题\n\n正文";
 
   assert.equal(cleanReaderMarkdown(markdown), "# 正文标题\n\n正文");
+});
+
+test("renders podcast translations first and keeps matching original ids", async () => {
+  const dom = new JSDOM("<!doctype html><body></body>");
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    marked,
+    DOMPurify: createDOMPurify(dom.window),
+  });
+
+  const wrapper = await renderMarkdown(
+    [
+      "The first original paragraph.",
+      "",
+      "第一段中文译文。",
+      "",
+      "The second original paragraph.",
+      "",
+      "第二段中文译文。",
+    ].join("\n"),
+    "demo",
+    "demo.md",
+    new Map(),
+  );
+  const translations = Array.from(wrapper.querySelectorAll("p.podcast-translation"));
+  const originals = Array.from(wrapper.querySelectorAll("blockquote.podcast-original"));
+
+  assert.equal(translations.length, 2);
+  assert.equal(originals.length, 2);
+  assert.equal(translations[0]?.dataset.bilingualId, originals[0]?.dataset.bilingualId);
+  assert.equal(translations[1]?.dataset.bilingualId, originals[1]?.dataset.bilingualId);
+  assert.ok(
+    (translations[1]?.compareDocumentPosition(originals[0]!) ?? 0) &
+      dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+  );
 });

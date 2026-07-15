@@ -6,6 +6,107 @@ import { cleanReaderMarkdown } from './markdown-cleaner.js';
 declare const marked: any;
 declare const DOMPurify: any;
 
+function bilingualTextRatio(text: string): number {
+  const compact = text.replace(/\s+/g, '');
+  if (!compact) return 0;
+  const cjk = (compact.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  const latin = (compact.match(/[A-Za-z]/g) ?? []).length;
+  const total = cjk + latin;
+  return total === 0 ? 0 : cjk / total;
+}
+
+function isMostlyLatin(text: string): boolean {
+  const compact = text.replace(/\s+/g, '');
+  return compact.length >= 12 && bilingualTextRatio(text) < 0.2 && /[A-Za-z]{3,}/.test(compact);
+}
+
+function isMostlyChinese(text: string): boolean {
+  const compact = text.replace(/\s+/g, '');
+  const cjk = (compact.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  return compact.length >= 4 && cjk >= 4 && bilingualTextRatio(text) >= 0.28;
+}
+
+function normalizePodcastBilingual(wrapper: HTMLElement) {
+  const usedIds = new Set<string>();
+  let nextId = 0;
+  const createId = () => {
+    let id = `podcast-${nextId}`;
+    while (usedIds.has(id)) {
+      nextId += 1;
+      id = `podcast-${nextId}`;
+    }
+    usedIds.add(id);
+    nextId += 1;
+    return id;
+  };
+  const getId = (element: HTMLElement) => element.dataset.bilingualId || '';
+  const pairId = (translation: HTMLElement, original: HTMLElement) => {
+    const id = getId(translation) || getId(original) || createId();
+    usedIds.add(id);
+    translation.classList.add('podcast-translation');
+    translation.dataset.bilingualId = id;
+    original.classList.add('podcast-original');
+    original.lang = 'en';
+    original.tabIndex = 0;
+    original.dataset.bilingualId = id;
+  };
+
+  const elements = Array.from(wrapper.children) as HTMLElement[];
+  for (let index = 0; index < elements.length - 1; index += 1) {
+    const current = elements[index];
+    const following = elements[index + 1];
+    const currentText = current.textContent?.trim() ?? '';
+    const followingText = following.textContent?.trim() ?? '';
+    if (current.tagName === 'P' && following.tagName === 'P' && isMostlyLatin(currentText) && isMostlyChinese(followingText)) {
+      const original = document.createElement('blockquote');
+      original.textContent = currentText;
+      following.insertAdjacentElement('afterend', original);
+      current.remove();
+      pairId(following, original);
+      continue;
+    }
+    if (current.tagName === 'P' && following.tagName === 'BLOCKQUOTE' && isMostlyChinese(currentText) && isMostlyLatin(followingText)) {
+      pairId(current, following);
+    }
+  }
+
+  const directChildren = Array.from(wrapper.children) as HTMLElement[];
+  let originals = directChildren.filter((element) => element.matches('blockquote.podcast-original'));
+  for (let index = 0; index < directChildren.length; index += 1) {
+    const element = directChildren[index];
+    if (element.tagName === 'P' && element.classList.contains('podcast-translation')) {
+      element.dataset.bilingualId ||= createId();
+    }
+    if (element.tagName === 'BLOCKQUOTE' && isMostlyLatin(element.textContent ?? '') && !element.classList.contains('podcast-original')) {
+      const previous = directChildren[index - 1];
+      if (previous?.tagName === 'P' && isMostlyChinese(previous.textContent ?? '')) {
+        pairId(previous, element);
+      }
+    }
+    if (element.matches('blockquote.podcast-original')) {
+      element.lang = 'en';
+      element.tabIndex = 0;
+      element.dataset.bilingualId ||= createId();
+      originals.push(element);
+    }
+  }
+  originals = Array.from(new Set(originals));
+  if (originals.length === 0) return;
+
+  const heading = directChildren.find(
+    (element) => element.tagName === 'H2' && element.textContent?.trim() === '英文原文',
+  );
+  if (heading) heading.classList.add('podcast-originals-heading');
+  originals.forEach((original) => original.remove());
+  if (!heading) {
+    const newHeading = document.createElement('h2');
+    newHeading.className = 'podcast-originals-heading';
+    newHeading.textContent = '英文原文';
+    wrapper.appendChild(newHeading);
+  }
+  originals.forEach((original) => wrapper.appendChild(original));
+}
+
 /**
  * 安全渲染 Markdown 为 DOM 节点，管道化处理：
  * Raw Markdown -> marked.parse -> DOMPurify.sanitize -> Local Image Resolver -> DOM
@@ -40,7 +141,7 @@ export async function renderMarkdown(
       'pre', 'code', 'em', 'strong', 'del', 'span', 'a', 'img', 'div', 'ins', 'sub', 'sup'
     ],
     ALLOWED_ATTR: [
-      'src', 'href', 'title', 'alt', 'class', 'id', 'align', 'valign', 'width', 'height', 'loading'
+      'src', 'href', 'title', 'alt', 'class', 'id', 'align', 'valign', 'width', 'height', 'loading', 'tabindex', 'data-bilingual-id'
     ],
     // 强制过滤 javascript: 伪协议
     ALLOW_UNKNOWN_PROTOCOLS: false,
@@ -51,6 +152,7 @@ export async function renderMarkdown(
   const wrapper = document.createElement('div');
   wrapper.className = 'markdown-body-wrapper';
   wrapper.innerHTML = cleanHtml;
+  normalizePodcastBilingual(wrapper);
 
   // 3.5. 注入稳定性 heading ID (在 DOMPurify 之后对临时 DOM 节点遍历注入)
   // ID 规则：articleId + '-' + headingIndex + '-' + headingTextHash

@@ -88,6 +88,30 @@ describe('renderMarkdown', () => {
 		expect(en).toBeGreaterThan(zh);
 	});
 
+	it('keeps all podcast translations above originals and preserves pair ids', async () => {
+		const source = [
+			'English first paragraph for the podcast.',
+			'',
+			'第一段中文译文。',
+			'',
+			'English second paragraph for the podcast.',
+			'',
+			'第二段中文译文。'
+		].join('\n');
+		const html = await renderMarkdown(source);
+		const firstTranslation = html.indexOf('第一段中文译文');
+		const secondTranslation = html.indexOf('第二段中文译文');
+		const firstOriginal = html.indexOf('English first paragraph');
+		const secondOriginal = html.indexOf('English second paragraph');
+
+		expect(firstTranslation).toBeGreaterThanOrEqual(0);
+		expect(secondTranslation).toBeGreaterThan(firstTranslation);
+		expect(firstOriginal).toBeGreaterThan(secondTranslation);
+		expect(secondOriginal).toBeGreaterThan(firstOriginal);
+		expect(html).toContain('class="podcast-translation" data-bilingual-id="podcast-0"');
+		expect(html).toContain('class="podcast-original" lang="en" tabindex="0" data-bilingual-id="podcast-0"');
+	});
+
 	it('preserves source position data on highlighted code blocks', async () => {
 		const html = await renderMarkdown('intro\n\n```javascript\nconst x = 1;\n```');
 

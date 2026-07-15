@@ -32,7 +32,13 @@ const sanitizeSchema = {
 			...((defaultSchema.attributes?.blockquote as any[]) ?? []),
 			['className', 'podcast-original'],
 			['lang', 'en'],
+			['dataBilingualId', /^[\w-]+$/],
 			['tabIndex']
+		],
+		p: [
+			...((defaultSchema.attributes?.p as any[]) ?? []),
+			['className', 'podcast-translation'],
+			['dataBilingualId', /^[\w-]+$/]
 		]
 	}
 };
@@ -360,31 +366,69 @@ function classListOf(node: any): string[] {
 	return [];
 }
 
-function markPodcastOriginal(node: any) {
+function markPodcastTranslation(node: any, bilingualId?: string) {
+	if (!node.properties) node.properties = {};
+	const classes = new Set(classListOf(node));
+	classes.add('podcast-translation');
+	node.properties.className = [...classes];
+	if (bilingualId) node.properties.dataBilingualId = bilingualId;
+}
+
+function markPodcastOriginal(node: any, bilingualId?: string) {
 	if (!node.properties) node.properties = {};
 	const classes = new Set(classListOf(node));
 	classes.add('podcast-original');
 	node.properties.className = [...classes];
 	node.properties.lang = 'en';
 	node.properties.tabIndex = 0;
+	if (bilingualId) node.properties.dataBilingualId = bilingualId;
 }
 
 /**
- * One-pass HAST normalization for legacy podcast EN/ZH pairs:
+ * Normalize podcast bilingual blocks for both new and legacy Markdown:
  * - plain EN paragraph + ZH paragraph → ZH then blockquote.podcast-original
  * - ZH paragraph + untagged blockquote EN → tag the blockquote
- * Does not rewrite Library files.
+ * - all English originals → a single English section at the end
+ *
+ * Does not rewrite Library files. The generated `data-bilingual-id` lets the
+ * reader reveal a matching original without relying on DOM adjacency.
  */
 function rehypeNormalizePodcastBilingual() {
 	return (tree: any) => {
 		const children: any[] = tree.children ?? [];
-		const next: any[] = [];
+		const normalized: any[] = [];
+		const usedIds = new Set<string>();
+		let nextId = 0;
 		const isWhitespace = (node: any) =>
 			node?.type === 'text' && !String(node.value ?? '').trim();
+		const isElement = (node: any) => node?.type === 'element';
+		const hasClass = (node: any, className: string) => classListOf(node).includes(className);
+		const existingId = (node: any) => {
+			const value = node?.properties?.dataBilingualId;
+			return value === undefined || value === null ? '' : String(value);
+		};
+		const createId = () => {
+			let candidate = `podcast-${nextId}`;
+			while (usedIds.has(candidate)) {
+				nextId += 1;
+				candidate = `podcast-${nextId}`;
+			}
+			usedIds.add(candidate);
+			nextId += 1;
+			return candidate;
+		};
+		const pairId = (translation: any, original: any) => {
+			const current = existingId(translation) || existingId(original);
+			const id = current || createId();
+			usedIds.add(id);
+			markPodcastTranslation(translation, id);
+			markPodcastOriginal(original, id);
+			return id;
+		};
 
 		const nextElementIndex = (from: number) => {
 			for (let j = from; j < children.length; j += 1) {
-				if (children[j]?.type === 'element') return j;
+				if (isElement(children[j])) return j;
 				if (!isWhitespace(children[j])) return -1;
 			}
 			return -1;
@@ -393,13 +437,13 @@ function rehypeNormalizePodcastBilingual() {
 		for (let i = 0; i < children.length; i += 1) {
 			const node = children[i];
 			if (isWhitespace(node)) {
-				next.push(node);
+				normalized.push(node);
 				continue;
 			}
-			if (node?.type === 'element' && node.tagName === 'p') {
+			if (isElement(node) && node.tagName === 'p') {
 				const followIdx = nextElementIndex(i + 1);
 				const following = followIdx >= 0 ? children[followIdx] : null;
-				if (following?.type === 'element') {
+				if (isElement(following)) {
 					const left = textFromHast(node).trim();
 					const right = textFromHast(following).trim();
 					if (following.tagName === 'p' && isMostlyLatin(left) && isMostlyChinese(right)) {
@@ -409,41 +453,75 @@ function rehypeNormalizePodcastBilingual() {
 							properties: {},
 							children: [{ type: 'text', value: left }]
 						};
-						markPodcastOriginal(original);
+						pairId(following, original);
 						// Preserve interstitial whitespace between the pair.
-						for (let w = i + 1; w < followIdx; w += 1) next.push(children[w]);
-						next.push(following, original);
+						for (let w = i + 1; w < followIdx; w += 1) normalized.push(children[w]);
+						normalized.push(following, original);
 						i = followIdx;
 						continue;
 					}
 					if (
 						following.tagName === 'blockquote' &&
 						isMostlyChinese(left) &&
-						isMostlyLatin(right) &&
-						!classListOf(following).includes('podcast-original')
+						isMostlyLatin(right)
 					) {
-						markPodcastOriginal(following);
-						for (let w = i + 1; w < followIdx; w += 1) next.push(children[w]);
-						next.push(node, following);
+						pairId(node, following);
+						for (let w = i + 1; w < followIdx; w += 1) normalized.push(children[w]);
+						normalized.push(node, following);
 						i = followIdx;
 						continue;
 					}
 				}
 			}
 			if (
-				node?.type === 'element' &&
+			isElement(node) &&
 				node.tagName === 'blockquote' &&
 				isMostlyLatin(textFromHast(node)) &&
-				!classListOf(node).includes('podcast-original')
+				!hasClass(node, 'podcast-original')
 			) {
-				const prev = [...next].reverse().find((item) => item?.type === 'element');
+				const prev = [...normalized].reverse().find((item) => isElement(item));
 				if (prev?.tagName === 'p' && isMostlyChinese(textFromHast(prev))) {
-					markPodcastOriginal(node);
+					pairId(prev, node);
 				}
 			}
-			next.push(node);
+			if (isElement(node) && node.tagName === 'p' && hasClass(node, 'podcast-translation')) {
+				markPodcastTranslation(node, existingId(node) || createId());
+			}
+			if (isElement(node) && node.tagName === 'blockquote' && hasClass(node, 'podcast-original')) {
+				markPodcastOriginal(node, existingId(node) || createId());
+			}
+			normalized.push(node);
 		}
-		tree.children = next;
+
+		const originals = normalized.filter(
+			(node) => isElement(node) && node.tagName === 'blockquote' && hasClass(node, 'podcast-original'),
+		);
+		if (originals.length === 0) {
+			tree.children = normalized;
+			return;
+		}
+
+		const content = normalized.filter((node) => !originals.includes(node));
+		const heading = content.find(
+			(node) => isElement(node) && node.tagName === 'h2' && textFromHast(node).trim() === '英文原文',
+		) as any;
+		if (heading) {
+			const classes = new Set(classListOf(heading));
+			classes.add('podcast-originals-heading');
+			heading.properties = heading.properties ?? {};
+			heading.properties.className = [...classes];
+		} else {
+			content.push({ type: 'text', value: '\n' });
+			content.push({
+				type: 'element',
+				tagName: 'h2',
+				properties: { className: ['podcast-originals-heading'] },
+				children: [{ type: 'text', value: '英文原文' }]
+			});
+		}
+		content.push({ type: 'text', value: '\n' });
+		content.push(...originals);
+		tree.children = content;
 	};
 }
 

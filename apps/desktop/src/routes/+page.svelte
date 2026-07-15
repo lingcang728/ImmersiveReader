@@ -925,9 +925,10 @@
 	}
 
 	function updateWindowTitle(name: string) {
-		chromeTitle = name ? `${name} — 沉浸阅读` : "沉浸阅读";
+		chromeTitle = "沉浸阅读";
+		const nativeTitle = name ? `${name} — 沉浸阅读` : chromeTitle;
 		void getCurrentWebviewWindow()
-			.setTitle(chromeTitle)
+			.setTitle(nativeTitle)
 			.catch(() => {});
 	}
 
@@ -1834,6 +1835,31 @@
 			moveFocus(stepDirection);
 		};
 
+		const clearPodcastSelectionReveal = () => {
+			contentEl?.querySelectorAll("blockquote.podcast-original.is-selection-revealed").forEach((node) => {
+				node.classList.remove("is-selection-revealed");
+			});
+		};
+
+		const handlePodcastSelectionChange = () => {
+			clearPodcastSelectionReveal();
+			const selection = window.getSelection();
+			if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+			const getTranslation = (node: Node | null) => {
+				const element = node instanceof Element ? node : node?.parentElement;
+				return element?.closest("p.podcast-translation") as HTMLElement | null;
+			};
+			const translation = getTranslation(selection.anchorNode) ?? getTranslation(selection.focusNode);
+			if (!translation || !contentEl?.contains(translation)) return;
+			const bilingualId = translation.dataset.bilingualId;
+			if (!bilingualId) return;
+			contentEl.querySelectorAll("blockquote.podcast-original").forEach((node) => {
+				if ((node as HTMLElement).dataset.bilingualId === bilingualId) {
+					node.classList.add("is-selection-revealed");
+				}
+			});
+		};
+
 		const handleContentClick = (e: MouseEvent) => {
 			const target = e.target as HTMLElement | null;
 			if (!target || !contentEl.querySelector(".article")?.contains(target)) return;
@@ -1852,7 +1878,14 @@
 
 			const original = target.closest("blockquote.podcast-original") as HTMLElement | null;
 			if (original) {
-				original.classList.toggle("is-revealed");
+				const bilingualId = original.dataset.bilingualId;
+				const originals = bilingualId
+					? Array.from(contentEl.querySelectorAll("blockquote.podcast-original")).filter(
+						(node) => (node as HTMLElement).dataset.bilingualId === bilingualId,
+					  )
+					: [original];
+				const reveal = !original.classList.contains("is-revealed");
+				originals.forEach((node) => node.classList.toggle("is-revealed", reveal));
 				return;
 			}
 
@@ -1938,6 +1971,7 @@
 		contentEl?.addEventListener("scroll", handleScroll);
 		contentEl?.addEventListener("wheel", handleWheel, { passive: false });
 		contentEl?.addEventListener("click", handleContentClick);
+		document.addEventListener("selectionchange", handlePodcastSelectionChange);
 		contentEl?.addEventListener("dblclick", handleDblClick);
 		contentEl?.addEventListener("mouseover", handleContentMouseOver);
 		contentEl?.addEventListener("mouseout", handleContentMouseOut);
@@ -2105,6 +2139,7 @@
 			contentEl?.removeEventListener("scroll", handleScroll);
 			contentEl?.removeEventListener("wheel", handleWheel);
 			contentEl?.removeEventListener("click", handleContentClick);
+			document.removeEventListener("selectionchange", handlePodcastSelectionChange);
 			contentEl?.removeEventListener("dblclick", handleDblClick);
 			contentEl?.removeEventListener("mouseover", handleContentMouseOver);
 			contentEl?.removeEventListener("mouseout", handleContentMouseOut);
@@ -4677,6 +4712,9 @@
 		margin: 0.8em 0;
 		color: var(--text);
 	}
+	:global(.article p.podcast-translation) {
+		margin: 0.34em 0;
+	}
 
 	:global(.article a) {
 		color: var(--link);
@@ -4716,17 +4754,22 @@
 		padding: 0.35em 0 0.35em 0.9em;
 		border-left: 2px solid color-mix(in srgb, var(--line) 80%, transparent);
 		background: transparent;
-		color: transparent;
-		text-shadow: 0 0 6px color-mix(in srgb, var(--fg-muted) 70%, transparent);
+		color: var(--text-secondary);
+		opacity: 0.82;
+		filter: blur(4.5px);
+		text-shadow: 0 0 2px color-mix(in srgb, var(--text-secondary) 45%, transparent);
 		cursor: pointer;
-		transition: color 0.2s ease, text-shadow 0.2s ease;
+		transition: color 0.2s ease, filter 0.2s ease, opacity 0.2s ease, text-shadow 0.2s ease;
 	}
 	:global(.article blockquote.podcast-original:hover),
 	:global(.article blockquote.podcast-original:focus),
 	:global(.article blockquote.podcast-original:focus-within),
-	:global(.article blockquote.podcast-original.is-revealed) {
-		color: var(--fg-muted);
+	:global(.article blockquote.podcast-original.is-revealed),
+	:global(.article blockquote.podcast-original.is-selection-revealed) {
+		color: var(--text-secondary);
 		text-shadow: none;
+		filter: none;
+		opacity: 1;
 	}
 
 	:global(.article code) {
@@ -5127,6 +5170,17 @@
 	.focus-mode :global(.article pre) {
 		background: transparent;
 		border-color: transparent;
+	}
+	.focus-mode :global(.article blockquote.podcast-original:not(.is-revealed):not(.is-selection-revealed)) {
+		visibility: hidden;
+		opacity: 0;
+		filter: none;
+		pointer-events: none;
+	}
+	.focus-mode :global(.article blockquote.podcast-original.is-revealed),
+	.focus-mode :global(.article blockquote.podcast-original.is-selection-revealed) {
+		visibility: visible;
+		pointer-events: auto;
 	}
 
 

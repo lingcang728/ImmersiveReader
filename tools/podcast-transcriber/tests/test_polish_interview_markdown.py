@@ -210,6 +210,45 @@ def test_final_markdown_plain_paragraphs_without_speaker_labels() -> None:
     assert "podcast-original" in markdown
 
 
+def test_final_markdown_keeps_all_translations_before_english_originals() -> None:
+    data = {"source_file": "english.wav", "detected_language": "en"}
+    turns = [
+        {
+            "speaker": "主持人",
+            "start": 0.0,
+            "end": 3.0,
+            "original": "The first original paragraph.",
+            "translation": "第一段中文译文。",
+            "is_sponsor": False,
+            "needs_polish": False,
+            "languageClass": "en",
+        },
+        {
+            "speaker": "嘉宾",
+            "start": 3.0,
+            "end": 6.0,
+            "original": "The second original paragraph.",
+            "translation": "第二段中文译文。",
+            "is_sponsor": False,
+            "needs_polish": False,
+            "languageClass": "en",
+        },
+    ]
+    markdown = pim.render_final_markdown(
+        data,
+        turns,
+        {"markdown": {"llm_polish": {"enabled": False}}},
+    )
+
+    first_translation = markdown.index("第一段中文译文")
+    second_translation = markdown.index("第二段中文译文")
+    first_original = markdown.index("The first original paragraph")
+    second_original = markdown.index("The second original paragraph")
+    assert first_translation < second_translation < first_original < second_original
+    assert 'data-bilingual-id="podcast-0"' in markdown
+    assert 'data-bilingual-id="podcast-1"' in markdown
+
+
 def test_speaker_labels_disabled_skips_speaker_role_quality_gate() -> None:
     turns = [
         {

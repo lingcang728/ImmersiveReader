@@ -30,10 +30,10 @@
 		width: 36px;
 		height: 36px;
 		padding: 0;
-		border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+		border: 1px solid color-mix(in srgb, var(--link) 42%, var(--line));
 		border-radius: 10px;
-		background: var(--bg-secondary);
-		color: var(--text);
+		background: color-mix(in srgb, var(--link) 12%, var(--bg-secondary));
+		color: var(--link);
 		cursor: pointer;
 		flex-shrink: 0;
 		transition:
@@ -42,9 +42,8 @@
 			color 0.15s ease;
 	}
 	.back-btn:hover {
-		color: var(--link);
-		border-color: color-mix(in srgb, var(--link) 40%, var(--line));
-		background: color-mix(in srgb, var(--link) 14%, var(--bg-secondary));
+		border-color: color-mix(in srgb, var(--link) 68%, var(--line));
+		background: color-mix(in srgb, var(--link) 20%, var(--bg-secondary));
 	}
 	.back-btn:focus-visible {
 		outline: 2px solid var(--link);

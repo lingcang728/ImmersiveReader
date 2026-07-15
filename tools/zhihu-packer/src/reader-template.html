@@ -21,9 +21,9 @@
       --text-secondary: #a39c8f !important;
       --text-muted: #8f887d !important;
       --text-light: #e4ddd0 !important;
-      --accent-color: #c4a46a !important;
-      --accent-gradient: linear-gradient(135deg, #c4a46a, #b28e52) !important;
-      --accent-glow: rgba(196, 164, 106, 0.18) !important;
+      --accent-color: #69b2ff !important;
+      --accent-gradient: linear-gradient(135deg, #69b2ff, #367ed0) !important;
+      --accent-glow: rgba(76, 151, 232, 0.2) !important;
       --p-font-size: 18px;
     }
 
@@ -33,11 +33,17 @@
       padding: 0;
     }
 
+    html {
+      min-height: 100%;
+    }
+
     body {
-      background: radial-gradient(ellipse 80% 42% at 50% -10%, rgba(196, 164, 106, 0.055), transparent 58%), var(--bg-color);
+      min-height: 100%;
+      background: radial-gradient(ellipse 80% 42% at 50% 0%, rgba(76, 151, 232, 0.08), transparent 62%), var(--bg-color);
       color: var(--text-color);
       font-family: "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
       overflow-x: hidden;
+      overflow-y: auto;
       scroll-behavior: smooth;
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
@@ -228,6 +234,7 @@
       display: flex;
       min-height: 100vh;
       position: relative;
+      isolation: isolate;
     }
 
     /* 侧边大纲目录 - 覆盖式抽屉设计 (默认收起) */
@@ -447,28 +454,28 @@
       width: 44px;
       height: 44px;
       border-radius: 12px;
-      background: rgba(16, 15, 13, 0.76);
-      backdrop-filter: blur(12px);
-      border: 1px solid var(--border-color);
+      background: rgba(19, 29, 43, 0.78);
+      backdrop-filter: blur(16px) saturate(135%);
+      border: 1px solid color-mix(in srgb, var(--accent-color) 42%, var(--border-color));
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
-      z-index: 500;
+      z-index: 1200;
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
       transition: all 0.3s ease;
     }
 
     .menu-trigger-btn:hover {
-      background: rgba(35, 32, 28, 0.94);
-      border-color: rgba(255, 255, 255, 0.2);
+      background: rgba(28, 49, 76, 0.94);
+      border-color: color-mix(in srgb, var(--accent-color) 72%, var(--border-color));
       transform: scale(1.05);
     }
 
     .menu-trigger-btn svg {
       width: 20px;
       height: 20px;
-      fill: var(--text-muted);
+      fill: var(--accent-color);
       transition: fill 0.3s ease;
     }
 
@@ -490,7 +497,9 @@
     .main-content {
       flex: 1;
       margin-left: 0;
-      padding: 80px 24px 240px 24px;
+      min-width: 0;
+      min-height: 100vh;
+      padding: 104px 24px 240px 24px;
       display: flex;
       justify-content: center;
       transition: all 0.3s ease;
@@ -517,7 +526,7 @@
       position: relative;
       min-width: 0;
       max-width: 100%;
-      overflow: hidden;
+      overflow: visible;
       transition: transform 0.6s cubic-bezier(0.25, 1, 0.5, 1),
                   box-shadow 0.6s cubic-bezier(0.25, 1, 0.5, 1),
                   border-color 0.6s cubic-bezier(0.25, 1, 0.5, 1),
@@ -617,6 +626,10 @@
       margin-bottom: 1.8rem;
     }
 
+    .article-body p.podcast-translation {
+      margin-bottom: 0.62rem;
+    }
+
     .article-body p:last-child {
       margin-bottom: 0;
     }
@@ -713,6 +726,34 @@
       margin: 1.5rem 0;
     }
 
+    .article-body blockquote.podcast-original {
+      margin: 0.55rem 0 0.9rem;
+      padding: 0.4rem 0 0.4rem 1rem;
+      border-left: 2px solid color-mix(in srgb, var(--accent-color) 40%, var(--border-color));
+      background: transparent;
+      color: var(--text-secondary);
+      opacity: 0.82;
+      filter: blur(4.5px);
+      cursor: pointer;
+      outline: none;
+      transition: color 0.2s ease, filter 0.2s ease, opacity 0.2s ease, border-color 0.2s ease;
+    }
+
+    .article-body blockquote.podcast-original:hover,
+    .article-body blockquote.podcast-original:focus-visible,
+    .article-body blockquote.podcast-original.is-revealed,
+    .article-body blockquote.podcast-original.is-selection-revealed {
+      color: var(--text-light);
+      opacity: 1;
+      filter: none;
+      border-left-color: var(--accent-color);
+    }
+
+    .article-body .podcast-originals-heading {
+      margin-top: 3rem;
+      color: var(--accent-color);
+    }
+
     /* 表格 — 宽表时在正文内横向滚动，不撑破卡片 */
     .article-body {
       overflow-x: auto;
@@ -774,7 +815,7 @@
       font-size: 0.88rem;
       font-family: monospace;
       color: var(--text-light);
-      z-index: 500;
+      z-index: 1200;
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
     }
     

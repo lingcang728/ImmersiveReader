@@ -324,6 +324,7 @@ export class ReaderApp {
         bodyContainer.appendChild(wrapper);
         card.setAttribute('data-rendered', 'true');
         this.bindImageLightboxes(card);
+        this.bindPodcastBilingualInteractions(card);
         return;
       } else if (this.mode.kind === 'served') {
         const response = await fetch(buildServedContentUrl(this.mode.contentBase, art.relativePath), {
@@ -343,6 +344,7 @@ export class ReaderApp {
         bodyContainer.appendChild(renderedDom);
         card.setAttribute('data-rendered', 'true');
         this.bindImageLightboxes(card);
+        this.bindPodcastBilingualInteractions(card);
         return;
       } else {
         // Universal Mode 下动态从文件句柄读取 Markdown 全文并转换
@@ -365,6 +367,7 @@ export class ReaderApp {
         card.setAttribute('data-rendered', 'true');
         
         this.bindImageLightboxes(card);
+        this.bindPodcastBilingualInteractions(card);
         return;
       }
     } catch (err) {
@@ -386,7 +389,7 @@ export class ReaderApp {
         'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
         'pre', 'code', 'em', 'strong', 'del', 'span', 'a', 'img', 'div', 'ins', 'sub', 'sup'
       ],
-      ALLOWED_ATTR: ['src', 'href', 'title', 'alt', 'class', 'id', 'align', 'valign', 'width', 'height', 'loading'],
+      ALLOWED_ATTR: ['src', 'href', 'title', 'alt', 'class', 'id', 'align', 'valign', 'width', 'height', 'loading', 'tabindex', 'data-bilingual-id'],
       ALLOW_UNKNOWN_PROTOCOLS: false,
       ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|ftp|tel):|[^a-z0-9+.-]+(?:[/?#]|$))/i
     });
@@ -523,6 +526,45 @@ export class ReaderApp {
         this.lightboxImg.src = imageEl.src;
         this.lightbox.classList.add('active');
       });
+    });
+  }
+
+  private bindPodcastBilingualInteractions(card: HTMLElement) {
+    if (card.dataset.podcastBilingualBound === 'true') return;
+    card.dataset.podcastBilingualBound = 'true';
+    card.addEventListener('click', (event) => {
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      const original = target?.closest('blockquote.podcast-original') as HTMLElement | null;
+      if (!original || !card.contains(original)) return;
+      const bilingualId = original.dataset.bilingualId;
+      const originals = bilingualId
+        ? Array.from(card.querySelectorAll<HTMLElement>('blockquote.podcast-original')).filter(
+            (element) => element.dataset.bilingualId === bilingualId,
+          )
+        : [original];
+      const reveal = !original.classList.contains('is-revealed');
+      originals.forEach((element) => element.classList.toggle('is-revealed', reveal));
+    });
+  }
+
+  private handlePodcastSelectionChange() {
+    document.querySelectorAll('.podcast-original.is-selection-revealed').forEach((element) => {
+      element.classList.remove('is-selection-revealed');
+    });
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+    const getTranslation = (node: Node | null) => {
+      const element = node instanceof Element ? node : node?.parentElement;
+      return element?.closest('p.podcast-translation') as HTMLElement | null;
+    };
+    const translation = getTranslation(selection.anchorNode) ?? getTranslation(selection.focusNode);
+    const card = translation?.closest('.article-card') as HTMLElement | null;
+    const bilingualId = translation?.dataset.bilingualId;
+    if (!translation || !card || !bilingualId) return;
+    card.querySelectorAll<HTMLElement>('blockquote.podcast-original').forEach((element) => {
+      if (element.dataset.bilingualId === bilingualId) {
+        element.classList.add('is-selection-revealed');
+      }
     });
   }
 
@@ -1235,6 +1277,7 @@ export class ReaderApp {
         });
       }
     }, { passive: true });
+    document.addEventListener('selectionchange', () => this.handlePodcastSelectionChange());
 
     // 搜索输入
     this.paletteInput.addEventListener('input', (e) => {

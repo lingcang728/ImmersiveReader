@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import html
 import json
 import logging
 import os
@@ -1865,16 +1866,6 @@ def final_quality_errors(
 
 
 def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], config: dict[str, Any]) -> str:
-    """Produce the managed final draft:
-
-    # title
-    ### HH:MM:SS
-    Chinese translation...
-
-    <blockquote class="podcast-original" lang="en">English original...</blockquote>
-
-    Chinese-only blocks emit polished Chinese only.
-    """
     title = Path(data.get("source_file", "podcast")).stem
     final_config = config.get("markdown") or config.get("final_markdown") or {}
     labels = final_config.get("speaker_labels") or {}
@@ -1959,7 +1950,10 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
                 _report_polish_progress(len(polished_texts), len(polish_targets))
 
     lines = [f"# {title}", ""]
-    current_section: int | None = None
+    translation_lines: list[str] = []
+    original_lines: list[str] = []
+    translation_section: int | None = None
+    original_section: int | None = None
 
     def block_context(index: int) -> str:
         snippets: list[str] = []
@@ -1972,14 +1966,18 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
                 snippets.append(f"{label_name}：{compact_context_excerpt(ctx_text)}")
         return "\n".join(snippets)
 
+    def append_section_heading(target: list[str], section: int, current: int | None) -> int:
+        if section != current:
+            if target and target[-1] != "":
+                target.append("")
+            target.append(f"### {format_hms(section)}")
+            target.append("")
+        return section
+
     for block_index, block in enumerate(blocks):
         language_class = str(block.get("languageClass") or "en")
         is_en_like = language_class in {"en", "mixed"}
         section = int(float(block.get("start", 0)) // 600) * 600
-        if section != current_section:
-            current_section = section
-            lines.append(f"### {format_hms(section)}")
-            lines.append("")
 
         original = original_join([item for item in block.get("originals", []) if item])
         if language_class == "zh":
@@ -2014,25 +2012,44 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
             translated_text = clean_text(translated_text)
 
         if is_en_like:
-            # Chinese translation on top; English original below in a semantic block.
+            translation_section = append_section_heading(translation_lines, section, translation_section)
             if translated_text:
                 for paragraph in paragraphize(translated_text, zh_max_chars):
-                    lines.append(paragraph)
-                    lines.append("")
-            for paragraph in paragraphize(original, en_max_chars):
-                safe = (
-                    paragraph.replace("&", "&amp;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
-                )
-                lines.append(f'<blockquote class="podcast-original" lang="en">{safe}</blockquote>')
-                lines.append("")
+                    safe_translation = html.escape(paragraph, quote=False)
+                    translation_lines.append(
+                        f'<p class="podcast-translation" data-bilingual-id="podcast-{block_index}">'
+                        f"{safe_translation}</p>"
+                    )
+                    translation_lines.append("")
+
+            original_paragraphs = paragraphize(original, en_max_chars)
+            if original_paragraphs:
+                original_section = append_section_heading(original_lines, section, original_section)
+                for paragraph in original_paragraphs:
+                    safe = html.escape(paragraph, quote=False)
+                    original_lines.append(
+                        f'<blockquote class="podcast-original" lang="en" '
+                        f'data-bilingual-id="podcast-{block_index}">{safe}</blockquote>'
+                    )
+                    original_lines.append("")
             # Never emit missing placeholders for pure Chinese blocks; en/mixed
             # without translation is caught by final_quality_errors.
         else:
+            translation_section = append_section_heading(translation_lines, section, translation_section)
             for paragraph in paragraphize(original, zh_max_chars):
-                lines.append(paragraph)
-                lines.append("")
+                safe_translation = html.escape(paragraph, quote=False)
+                translation_lines.append(
+                    f'<p class="podcast-translation" data-bilingual-id="podcast-{block_index}">'
+                    f"{safe_translation}</p>"
+                )
+                translation_lines.append("")
+
+    lines.extend(translation_lines)
+    if original_lines:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend(["## 英文原文", ""])
+        lines.extend(original_lines)
 
     processed_targets = len(polished_texts) + serial_polished
     global LAST_POLISH_SUMMARY
