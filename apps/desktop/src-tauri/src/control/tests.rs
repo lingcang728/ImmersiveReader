@@ -466,8 +466,8 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
         .expect("stdout must map")
         .expect("stdout event must exist");
     assert_eq!(stdout.event_type, "worker_progress");
-    // chunking band is 22–30 → raw 50% maps to 26.
-    assert_eq!(stdout.snapshot.progress.percent, Some(26.0));
+    // chunking band is 18–24 → raw 50% maps to 21.
+    assert_eq!(stdout.snapshot.progress.percent, Some(21.0));
     assert_eq!(stdout.snapshot.engine_stage, "chunking");
     assert_eq!(stdout.snapshot.progress.label.as_deref(), Some("正在切分音频"));
     let ndjson = database
@@ -479,8 +479,8 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
         .expect("ndjson must map")
         .expect("ndjson event must exist");
     assert_eq!(ndjson.event_type, "worker_progress");
-    // transcribing band is 30–72 → raw 50% maps to 51; floor keeps progress monotonic.
-    assert_eq!(ndjson.snapshot.progress.percent, Some(51.0));
+    // transcribing band is 24–70 → raw 50% maps to 47; floor keeps progress monotonic.
+    assert_eq!(ndjson.snapshot.progress.percent, Some(47.0));
     assert_eq!(ndjson.snapshot.engine_stage, "transcribing");
     assert_eq!(ndjson.snapshot.progress.completed_units, Some(11));
     assert_eq!(ndjson.snapshot.progress.total_units, Some(20));
