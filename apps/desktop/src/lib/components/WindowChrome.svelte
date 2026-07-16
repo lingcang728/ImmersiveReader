@@ -2,7 +2,6 @@
 	import { onMount } from 'svelte';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
-	export let title = '';
 	export let visible = true;
 	/** When true, chrome overlays content (immersive reading). */
 	export let overlay = false;
@@ -110,20 +109,9 @@
 	on:mousedown={startDrag}
 	on:dblclick={onTitlebarDblClick}
 >
-	<div class="chrome-leading" data-no-drag>
-		<img
-			class="app-icon"
-			src="/app-icon-48.png"
-			width="16"
-			height="16"
-			alt=""
-			aria-hidden="true"
-			draggable="false"
-		/>
-		<span class="chrome-title">{title || '沉浸阅读'}</span>
-	</div>
+	<!-- Drag surface only — brand lives in the app toolbar below. -->
+	<div class="chrome-drag" aria-hidden="true"></div>
 	<div class="chrome-controls" data-no-drag>
-		<slot name="actions" />
 		<button
 			type="button"
 			class="chrome-btn"
@@ -186,15 +174,15 @@
 
 <style>
 	.window-chrome {
-		--chrome-h: 36px;
+		--chrome-h: 32px;
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		justify-content: flex-end;
 		height: var(--chrome-h);
 		min-height: var(--chrome-h);
-		padding: 0 6px 0 12px;
-		border-bottom: 1px solid color-mix(in srgb, var(--hr) 92%, var(--text-secondary) 8%);
-		background: color-mix(in srgb, var(--bg) 86%, var(--link) 14%);
+		padding: 0 4px 0 0;
+		border-bottom: 1px solid color-mix(in srgb, var(--hr) 70%, var(--text-secondary) 30%);
+		background: color-mix(in srgb, var(--bg) 92%, var(--bg-secondary) 8%);
 		color: var(--text);
 		user-select: none;
 		flex: none;
@@ -225,50 +213,26 @@
 		}
 	}
 
-	.chrome-leading {
-		display: flex;
-		align-items: center;
-		gap: 8px;
+	.chrome-drag {
+		flex: 1;
+		align-self: stretch;
 		min-width: 0;
-		pointer-events: none;
-	}
-
-	.app-icon {
-		width: 16px;
-		height: 16px;
-		flex: none;
-		border-radius: 3px;
-		object-fit: cover;
-		display: block;
-		user-select: none;
-		-webkit-user-drag: none;
-	}
-
-	.chrome-title {
-		font-size: 12.5px;
-		font-weight: 600;
-		letter-spacing: 0.02em;
-		color: var(--text);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		max-width: min(52vw, 480px);
 	}
 
 	.chrome-controls {
 		display: flex;
 		align-items: center;
-		gap: 2px;
+		gap: 0;
 		flex: none;
 	}
 
 	.chrome-btn {
 		display: grid;
 		place-items: center;
-		width: 38px;
-		height: 26px;
+		width: 42px;
+		height: 28px;
 		border: 0;
-		border-radius: 5px;
+		border-radius: 0;
 		background: transparent;
 		color: var(--text-secondary);
 		cursor: pointer;
@@ -278,17 +242,17 @@
 	}
 
 	.chrome-btn:hover {
-		background: color-mix(in srgb, var(--link) 12%, transparent);
+		background: color-mix(in srgb, var(--text) 10%, transparent);
 		color: var(--text);
 	}
 
 	.chrome-btn:active {
-		transform: translateY(1px);
+		transform: none;
 	}
 
 	.chrome-btn:focus-visible {
 		outline: 2px solid var(--link);
-		outline-offset: 1px;
+		outline-offset: -2px;
 	}
 
 	.chrome-btn-close:hover {

@@ -124,32 +124,17 @@
 <section class="bookshelf" aria-label="沉浸阅读书架">
 	<header class="bs-header">
 		<div class="brand">
-			<span class="brand-mark" aria-hidden="true" title="沉浸阅读">
-				<!-- Open book: blue accent via currentColor -->
-				<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-					<path
-						d="M4 5.5c2.2-1.2 4.3-1.5 6.5-.4V18c-2.2-1.1-4.3-.9-6.5.3V5.5Z"
-						stroke="currentColor"
-						stroke-width="1.6"
-						stroke-linejoin="round"
-					/>
-					<path
-						d="M20 5.5c-2.2-1.2-4.3-1.5-6.5-.4V18c2.2-1.1 4.3-.9 6.5.3V5.5Z"
-						stroke="currentColor"
-						stroke-width="1.6"
-						stroke-linejoin="round"
-					/>
-					<path
-						d="M12 5.2v12.6"
-						stroke="currentColor"
-						stroke-width="1.4"
-						stroke-linecap="round"
-						opacity="0.9"
-					/>
-				</svg>
-			</span>
+			<img
+				class="brand-mark"
+				src="/app-icon-48.png"
+				width="30"
+				height="30"
+				alt=""
+				aria-hidden="true"
+				draggable="false"
+				title="沉浸阅读"
+			/>
 			<span class="brand-name">沉浸阅读</span>
-			<span class="brand-sub">书库</span>
 		</div>
 		<label class="search">
 			<svg
@@ -255,6 +240,17 @@
 	</header>
 
 	<div class="bs-body">
+		<div class="bs-page-head">
+			<div class="bs-page-titles">
+				<h1 class="bs-page-title">书库</h1>
+				<p class="bs-page-meta">
+					{books.length} 部文集 · 共 {chapterTotal} 篇
+					{#if libraryRoot}
+						<span class="bs-page-path" title={libraryRoot}>{libraryRoot}</span>
+					{/if}
+				</p>
+			</div>
+		</div>
 		{#if !writable}
 			<div class="state-banner error" role="alert">
 				<span>书库不可写。请选择可写目录：{libraryRoot}</span>

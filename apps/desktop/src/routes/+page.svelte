@@ -4021,39 +4021,10 @@
 		on:focusout={onChromeFocusOut}
 	>
 		<WindowChrome
-			title={chromeTitle}
 			visible={true}
 			overlay={false}
 			onMaximizedChange={handleWindowMaximizedChange}
-		>
-			<div slot="actions" class="chrome-extra-actions">
-				{#if !showMarkdownContext && !showFlowContext}
-					<button
-						type="button"
-						class="icon-btn chrome-settings"
-						class:active={$settingsOpen}
-						on:click={() => ($settingsOpen = !$settingsOpen)}
-						title="设置 ({modLabel},)"
-						aria-label="设置"
-						aria-pressed={$settingsOpen}
-					>
-						<svg
-							width="16"
-							height="16"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="1.5"
-						>
-							<circle cx="12" cy="12" r="3" />
-							<path
-								d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"
-							/>
-						</svg>
-					</button>
-				{/if}
-			</div>
-		</WindowChrome>
+		/>
 
 		{#if showMarkdownContext}
 			<header class="topbar context-bar" role="toolbar" aria-label="阅读工具栏">
@@ -4566,17 +4537,6 @@
 		border-bottom: 1px solid color-mix(in srgb, var(--hr) 92%, var(--text-secondary) 8%);
 		user-select: none;
 		background: transparent;
-	}
-
-	.chrome-extra-actions {
-		display: flex;
-		align-items: center;
-		margin-right: 2px;
-	}
-
-	.chrome-settings {
-		width: 32px;
-		height: 28px;
 	}
 
 	.book-seam {

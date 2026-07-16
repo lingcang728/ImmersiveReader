@@ -11,12 +11,12 @@
 	--fg-muted: var(--text-secondary);
 	--fg-faint: var(--text-faded);
 	--fg-strong: var(--heading);
-	--line: var(--hr);
-	--line-strong: color-mix(in srgb, var(--hr) 55%, var(--link) 45%);
+	--line: color-mix(in srgb, var(--hr) 72%, var(--text-secondary) 28%);
+	--line-strong: color-mix(in srgb, var(--hr) 40%, var(--link) 60%);
 	--accent: var(--link);
 	--accent-hover: var(--link-hover);
-	--accent-soft: color-mix(in srgb, var(--link) 18%, transparent);
-	--accent-mid: color-mix(in srgb, var(--link) 45%, transparent);
+	--accent-soft: color-mix(in srgb, var(--link) 22%, transparent);
+	--accent-mid: color-mix(in srgb, var(--link) 50%, transparent);
 	--radius-sm: 8px;
 	--radius-md: 14px;
 	--radius-lg: 18px;
@@ -43,10 +43,10 @@
 	height: 60px;
 	display: flex;
 	align-items: center;
-	gap: 14px;
+	gap: 16px;
 	padding: 0 36px;
-	border-bottom: 1px solid var(--line);
-	background: color-mix(in srgb, var(--surface) 94%, var(--link) 6%);
+	border-bottom: 1px solid var(--line-strong);
+	background: color-mix(in srgb, var(--surface) 96%, var(--link) 4%);
 	flex: none;
 }
 
@@ -62,18 +62,12 @@
 	width: 30px;
 	height: 30px;
 	flex: none;
-	display: grid;
-	place-items: center;
-	border-radius: 9px;
-	background: var(--accent-soft);
-	border: 1px solid var(--line-strong);
-	color: var(--accent);
-}
-
-.brand-mark svg {
 	display: block;
-	width: 16px;
-	height: 16px;
+	border-radius: 8px;
+	object-fit: cover;
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--line-strong) 70%, transparent);
+	user-select: none;
+	-webkit-user-drag: none;
 }
 
 .brand-name {
@@ -81,16 +75,6 @@
 	font-weight: 600;
 	letter-spacing: 0.05em;
 	color: var(--fg-strong);
-}
-
-.brand-sub {
-	font-size: 11px;
-	color: var(--fg-faint);
-	letter-spacing: 0.08em;
-	padding: 2px 9px;
-	border-radius: 999px;
-	border: 1px solid var(--line);
-	background: var(--surface-raised);
 }
 
 .bs-header-actions {
@@ -105,18 +89,20 @@
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	width: min(300px, 34vw);
+	flex: 1 1 auto;
+	width: min(420px, 42vw);
+	max-width: 520px;
 	height: 36px;
 	padding: 0 14px;
 	background: var(--surface-raised);
-	border: 1px solid var(--line);
+	border: 1px solid var(--line-strong);
 	border-radius: 999px;
 	color: var(--fg-muted);
 	isolation: isolate;
 }
 
 .search:hover {
-	border-color: var(--line-strong);
+	border-color: color-mix(in srgb, var(--line-strong) 55%, var(--accent) 45%);
 }
 
 .search:focus-within {
@@ -126,7 +112,7 @@
 
 .search > svg {
 	flex: none;
-	opacity: 0.7;
+	opacity: 0.9;
 	color: var(--fg-muted);
 }
 
@@ -163,10 +149,10 @@
 .icon-action,
 .menu-trigger {
 	height: 36px;
-	border: 1px solid var(--line);
+	border: 1px solid var(--line-strong);
 	border-radius: 999px;
 	background: var(--surface-raised);
-	color: var(--fg-muted);
+	color: var(--fg);
 	cursor: pointer;
 	font: 13px inherit;
 	padding: 0 14px;
@@ -261,10 +247,53 @@
 	flex: 1;
 	min-height: 0;
 	overflow: auto;
-	padding: 28px 36px 40px;
+	padding: 22px 36px 40px;
 	background:
 		radial-gradient(ellipse 85% 42% at 50% -8%, var(--accent-soft), transparent 58%),
 		var(--surface);
+}
+
+.bs-page-head {
+	display: flex;
+	align-items: flex-end;
+	justify-content: space-between;
+	gap: 16px;
+	margin: 0 0 18px;
+	padding-bottom: 14px;
+	border-bottom: 1px solid var(--line);
+}
+
+.bs-page-titles {
+	min-width: 0;
+}
+
+.bs-page-title {
+	margin: 0;
+	font-size: 22px;
+	font-weight: 650;
+	letter-spacing: 0.04em;
+	color: var(--fg-strong);
+	line-height: 1.2;
+}
+
+.bs-page-meta {
+	margin: 6px 0 0;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 8px 14px;
+	font-size: 13px;
+	color: var(--fg-muted);
+	line-height: 1.4;
+}
+
+.bs-page-path {
+	max-width: min(52vw, 420px);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--fg-faint);
+	font-size: 12px;
 }
 
 .state-banner {
@@ -1415,9 +1444,6 @@
 	}
 	.btn-resume {
 		justify-self: start;
-	}
-	.brand-sub {
-		display: none;
 	}
 	.settings-trigger {
 		width: 36px;
