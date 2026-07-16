@@ -147,6 +147,19 @@ Invoke-CheckedCommand -FilePath "powershell.exe" -Arguments @(
   "-ManifestPath", (Join-Path $targetRuntime "manifest.json")
 )
 
+# Deploy a standalone BMP+AND alpha ICO next to the EXE so Explorer / shortcuts
+# can use true transparency (PE-embedded icons often show black corners).
+$bundledIco = Join-Path $desktopRoot "src-tauri\icons\icon.ico"
+$installedIco = Join-Path $InstallDir "immersive-reader.ico"
+if (Test-Path -LiteralPath $bundledIco) {
+  Copy-Item -LiteralPath $bundledIco -Destination $installedIco -Force
+  Write-Host "Deployed shell icon: $installedIco"
+} else {
+  $installedIco = $installedExe
+  Write-Warning "Bundled icon.ico missing; falling back to EXE icon resource."
+}
+$iconLocation = if ($installedIco -eq $installedExe) { "$installedExe,0" } else { "`"$installedIco`",0" }
+
 if ($RegisterMarkdownAssociations) {
   $progId = "ImmersiveReader.Markdown"
   $registeredName = "沉浸阅读"
@@ -161,7 +174,7 @@ if ($RegisterMarkdownAssociations) {
   New-Item -Path "HKCU:\Software\Classes\$progId\shell\open\command" -Force | Out-Null
   New-Item -Path "HKCU:\Software\Classes\$progId\DefaultIcon" -Force | Out-Null
   Set-Item -Path "HKCU:\Software\Classes\$progId" -Value "Markdown Document"
-  Set-Item -Path "HKCU:\Software\Classes\$progId\DefaultIcon" -Value "`"$installedExe`",0"
+  Set-Item -Path "HKCU:\Software\Classes\$progId\DefaultIcon" -Value $iconLocation
   Set-Item -Path "HKCU:\Software\Classes\$progId\shell\open\command" -Value $openCommand
 
   # Windows can retain a protected UserChoice that points to the old MMbook
@@ -175,14 +188,14 @@ if ($RegisterMarkdownAssociations) {
     Set-Item -Path $legacyCommandPath -Value $openCommand
     Set-Item -Path "HKCU:\Software\Classes\md" -Value $registeredName
     New-Item -Path "HKCU:\Software\Classes\md\DefaultIcon" -Force | Out-Null
-    Set-Item -Path "HKCU:\Software\Classes\md\DefaultIcon" -Value "`"$installedExe`",0"
+    Set-Item -Path "HKCU:\Software\Classes\md\DefaultIcon" -Value $iconLocation
     Write-Host "Migrated the legacy md Markdown handler/icon to $installedExe."
   }
 
   New-Item -Path "$capabilitiesPath\FileAssociations" -Force | Out-Null
   New-ItemProperty -Path $capabilitiesPath -Name "ApplicationName" -Value $registeredName -PropertyType String -Force | Out-Null
   New-ItemProperty -Path $capabilitiesPath -Name "ApplicationDescription" -Value "本地长文阅读、知乎归档和播客转写工具。" -PropertyType String -Force | Out-Null
-  New-ItemProperty -Path $capabilitiesPath -Name "ApplicationIcon" -Value "$installedExe,0" -PropertyType String -Force | Out-Null
+  New-ItemProperty -Path $capabilitiesPath -Name "ApplicationIcon" -Value $iconLocation -PropertyType String -Force | Out-Null
   foreach ($extension in @(".md", ".markdown")) {
     New-ItemProperty -Path "$capabilitiesPath\FileAssociations" -Name $extension -Value $progId -PropertyType String -Force | Out-Null
   }
@@ -220,7 +233,7 @@ if (-not $NoShortcuts) {
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = $installedExe
     $shortcut.WorkingDirectory = $InstallDir
-    $shortcut.IconLocation = "$installedExe,0"
+    $shortcut.IconLocation = if ($installedIco -eq $installedExe) { "$installedExe,0" } else { "$installedIco,0" }
     $shortcut.Save()
   }
 }

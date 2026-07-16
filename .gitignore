@@ -38,6 +38,8 @@ runtime/
 **/*.pfx
 **/*.msi
 **/*.exe
+# Deployed shell icon next to the production EXE (copied by ship:local)
+/immersive-reader.ico
 **/*.zip
 
 # QA artifacts
