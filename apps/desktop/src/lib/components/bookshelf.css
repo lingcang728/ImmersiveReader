@@ -45,7 +45,7 @@
 	align-items: center;
 	gap: 16px;
 	padding: 0 36px;
-	border-bottom: 1px solid var(--line-strong);
+	border-bottom: 0;
 	background: color-mix(in srgb, var(--surface) 96%, var(--link) 4%);
 	flex: none;
 }

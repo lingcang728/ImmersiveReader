@@ -181,7 +181,7 @@
 		height: var(--chrome-h);
 		min-height: var(--chrome-h);
 		padding: 0 4px 0 0;
-		border-bottom: 1px solid color-mix(in srgb, var(--hr) 70%, var(--text-secondary) 30%);
+		border-bottom: 0;
 		background: color-mix(in srgb, var(--bg) 92%, var(--bg-secondary) 8%);
 		color: var(--text);
 		user-select: none;
