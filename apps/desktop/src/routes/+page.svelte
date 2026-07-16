@@ -4483,11 +4483,9 @@
 		flex-direction: column;
 		flex: none;
 		z-index: 55;
-		background: color-mix(in srgb, var(--bg) 86%, var(--link) 14%);
-		border-bottom: 1px solid color-mix(in srgb, var(--hr) 92%, var(--text-secondary) 8%);
-		box-shadow:
-			0 1px 0 color-mix(in srgb, var(--hr) 60%, transparent),
-			0 2px 8px color-mix(in srgb, var(--bg-secondary) 60%, transparent);
+		background: color-mix(in srgb, var(--bg) 94%, var(--bg-secondary) 6%);
+		border-bottom: 0;
+		box-shadow: none;
 		transition:
 			transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1),
 			opacity 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
