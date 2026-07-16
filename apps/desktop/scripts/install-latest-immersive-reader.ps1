@@ -159,19 +159,24 @@ if ($RegisterMarkdownAssociations) {
     New-ItemProperty -Path "HKCU:\Software\Classes\$extension\OpenWithProgids" -Name $progId -Value "" -PropertyType String -Force | Out-Null
   }
   New-Item -Path "HKCU:\Software\Classes\$progId\shell\open\command" -Force | Out-Null
+  New-Item -Path "HKCU:\Software\Classes\$progId\DefaultIcon" -Force | Out-Null
   Set-Item -Path "HKCU:\Software\Classes\$progId" -Value "Markdown Document"
+  Set-Item -Path "HKCU:\Software\Classes\$progId\DefaultIcon" -Value "`"$installedExe`",0"
   Set-Item -Path "HKCU:\Software\Classes\$progId\shell\open\command" -Value $openCommand
 
   # Windows can retain a protected UserChoice that points to the old MMbook
   # ProgId (`md`). Migrate that legacy command in place so existing defaults
   # immediately open the current production executable without bypassing the
-  # UserChoice protection.
+  # UserChoice protection. Always refresh DefaultIcon on `md` when it opens
+  # this product so Explorer file icons match the installed EXE artwork.
   $legacyCommandPath = "HKCU:\Software\Classes\md\shell\open\command"
   $legacyCommand = (Get-ItemProperty -LiteralPath $legacyCommandPath -Name "(default)" -ErrorAction SilentlyContinue).'(default)'
-  if ($legacyCommand -and $legacyCommand -match "(?i)mmbook") {
+  if ($legacyCommand -and $legacyCommand -match "(?i)(mmbook|immersive-reader|沉浸阅读)") {
     Set-Item -Path $legacyCommandPath -Value $openCommand
     Set-Item -Path "HKCU:\Software\Classes\md" -Value $registeredName
-    Write-Host "Migrated the legacy md Markdown handler to $installedExe."
+    New-Item -Path "HKCU:\Software\Classes\md\DefaultIcon" -Force | Out-Null
+    Set-Item -Path "HKCU:\Software\Classes\md\DefaultIcon" -Value "`"$installedExe`",0"
+    Write-Host "Migrated the legacy md Markdown handler/icon to $installedExe."
   }
 
   New-Item -Path "$capabilitiesPath\FileAssociations" -Force | Out-Null
@@ -218,6 +223,20 @@ if (-not $NoShortcuts) {
     $shortcut.IconLocation = "$installedExe,0"
     $shortcut.Save()
   }
+}
+
+# Force Explorer / shell to pick up the new EXE icon and file associations
+# without forging protected UserChoice hashes.
+try {
+  Add-Type -Namespace ImmersiveReader -Name ShellNotify -MemberDefinition @"
+    [System.Runtime.InteropServices.DllImport("shell32.dll")]
+    public static extern void SHChangeNotify(int wEventId, uint uFlags, System.IntPtr dwItem1, System.IntPtr dwItem2);
+"@ -ErrorAction SilentlyContinue
+  # SHCNE_ASSOCCHANGED = 0x08000000, SHCNF_IDLIST = 0x0000
+  [ImmersiveReader.ShellNotify]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+  Write-Host "Notified Windows shell of icon/association changes."
+} catch {
+  Write-Warning "Shell association notify skipped: $($_.Exception.Message)"
 }
 
 $installed = Get-Item -LiteralPath $installedExe

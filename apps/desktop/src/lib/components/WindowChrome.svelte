@@ -111,27 +111,15 @@
 	on:dblclick={onTitlebarDblClick}
 >
 	<div class="chrome-leading" data-no-drag>
-		<svg class="app-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true" width="16" height="16">
-			<path
-				d="M4 5.5c2.2-1.2 4.3-1.5 6.5-.4V18c-2.2-1.1-4.3-.9-6.5.3V5.5Z"
-				stroke="currentColor"
-				stroke-width="1.6"
-				stroke-linejoin="round"
-			/>
-			<path
-				d="M20 5.5c-2.2-1.2-4.3-1.5-6.5-.4V18c2.2-1.1 4.3-.9 6.5.3V5.5Z"
-				stroke="currentColor"
-				stroke-width="1.6"
-				stroke-linejoin="round"
-			/>
-			<path
-				d="M12 5.2v12.6"
-				stroke="currentColor"
-				stroke-width="1.4"
-				stroke-linecap="round"
-				opacity="0.9"
-			/>
-		</svg>
+		<img
+			class="app-icon"
+			src="/app-icon-48.png"
+			width="16"
+			height="16"
+			alt=""
+			aria-hidden="true"
+			draggable="false"
+		/>
 		<span class="chrome-title">{title || '沉浸阅读'}</span>
 	</div>
 	<div class="chrome-controls" data-no-drag>
@@ -249,8 +237,11 @@
 		width: 16px;
 		height: 16px;
 		flex: none;
-		color: var(--link);
 		border-radius: 3px;
+		object-fit: cover;
+		display: block;
+		user-select: none;
+		-webkit-user-drag: none;
 	}
 
 	.chrome-title {

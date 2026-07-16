@@ -11,7 +11,9 @@
   },
   "app": {
     "trayIcon": {
-      "iconPath": "icons/icon.ico",
+      "id": "main",
+      "iconPath": "icons/tray-icon.ico",
+      "iconAsTemplate": false,
       "tooltip": "沉浸阅读"
     },
     "windows": [
