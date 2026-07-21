@@ -32,3 +32,12 @@ test('staged scheduler never deletes the published archive before fetching', () 
   assert.equal(scheduler.includes('unlinkSync'), false);
   assert.equal(scheduler.includes('resetTaskIncoming'), true);
 });
+
+test('partial results publish before the task becomes terminal', () => {
+  const scheduler = fs.readFileSync(path.join(root, 'src/scheduler.ts'), 'utf8');
+  assert.equal(scheduler.includes('isPublishableTaskStatus(status, finalTask.success_count)'), true);
+  const publish = scheduler.indexOf('publishTaskStage(outputBaseDir');
+  const terminal = scheduler.indexOf('saveTask({ id: taskId, status });', publish);
+  assert.ok(publish >= 0, 'scheduler must publish successful files');
+  assert.ok(terminal > publish, 'terminal status must follow a durable publish');
+});

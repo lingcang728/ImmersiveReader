@@ -30,6 +30,21 @@ export interface ExtractedContent {
   articleId?: string;
 }
 
+export function isUnavailableZhihuPage(title: string, bodyText: string): boolean {
+  return `${title}\n${bodyText}`.includes('没有知识存在的荒原');
+}
+
+async function assertZhihuContentAvailable(page: Page): Promise<void> {
+  const snapshot = await page.evaluate(() => ({
+    title: document.title || '',
+    bodyText: document.body?.innerText || ''
+  })).catch(() => ({ title: '', bodyText: '' }));
+
+  if (isUnavailableZhihuPage(snapshot.title, snapshot.bodyText)) {
+    throw new Error('CONTENT_UNAVAILABLE: 知乎内容已删除或当前账号不可见');
+  }
+}
+
 function escapeHtmlText(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -286,6 +301,7 @@ export async function scrapeAnswer(page: Page, targetUrl: string): Promise<Extra
   if (currentUrl.includes('unhuman') || currentUrl.includes('captcha')) {
     throw new Error('CAPTCHA_REQUIRED: 触发了知乎防爬人机验证。请在沉浸阅读的知乎获取面板完成人机验证。');
   }
+  await assertZhihuContentAvailable(page);
 
   // 2. 优先通过 API 拦截结果解析
   if (apiContent && apiData) {
@@ -500,6 +516,7 @@ export async function scrapeArticle(page: Page, targetUrl: string): Promise<Extr
   if (currentUrl.includes('unhuman') || currentUrl.includes('captcha')) {
     throw new Error('CAPTCHA_REQUIRED: 触发了知乎防爬人机验证。请在沉浸阅读的知乎获取面板完成人机验证。');
   }
+  await assertZhihuContentAvailable(page);
 
   // 1. API 拦截数据
   if (apiContent && apiData) {

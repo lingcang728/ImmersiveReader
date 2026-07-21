@@ -7,6 +7,10 @@ import type { TaskItem } from "./db.js";
 
 export type ZhihuPublishPhase = "prepared" | "old_moved" | "new_moved" | "committed" | "rolled_back";
 
+export function isPublishableTaskStatus(status: string, successCount: number): boolean {
+  return (status === "success" || status === "partial_success") && successCount > 0;
+}
+
 export type ZhihuPublishTransaction = {
   readonly schemaVersion: 1;
   readonly transactionId: string;
@@ -81,6 +85,7 @@ function sha256File(filePath: string): string {
 
 function writeMetadata(
   incomingAuthor: string,
+  publishedAuthor: string,
   taskId: string,
   authorId: string,
   revision: number,
@@ -90,9 +95,19 @@ function writeMetadata(
   const items: ArchivedItem[] = metadata.items.map(item => {
     const normalized = item.output_path?.replaceAll("\\", "/") || "";
     const prefix = `.incoming/${taskId}/`;
+    const publishedAuthorPrefix = `${path.basename(publishedAuthor).replaceAll("\\", "/")}/`;
+    const absoluteOutput = item.output_path && path.isAbsolute(item.output_path)
+      ? path.resolve(item.output_path)
+      : null;
     const relativeWithAuthor = normalized.startsWith(prefix)
       ? normalized.slice(prefix.length)
-      : path.relative(incomingAuthor, item.output_path || "").replaceAll("\\", "/");
+      : normalized.startsWith(publishedAuthorPrefix)
+        ? normalized
+        : absoluteOutput
+          && absoluteOutput !== publishedAuthor
+          && absoluteOutput.startsWith(`${publishedAuthor}${path.sep}`)
+          ? `${publishedAuthorPrefix}${path.relative(publishedAuthor, absoluteOutput).replaceAll("\\", "/")}`
+          : path.relative(incomingAuthor, item.output_path || "").replaceAll("\\", "/");
     const authorPrefix = `${path.basename(incomingAuthor).replaceAll("\\", "/")}/`;
     const relative = relativeWithAuthor.startsWith(authorPrefix)
       ? relativeWithAuthor.slice(authorPrefix.length)
@@ -196,17 +211,39 @@ function revisionDirectory(outputRoot: string, authorId: string): string {
   return path.join(path.resolve(outputRoot), ".revisions", authorId);
 }
 
-function nextRevision(root: string): number {
-  if (!fs.existsSync(root)) return 1;
-  const revisions = fs.readdirSync(root, { withFileTypes: true })
+function currentPublishedRevision(finalRoot: string): number {
+  const provenancePath = path.join(finalRoot, "provenance.json");
+  if (!fs.existsSync(provenancePath)) return 0;
+  try {
+    const provenance = JSON.parse(fs.readFileSync(provenancePath, "utf8")) as Record<string, unknown>;
+    const revision = Number(provenance.revision);
+    return Number.isSafeInteger(revision) && revision > 0 ? revision : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function nextRevision(root: string, finalRoot: string): number {
+  const revisions = fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && /^\d+$/.test(entry.name))
     .map(entry => Number(entry.name))
-    .filter(Number.isSafeInteger);
-  return (revisions.length > 0 ? Math.max(...revisions) : 0) + 1;
+    .filter(Number.isSafeInteger) : [];
+  return Math.max(currentPublishedRevision(finalRoot), ...revisions, 0) + 1;
 }
 
 function transactionPath(outputRoot: string, taskId: string): string {
   return path.join(path.resolve(outputRoot), ".transactions", `zhihu-${taskId}.json`);
+}
+
+function readTransaction(outputRoot: string, taskId: string): ZhihuPublishTransaction | null {
+  const journal = transactionPath(outputRoot, taskId);
+  if (!fs.existsSync(journal)) return null;
+  try {
+    const transaction = JSON.parse(fs.readFileSync(journal, "utf8")) as ZhihuPublishTransaction;
+    return transaction.schemaVersion === 1 && transaction.taskId === taskId ? transaction : null;
+  } catch {
+    return null;
+  }
 }
 
 function saveTransaction(outputRoot: string, transaction: ZhihuPublishTransaction): void {
@@ -223,16 +260,77 @@ function setPhase(outputRoot: string, transaction: ZhihuPublishTransaction, phas
 
 function listAuthorDirectories(incomingRoot: string): string[] {
   if (!fs.existsSync(incomingRoot)) {
-    throw new Error("ZHIHU_PUBLISH_FAILED: incoming directory is missing");
+    return [];
   }
   const entries = fs.readdirSync(incomingRoot, { withFileTypes: true });
   const unsafe = entries.some(entry => entry.isSymbolicLink());
   if (unsafe) throw new Error("ZHIHU_PUBLISH_FAILED: incoming directory contains a symlink");
-  const directories = entries.filter(isSafeDirectoryEntry).map(entry => entry.name);
-  if (directories.length !== 1) {
-    throw new Error("ZHIHU_PUBLISH_FAILED: expected exactly one author directory");
+  return entries.filter(isSafeDirectoryEntry).map(entry => entry.name);
+}
+
+function safePublishedRoot(root: string, relative: string): string {
+  if (!relative || path.isAbsolute(relative)) {
+    throw new Error("ZHIHU_PUBLISH_FAILED: unsafe published path");
   }
-  return directories;
+  const resolved = path.resolve(root, relative);
+  if (resolved === root || !resolved.startsWith(`${root}${path.sep}`)) {
+    throw new Error("ZHIHU_PUBLISH_FAILED: published path escapes output root");
+  }
+  return resolved;
+}
+
+function copyPublishedTree(source: string, destination: string, root = true): void {
+  ensureDirectory(destination);
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) {
+      throw new Error("ZHIHU_PUBLISH_FAILED: published archive contains a symlink");
+    }
+    if (root && (entry.name === "manifest.json" || entry.name === "provenance.json")) {
+      continue;
+    }
+    const sourcePath = path.join(source, entry.name);
+    const destinationPath = path.join(destination, entry.name);
+    if (entry.isDirectory()) {
+      copyPublishedTree(sourcePath, destinationPath, false);
+    } else if (entry.isFile() && !fs.existsSync(destinationPath)) {
+      fs.copyFileSync(sourcePath, destinationPath);
+    }
+  }
+}
+
+function metadataItemIds(metadata: ZhihuPublishMetadata): string[] {
+  return [...new Set(metadata.items.map(item => item.item_id))].sort();
+}
+
+function publishedItemIds(finalRoot: string): string[] {
+  const manifest = parseManifest(JSON.parse(fs.readFileSync(path.join(finalRoot, "manifest.json"), "utf8")));
+  return manifest.chapters.map(chapter => chapter.id).sort();
+}
+
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function committedResult(
+  root: string,
+  taskId: string,
+  authorId: string,
+  metadata: ZhihuPublishMetadata,
+): ZhihuPublishResult | null {
+  const transaction = readTransaction(root, taskId);
+  if (!transaction || transaction.phase !== "committed" || transaction.authorId !== authorId) {
+    return null;
+  }
+  const finalRoot = safePublishedRoot(root, transaction.finalRelativePath);
+  validateMetadata(root, transaction, transaction.finalRelativePath);
+  if (!sameIds(publishedItemIds(finalRoot), metadataItemIds(metadata))) {
+    return null;
+  }
+  return {
+    transaction,
+    finalRoot,
+    authorDirectory: path.basename(finalRoot),
+  };
 }
 
 export type ZhihuPublishResult = {
@@ -249,15 +347,32 @@ export function publishTaskStage(
 ): ZhihuPublishResult {
   const root = path.resolve(outputRoot);
   const incomingRoot = taskIncomingRoot(root, taskId);
-  const [authorDirectory] = listAuthorDirectories(incomingRoot);
+  const existingResult = committedResult(root, taskId, authorId, metadata);
+  const authorDirectories = listAuthorDirectories(incomingRoot);
+  if (authorDirectories.length === 0 && existingResult) {
+    return existingResult;
+  }
+  if (authorDirectories.length !== 1) {
+    throw new Error("ZHIHU_PUBLISH_FAILED: expected exactly one author directory");
+  }
+  const [authorDirectory] = authorDirectories;
   const incomingAuthor = path.join(incomingRoot, authorDirectory);
   const finalRoot = path.join(root, authorDirectory);
-  const revision = nextRevision(revisionDirectory(root, authorId));
+  const previousTransaction = readTransaction(root, taskId);
+  if (previousTransaction?.phase === "committed" && previousTransaction.authorId === authorId) {
+    const previousFinal = safePublishedRoot(root, previousTransaction.finalRelativePath);
+    validateMetadata(root, previousTransaction, previousTransaction.finalRelativePath);
+    if (path.basename(previousFinal) !== authorDirectory) {
+      throw new Error("ZHIHU_PUBLISH_FAILED: retry author directory changed");
+    }
+    copyPublishedTree(previousFinal, incomingAuthor);
+  }
+  const revision = nextRevision(revisionDirectory(root, authorId), finalRoot);
   const rollbackRoot = path.join(revisionDirectory(root, authorId), String(revision));
   if (fs.existsSync(rollbackRoot)) {
     throw new Error("ZHIHU_PUBLISH_FAILED: revision directory already exists");
   }
-  const metadataHashes = writeMetadata(incomingAuthor, taskId, authorId, revision, metadata);
+  const metadataHashes = writeMetadata(incomingAuthor, finalRoot, taskId, authorId, revision, metadata);
 
   const transaction: ZhihuPublishTransaction = {
     schemaVersion: 1,

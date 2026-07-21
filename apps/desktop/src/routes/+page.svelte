@@ -24,6 +24,7 @@
 		type TaskSnapshot,
 		type TaskSyncState
 	} from "$lib/tasks/sync";
+	import { taskEventPublishesToLibrary } from "$lib/tasks/libraryRefresh";
 	import {
 		currentFilePath,
 		markdownSource,
@@ -336,6 +337,9 @@
 
 	function receiveTaskEvent(event: TaskEvent): void {
 		taskEventLog = [event, ...taskEventLog.filter((entry) => !(entry.taskId === event.taskId && entry.sequence === event.sequence))].slice(0, 60);
+		if (taskEventPublishesToLibrary(event)) {
+			void refreshLibrary();
+		}
 		const result = applyTaskEvent(taskSyncState, event);
 		if (result.kind === "refresh") {
 			void refreshAcquisitionSnapshot();

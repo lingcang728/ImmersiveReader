@@ -4,11 +4,19 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  isPublishableTaskStatus,
   publishTaskStage,
   resetTaskIncoming,
   resolvePublishedTaskItemPath,
   taskIncomingRoot,
 } from "../src/publish.ts";
+
+test("complete and partial tasks with successful items are publishable", () => {
+  assert.equal(isPublishableTaskStatus("success", 1), true);
+  assert.equal(isPublishableTaskStatus("partial_success", 1), true);
+  assert.equal(isPublishableTaskStatus("partial_success", 0), false);
+  assert.equal(isPublishableTaskStatus("failed", 1), false);
+});
 
 test("publishes staged author content and preserves the previous revision", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "zhihu-publish-"));
@@ -70,6 +78,72 @@ test("staged partial results stay isolated from the current archive", () => {
   assert.equal(fs.existsSync(path.join(final, "partial.md")), false);
   assert.equal(fs.readFileSync(path.join(final, "stable.md"), "utf8"), "stable");
   assert.equal(fs.existsSync(taskIncomingRoot(root, taskId)), true);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("a partial publication can be retried and merged with the published chapters", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "zhihu-publish-retry-"));
+  const taskId = "task-retry";
+  const incoming = resetTaskIncoming(root, taskId);
+  const author = path.join(incoming, "作者");
+  fs.mkdirSync(author, { recursive: true });
+  fs.writeFileSync(path.join(author, "first.md"), "first");
+
+  const first = publishTaskStage(root, taskId, "author-1", {
+    authorName: "作者",
+    items: [{
+      item_id: "answer:1",
+      output_path: path.join(author, "first.md"),
+      author_id: "author-1",
+      author_name: "作者",
+      title: "第一篇",
+      created_time: 1,
+      voteup_count: 1,
+    } as any],
+  });
+  assert.equal(first.transaction.revision, 1);
+  fs.writeFileSync(path.join(first.finalRoot, ".reading.json"), "reading-state");
+
+  const retryAuthor = path.join(taskIncomingRoot(root, taskId), "作者");
+  fs.mkdirSync(retryAuthor, { recursive: true });
+  fs.writeFileSync(path.join(retryAuthor, "second.md"), "second");
+  const mergedItems = [{
+    item_id: "answer:1",
+    output_path: "作者/first.md",
+    author_id: "author-1",
+    author_name: "作者",
+    title: "第一篇",
+    created_time: 1,
+    voteup_count: 1,
+  }, {
+    item_id: "answer:2",
+    output_path: path.join(retryAuthor, "second.md"),
+    author_id: "author-1",
+    author_name: "作者",
+    title: "第二篇",
+    created_time: 2,
+    voteup_count: 2,
+  }] as any;
+
+  const second = publishTaskStage(root, taskId, "author-1", {
+    authorName: "作者",
+    items: mergedItems,
+  });
+  assert.equal(second.transaction.revision, 2);
+  const manifest = JSON.parse(fs.readFileSync(path.join(second.finalRoot, "manifest.json"), "utf8"));
+  assert.deepEqual(manifest.chapters.map((chapter: any) => chapter.id).sort(), ["answer:1", "answer:2"]);
+  assert.equal(fs.readFileSync(path.join(second.finalRoot, "first.md"), "utf8"), "first");
+  assert.equal(fs.readFileSync(path.join(second.finalRoot, "second.md"), "utf8"), "second");
+  assert.equal(fs.readFileSync(path.join(second.finalRoot, ".reading.json"), "utf8"), "reading-state");
+
+  const repeated = publishTaskStage(root, taskId, "author-1", {
+    authorName: "作者",
+    items: mergedItems.map((item: any) => ({
+      ...item,
+      output_path: `作者/${path.basename(item.output_path)}`,
+    })),
+  });
+  assert.equal(repeated.transaction.revision, 2);
   fs.rmSync(root, { recursive: true, force: true });
 });
 

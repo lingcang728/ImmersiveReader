@@ -22,6 +22,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { resolveArchiveOutputDir } from './runtime-paths.js';
 import {
+  isPublishableTaskStatus,
   publishTaskStage,
   resetTaskIncoming,
   resolvePublishedTaskItemPath,
@@ -450,6 +451,9 @@ async function runTaskInternal(taskId: string) {
               logger.error(`交互式人机验证启动失败: ${err.message}`);
               retryCount = maxRetries + 1; // 交互失败直接中断
             }
+          } else if (errorMessage.includes('CONTENT_UNAVAILABLE')) {
+            failureCode = 'CONTENT_UNAVAILABLE';
+            retryCount = maxRetries + 1; // 内容已删除或不可见，重试不会恢复
           } else if (errorMessage.includes('DOM_NOT_FOUND')) {
             failureCode = 'DOM_NOT_FOUND';
           } else if (errorMessage.includes('CONTENT_EMPTY')) {
@@ -515,10 +519,12 @@ async function runTaskInternal(taskId: string) {
       const status: Task['status'] = isComplete && finalTask.failed_count === 0
         ? 'success'
         : (isComplete && finalTask.success_count > 0 ? 'partial_success' : 'failed');
-      saveTask({ id: taskId, status });
 
-      if (status === 'success') {
+      if (isPublishableTaskStatus(status, finalTask.success_count)) {
         try {
+          emitProgress(taskId, 'running', status === 'success'
+            ? '正文抓取完成，正在发布到书架...'
+            : `正文部分完成，正在把已成功的 ${finalTask.success_count} 篇发布到书架...`);
           const successfulItems = getTaskItems(taskId).filter(ti => ti.status === 'success');
           const authorName = successfulItems.find(item => item.author_name)?.author_name
             || task.author_name
@@ -557,6 +563,9 @@ async function runTaskInternal(taskId: string) {
         }
       }
 
+      // Only expose a terminal status after its publish transaction is durable. The desktop
+      // poller treats terminal as final and refreshes the shelf immediately.
+      saveTask({ id: taskId, status });
       emitProgress(taskId, status, `任务执行完毕。总数: ${finalTask.total_count}, 成功: ${finalTask.success_count}, 失败: ${finalTask.failed_count}`);
     }
 
