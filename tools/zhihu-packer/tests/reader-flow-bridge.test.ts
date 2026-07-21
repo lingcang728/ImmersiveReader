@@ -38,10 +38,29 @@ test("flow font-scale bridge shares clamp range and ctrl-wheel path", () => {
 
 test("reader template constrains long paths urls and code inside cards", () => {
   const template = fs.readFileSync(path.resolve("src/reader-template.html"), "utf-8");
+  const cardRule = template.match(/\.article-card\s*\{([^}]*)\}/)?.[1] ?? "";
   assert.match(template, /min-width:\s*0/);
   assert.match(template, /overflow-wrap:\s*anywhere/);
   assert.match(template, /\.article-body pre[\s\S]*overflow-x:\s*auto/);
-  assert.match(template, /\.article-card[\s\S]*overflow:\s*hidden/);
+  assert.match(cardRule, /overflow:\s*hidden/);
+});
+
+test("long article emphasis never scales the vertical axis or leaves stale animations", () => {
+  const template = fs.readFileSync(path.resolve("src/reader-template.html"), "utf-8");
+  const cardRule = template.match(/\.article-card\s*\{([^}]*)\}/)?.[1] ?? "";
+  const activeCardRule = template.match(/\.article-card\.active\s*\{([^}]*)\}/)?.[1] ?? "";
+  const activeMethod = appSource.slice(
+    appSource.indexOf("private updateActiveArticle"),
+    appSource.indexOf("private moveMenuBubble"),
+  );
+
+  assert.match(cardRule, /transform:\s*scaleX\(0\.98\)/);
+  assert.match(activeCardRule, /transform:\s*scaleX\(1\.01\)/);
+  assert.doesNotMatch(cardRule, /transform:\s*scale\(/);
+  assert.doesNotMatch(activeCardRule, /transform:\s*scale\(/);
+  assert.match(activeMethod, /prevActive[\s\S]*getAnimations\(\)[\s\S]*animation\.cancel\(\)/);
+  assert.match(activeMethod, /translateY\(\$\{translateYVal\}px\) scaleX\(0\.985\)/);
+  assert.match(activeMethod, /translateY\(0\) scaleX\(1\.01\)/);
 });
 
 test("compiled reader template includes the message bridge after compile-reader", () => {

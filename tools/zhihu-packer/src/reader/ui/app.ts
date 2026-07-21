@@ -582,7 +582,10 @@ export class ReaderApp {
     }
 
     const prevActive = document.querySelectorAll('.article-card.active');
-    prevActive.forEach(el => el.classList.remove('active'));
+    prevActive.forEach(el => {
+      el.getAnimations().forEach(animation => animation.cancel());
+      el.classList.remove('active');
+    });
 
     const currentActive = document.getElementById(`article-${index}`);
     if (currentActive) {
@@ -596,16 +599,16 @@ export class ReaderApp {
         // 2. 确定进入方向：下一篇从下方进入 (translateY(28px))，上一篇从上方进入 (translateY(-28px))
         const translateYVal = index > prevIndex ? 28 : -28;
 
-        // 3. 执行 Web Animations API，最终 transform 对齐 CSS 中 .article-card.active 状态的 scale(1.01)
+        // 3. 仅横向缩放卡片，避免长文章因纵向缩放越过相邻章节边界
         currentActive.animate([
           {
             opacity: 0.58,
-            transform: `translateY(${translateYVal}px) scale(0.985)`,
+            transform: `translateY(${translateYVal}px) scaleX(0.985)`,
             filter: 'blur(6px)'
           },
           {
             opacity: 1,
-            transform: 'translateY(0) scale(1.01)',
+            transform: 'translateY(0) scaleX(1.01)',
             filter: 'blur(0)'
           }
         ], {
