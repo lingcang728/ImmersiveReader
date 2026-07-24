@@ -122,6 +122,22 @@ def main() -> int:
                 )
                 assert metrics["sw"] == metrics["cw"], f"horizontal overflow at {label}: {metrics}"
 
+            def assert_bookshelf_below_chrome(label: str) -> None:
+                chrome = page.locator(".window-chrome").bounding_box()
+                shelf = page.locator(".bookshelf").bounding_box()
+                header = page.locator(".bs-header").bounding_box()
+                assert chrome is not None and shelf is not None and header is not None
+                chrome_bottom = chrome["y"] + chrome["height"]
+                tolerance = 1
+                assert shelf["y"] >= chrome_bottom - tolerance, (
+                    f"bookshelf overlaps window chrome at {label}: "
+                    f"chrome={chrome} shelf={shelf}"
+                )
+                assert header["y"] >= chrome_bottom - tolerance, (
+                    f"bookshelf header overlaps window chrome at {label}: "
+                    f"chrome={chrome} header={header}"
+                )
+
             def assert_dialog_in_safe_area(selector: str) -> None:
                 box = page.locator(selector).bounding_box()
                 assert box is not None, f"missing dialog {selector}"
@@ -150,6 +166,7 @@ def main() -> int:
                 page.set_viewport_size({"width": width, "height": height})
                 page.wait_for_timeout(150)
                 assert_no_h_overflow(f"{width}x{height}")
+                assert_bookshelf_below_chrome(f"{width}x{height}")
                 target = QA_DIR / f"bookshelf-{width}x{height}.png"
                 page.screenshot(path=str(target), full_page=False)
                 screenshots.append(str(target))
@@ -165,6 +182,23 @@ def main() -> int:
                 )
                 page.wait_for_timeout(100)
                 assert_no_h_overflow(f"font-scale {int(scale * 100)}%")
+                assert_bookshelf_below_chrome(f"font-scale {int(scale * 100)}%")
+
+            # Fault injection for the reported regression: a stale immersive
+            # overlay class must not be able to cover the visible homepage.
+            page.locator(".chrome-stack").evaluate("el => el.classList.add('overlay')")
+            assert_bookshelf_below_chrome("stale overlay class")
+            page.locator(".chrome-stack").evaluate("el => el.classList.remove('overlay')")
+
+            # Match the reported installed-app appearance as well as the
+            # default light theme.
+            page.evaluate("() => localStorage.setItem('mmbook-theme', 'suzhi-dark')")
+            page.reload(wait_until="networkidle")
+            page.wait_for_selector(".book-card")
+            assert_bookshelf_below_chrome("dark theme")
+            dark_target = QA_DIR / "bookshelf-dark-1280x800.png"
+            page.screenshot(path=str(dark_target), full_page=False)
+            screenshots.append(str(dark_target))
 
             # Settings: advanced section default collapsed; dialog in safe area.
             page.get_by_role("button", name="设置").first.click()
@@ -375,6 +409,12 @@ def main() -> int:
         "chapterCount": 1469,
         "viewports": ["900x700", "1280x800", "1440x900"],
         "states": ["ready", "loading", "empty", "unwritable-with-corrupt-book"],
+        "homepageLayout": [
+            "bookshelf starts below window chrome at all tested viewports",
+            "100% and 150% font scales keep the homepage below window chrome",
+            "dark theme keeps the homepage below window chrome",
+            "stale immersive overlay class cannot cover the homepage",
+        ],
         "readerKeyboard": [
             "ordinary ArrowDown scroll",
             "held ArrowUp crosses at most one chapter",

@@ -156,7 +156,10 @@ export function deriveChromeSurface(input: {
 	workflowOpen?: boolean;
 }): ChromeSurface {
 	if (input.flowActive) return 'flow';
-	if (input.focusMode) return 'focus';
+	// Focus is a reader mode, never a standalone surface. If a stale focus
+	// flag survives while the file is closing, the visible bookshelf must not
+	// inherit the reader's fixed/overlay chrome.
+	if (input.focusMode && input.fileOpen) return 'focus';
 	if (input.fileOpen) return 'markdown';
 	if (input.workflowOpen) return 'workflow';
 	return 'library';

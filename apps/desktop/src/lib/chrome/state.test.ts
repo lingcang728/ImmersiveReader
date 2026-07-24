@@ -201,6 +201,24 @@ describe('chrome state machine', () => {
 		).toBe('library');
 	});
 
+	it('never turns the bookshelf into an overlay when focus state is stale', () => {
+		expect(
+			deriveChromeSurface({
+				flowActive: false,
+				focusMode: true,
+				fileOpen: false
+			})
+		).toBe('library');
+		expect(
+			deriveChromeSurface({
+				flowActive: false,
+				focusMode: true,
+				fileOpen: false,
+				workflowOpen: true
+			})
+		).toBe('workflow');
+	});
+
 	it('classifies reading activity keys', () => {
 		expect(isReadingActivityKey('ArrowDown')).toBe(true);
 		expect(isReadingActivityKey('PageUp')).toBe(true);

@@ -788,8 +788,12 @@
 		}
 	}
 
-	$: chromeVisible = chromeState.chromeVisible;
-	$: chromeOverlay = isOverlaySurface(chromeState.surface);
+	// The rendered shell is the final authority: bookshelf/workflow/trash
+	// surfaces always reserve space for the window bar. This second guard keeps
+	// a transient reader state from ever placing the homepage underneath it.
+	$: librarySurface = !flowReaderSession && !$currentFilePath;
+	$: chromeVisible = librarySurface ? true : chromeState.chromeVisible;
+	$: chromeOverlay = !librarySurface && isOverlaySurface(chromeState.surface);
 	$: showMarkdownContext =
 		!!$currentFilePath && !flowReaderSession;
 	$: showFlowContext = !!flowReaderSession;
@@ -4009,6 +4013,7 @@
 	class:editing-in-focus={isEditingInDarkFocus}
 	class:reading-cursor-hidden={readingCursorState.hidden}
 	class:chrome-overlay={chromeOverlay}
+	class:library-surface={librarySurface}
 	class:layout-wide={windowMaximized}
 	role="application"
 >
@@ -4521,6 +4526,15 @@
 		top: 0;
 		left: 0;
 		right: 0;
+	}
+
+	/* Homepage invariant: even if an old overlay class survives a reader
+	   transition, the visible bookshelf still starts below the window bar. */
+	.app.library-surface .chrome-stack {
+		position: relative;
+		top: auto;
+		left: auto;
+		right: auto;
 	}
 
 	.chrome-stack.hidden {
