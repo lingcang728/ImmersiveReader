@@ -517,6 +517,7 @@
 	// document. Re-anchor by reading progress — computed before the change —
 	// and re-align focus mode on the same unit.
 	let lastTypographySignature: string | null = null;
+	let typographyReflowFrame: number | null = null;
 	$: {
 		const signature = `${$fontScale}|${$readingLineHeight}|${$readingWidth}|${$readingFontFamily}`;
 		if (lastTypographySignature === null) {
@@ -528,9 +529,10 @@
 	}
 
 	function reflowAfterTypographyChange() {
-		if (!contentEl) return;
+		if (!contentEl || typographyReflowFrame !== null) return;
 		const progress = readingProgress;
-		requestAnimationFrame(() => {
+		typographyReflowFrame = requestAnimationFrame(() => {
+			typographyReflowFrame = null;
 			if (!contentEl) return;
 			contentEl.scrollTop = progress * Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
 			invalidateFocusMetrics();
@@ -2397,6 +2399,10 @@
 			clearReadingCursorHideTimer();
 			if (zoomIndicatorTimer) {
 				clearTimeout(zoomIndicatorTimer);
+			}
+			if (typographyReflowFrame !== null) {
+				cancelAnimationFrame(typographyReflowFrame);
+				typographyReflowFrame = null;
 			}
 			if (readerPreferencesSaveTimer) {
 				clearTimeout(readerPreferencesSaveTimer);

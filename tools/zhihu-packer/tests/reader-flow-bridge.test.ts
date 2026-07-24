@@ -36,6 +36,26 @@ test("flow font-scale bridge shares clamp range and ctrl-wheel path", () => {
   assert.match(appSource, /e\.ctrlKey/);
 });
 
+test("font scaling coalesces repeated input into one animation-frame reflow", () => {
+  const scaleMethod = appSource.slice(
+    appSource.indexOf("private applyFontScale"),
+    appSource.indexOf("private applyLayoutMode"),
+  );
+  assert.match(scaleMethod, /pendingFontScale/);
+  assert.match(scaleMethod, /fontScaleFrame/);
+  assert.match(scaleMethod, /requestAnimationFrame/);
+  assert.match(scaleMethod, /articleMetricsDirty = true/);
+});
+
+test("scroll tracking uses cached ordered article metrics instead of a full DOM scan per frame", () => {
+  const scrollMethod = appSource.slice(
+    appSource.indexOf("private handleScrollThrottled"),
+    appSource.indexOf("private scheduleSaveCurrentProgress"),
+  );
+  assert.match(scrollMethod, /findArticleIndexAtPosition/);
+  assert.doesNotMatch(scrollMethod, /querySelectorAll/);
+});
+
 test("reader template constrains long paths urls and code inside cards", () => {
   const template = fs.readFileSync(path.resolve("src/reader-template.html"), "utf-8");
   const cardRule = template.match(/\.article-card\s*\{([^}]*)\}/)?.[1] ?? "";

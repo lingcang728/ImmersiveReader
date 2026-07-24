@@ -4,6 +4,10 @@ import { renderMarkdown } from '../core/markdown-renderer.js';
 import { manageImageCache, clearAllImageCache } from '../core/image-resolver.js';
 import { saveReadingProgress, getReadingProgress } from '../core/storage.js';
 import { buildSearchIndex, searchArticles, SearchIndexItem } from '../core/search.js';
+import {
+  findArticleIndexAtPosition,
+  type ArticleMetric,
+} from '../core/article-metrics.js';
 import { buildServedContentUrl } from '../modes/served-mode.js';
 import type { ReaderMode } from '../modes/reader-mode.js';
 
@@ -26,6 +30,11 @@ export class ReaderApp {
   private readonly fontScaleStep = 0.05;
   private fontScaleToast: HTMLElement | null = null;
   private fontScaleToastTimer: number | null = null;
+  private pendingFontScale: number | null = null;
+  private fontScaleFrame: number | null = null;
+  private pendingFontScaleAnchor: { index: number; offsetRatio: number } | null = null;
+  private pendingFontScaleNotify: boolean = false;
+  private pendingFontScaleToast: boolean = false;
   private isSidebarActive: boolean = false;
   private isSearchActive: boolean = false;
   private searchSelectedIndex: number = 0;
@@ -43,6 +52,9 @@ export class ReaderApp {
   private keyboardNavTimer: number | null = null;
   private scrollRaf: number | null = null;
   private saveProgressTimer: number | null = null;
+  private articleMetrics: ArticleMetric[] = [];
+  private articleMetricsDirty: boolean = true;
+  private articleMetricsObserver: ResizeObserver | null = null;
 
   // 转场事务序列号
   private currentTransitionId: number = 0;
@@ -161,6 +173,14 @@ export class ReaderApp {
       card.appendChild(body);
       this.container.appendChild(card);
     });
+    this.articleMetricsDirty = true;
+    this.articleMetricsObserver?.disconnect();
+    if (typeof ResizeObserver !== 'undefined') {
+      this.articleMetricsObserver = new ResizeObserver(() => {
+        this.articleMetricsDirty = true;
+      });
+      this.articleMetricsObserver.observe(this.container);
+    }
 
     // 4. 初次触发渲染当前邻域
     this.lazyRenderNeighborhood();
@@ -377,6 +397,8 @@ export class ReaderApp {
       error.className = 'article-error-placeholder';
       error.textContent = '正文加载失败：文件丢失或读取权限被拒绝。';
       bodyContainer.appendChild(error);
+    } finally {
+      this.articleMetricsDirty = true;
     }
   }
 
@@ -417,6 +439,19 @@ export class ReaderApp {
 
     this.activeIndex = 0;
     return 0;
+  }
+
+  private getArticleMetrics(): readonly ArticleMetric[] {
+    if (!this.articleMetricsDirty) return this.articleMetrics;
+    this.articleMetrics = Array.from(
+      this.container.querySelectorAll<HTMLElement>('.article-card')
+    ).map((card) => ({
+      index: Number(card.dataset.index ?? 0),
+      top: card.offsetTop,
+      bottom: card.offsetTop + card.offsetHeight,
+    }));
+    this.articleMetricsDirty = false;
+    return this.articleMetrics;
   }
 
   private clearReaderMotionClasses() {
@@ -922,19 +957,39 @@ export class ReaderApp {
 
   private applyFontScale(scale: number, options?: { notifyParent?: boolean; showToast?: boolean }) {
     const clamped = this.clampFontScale(scale);
-    const changed = clamped !== this.fontScale;
-    const anchor = changed ? this.captureViewportAnchor() : null;
-    this.fontScale = clamped;
-    document.documentElement.style.setProperty('--p-font-size', `${this.baseFontPx * clamped}px`);
-    if (changed) {
-      requestAnimationFrame(() => this.restoreViewportAnchor(anchor));
+    const queuedScale = this.pendingFontScale ?? this.fontScale;
+    if (clamped === queuedScale) return;
+
+    if (this.fontScaleFrame === null) {
+      this.pendingFontScaleAnchor = this.captureViewportAnchor();
+      this.fontScaleFrame = window.requestAnimationFrame(() => {
+        this.fontScaleFrame = null;
+        const nextScale = this.pendingFontScale ?? this.fontScale;
+        const anchor = this.pendingFontScaleAnchor;
+        const notifyParent = this.pendingFontScaleNotify;
+        const showToast = this.pendingFontScaleToast;
+        this.pendingFontScale = null;
+        this.pendingFontScaleAnchor = null;
+        this.pendingFontScaleNotify = false;
+        this.pendingFontScaleToast = false;
+        if (nextScale === this.fontScale) return;
+
+        this.fontScale = nextScale;
+        document.documentElement.style.setProperty('--p-font-size', `${this.baseFontPx * nextScale}px`);
+        this.articleMetricsDirty = true;
+        window.requestAnimationFrame(() => this.restoreViewportAnchor(anchor));
+        if (showToast) {
+          this.showFontScaleToast(nextScale);
+        }
+        if (notifyParent) {
+          this.postToParent({ type: 'font-scale-change', scale: nextScale });
+        }
+      });
     }
-    if (options?.showToast !== false && changed) {
-      this.showFontScaleToast(clamped);
-    }
-    if (options?.notifyParent && changed) {
-      this.postToParent({ type: 'font-scale-change', scale: clamped });
-    }
+
+    this.pendingFontScale = clamped;
+    this.pendingFontScaleNotify ||= options?.notifyParent === true;
+    this.pendingFontScaleToast ||= options?.showToast !== false;
   }
 
   private applyLayoutMode(wide: boolean, contentMaxWidth: number) {
@@ -945,6 +1000,7 @@ export class ReaderApp {
     const anchor = this.captureViewportAnchor();
     root.style.setProperty('--flow-content-max-width', next);
     root.classList.toggle('layout-wide', wide);
+    this.articleMetricsDirty = true;
     requestAnimationFrame(() => this.restoreViewportAnchor(anchor));
   }
 
@@ -975,27 +1031,11 @@ export class ReaderApp {
 
     // 查找当前视口中线所占主体最长的文章
     const viewportMiddle = window.scrollY + window.innerHeight * 0.4;
-    const cards = Array.from(document.querySelectorAll('.article-card'));
-    
-    let closestIndex = this.getSafeActiveIndex();
-    let minDistance = Infinity;
-
-    for (const card of cards) {
-      const index = parseInt(card.getAttribute('data-index') || '0', 10);
-      const top = (card as HTMLElement).offsetTop;
-      const bottom = top + (card as HTMLElement).offsetHeight;
-
-      if (viewportMiddle >= top && viewportMiddle <= bottom) {
-        closestIndex = index;
-        break;
-      }
-
-      const dist = Math.min(Math.abs(viewportMiddle - top), Math.abs(viewportMiddle - bottom));
-      if (dist < minDistance) {
-        minDistance = dist;
-        closestIndex = index;
-      }
-    }
+    const closestIndex = findArticleIndexAtPosition(
+      this.getArticleMetrics(),
+      viewportMiddle,
+      this.getSafeActiveIndex(),
+    );
 
     if (closestIndex !== this.getSafeActiveIndex()) {
       this.updateActiveArticle(closestIndex);
@@ -1118,7 +1158,8 @@ export class ReaderApp {
   }
 
   private adjustFontSize(direction: number) {
-    this.applyFontScale(this.fontScale + direction * this.fontScaleStep, {
+    const baseScale = this.pendingFontScale ?? this.fontScale;
+    this.applyFontScale(baseScale + direction * this.fontScaleStep, {
       notifyParent: true,
       showToast: true,
     });
