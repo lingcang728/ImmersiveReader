@@ -21,10 +21,14 @@ READER_NAVIGATION_MOCK = (
     "  window.__TAURI_INTERNALS__.invoke = async (command, args) => {\n"
     "    if (command === 'get_book_chapter_path') return 'C:\\\\qa\\\\Library\\\\' + args.chapterId + '.md';\n"
     "    if (command === 'read_markdown_file') {\n"
+    "      const chapterName = args.path.split('\\\\\\\\').pop();\n"
+    "      const paragraphs = chapterName === 'a3.md'\n"
+    "        ? ['Short chapter used to verify held-key chapter boundaries.']\n"
+    "        : Array.from({ length: 80 }, (_, i) =>\n"
+    "            'Paragraph ' + (i + 1) + ' with enough content to make the reader scroll.'\n"
+    "          );\n"
     "      return {\n"
-    "        content: '# QA Reader ' + args.path.split('\\\\\\\\').pop() + '\\\\n\\\\n' + Array.from({ length: 80 }, (_, i) =>\n"
-    "          'Paragraph ' + (i + 1) + ' with enough content to make the reader scroll.'\n"
-    "        ).join('\\\\n\\\\n'),\n"
+    "        content: '# QA Reader ' + chapterName + '\\\\n\\\\n' + paragraphs.join('\\\\n\\\\n'),\n"
     "        encoding: 'utf-8'\n"
     "      };\n"
     "    }\n"
@@ -213,14 +217,91 @@ def main() -> int:
             reader_page.wait_for_function(
                 "() => document.querySelector('.article h1')?.textContent?.includes('a2.md')"
             )
+
+            # Advance to a long fourth chapter, then hold ArrowUp at its start.
+            # The previous chapter is intentionally shorter than the viewport:
+            # repeated keydown events must not cascade through several chapters
+            # before the physical key is released.
+            for chapter_name in ("a3.md", "a4.md"):
+                reader_page.locator(".content").evaluate(
+                    "el => { el.style.scrollBehavior = 'auto'; "
+                    "el.scrollTop = el.scrollHeight - el.clientHeight; }"
+                )
+                reader_page.keyboard.press("ArrowDown")
+                reader_page.wait_for_function(
+                    "(name) => document.querySelector('.article h1')?.textContent?.includes(name)",
+                    arg=chapter_name,
+                )
+            reader_page.locator(".content").evaluate("el => { el.scrollTop = 0; }")
+            reader_page.evaluate(
+                "() => window.dispatchEvent(new KeyboardEvent('keydown', "
+                "{ key: 'ArrowUp', bubbles: true }))"
+            )
+            reader_page.wait_for_function(
+                "() => document.querySelector('.article h1')?.textContent?.includes('a3.md')"
+            )
+            for _ in range(4):
+                reader_page.evaluate(
+                    "() => window.dispatchEvent(new KeyboardEvent('keydown', "
+                    "{ key: 'ArrowUp', repeat: true, bubbles: true }))"
+                )
+                reader_page.wait_for_timeout(120)
+            assert "a3.md" in reader_page.locator(".article h1").inner_text()
+            reader_page.evaluate(
+                "() => window.dispatchEvent(new KeyboardEvent('keyup', "
+                "{ key: 'ArrowUp', bubbles: true }))"
+            )
+
+            # Return to the long chapter and compare vertical repeated input with
+            # the precise horizontal step from the same focus unit.
+            reader_page.locator(".content").evaluate(
+                "el => { el.scrollTop = el.scrollHeight - el.clientHeight; }"
+            )
+            reader_page.keyboard.press("ArrowDown")
+            reader_page.wait_for_function(
+                "() => document.querySelector('.article h1')?.textContent?.includes('a4.md')"
+            )
             reader_page.keyboard.press("F11")
             reader_page.wait_for_function(
                 "() => document.querySelector('.app')?.classList.contains('focus-mode')"
             )
             reader_page.wait_for_timeout(250)
+
+            def focus_snapshot() -> dict[str, object]:
+                return reader_page.evaluate(
+                    """() => ({
+                      focused: Array.from(document.querySelectorAll(
+                        '.article [data-focus-block="true"]'
+                      )).filter((el) => el.style.opacity === '1')
+                        .map((el) => (el.textContent || '').trim()),
+                      scrollTop: document.querySelector('.content')?.scrollTop || 0
+                    })"""
+                )
+
+            reader_page.keyboard.press("ArrowRight")
+            reader_page.wait_for_timeout(500)
+            right_step = focus_snapshot()
+            reader_page.keyboard.press("ArrowLeft")
+            reader_page.wait_for_timeout(500)
+            reader_page.evaluate(
+                "() => window.dispatchEvent(new KeyboardEvent('keydown', "
+                "{ key: 'ArrowDown', repeat: true, bubbles: true }))"
+            )
+            reader_page.wait_for_timeout(160)
+            reader_page.evaluate(
+                "() => window.dispatchEvent(new KeyboardEvent('keyup', "
+                "{ key: 'ArrowDown', bubbles: true }))"
+            )
+            reader_page.wait_for_timeout(500)
+            down_step = focus_snapshot()
+            assert down_step["focused"] == right_step["focused"]
+            assert abs(float(down_step["scrollTop"]) - float(right_step["scrollTop"])) <= 2
+
+            reader_page.keyboard.press("ArrowLeft")
+            reader_page.wait_for_timeout(500)
             reader_page.keyboard.press("ArrowUp")
             reader_page.wait_for_function(
-                "() => document.querySelector('.article h1')?.textContent?.includes('a1.md')"
+                "() => document.querySelector('.article h1')?.textContent?.includes('a3.md')"
             )
             assert "focus-mode" in (reader_page.locator(".app").get_attribute("class") or "")
             reader_page.locator("button.back-btn").dispatch_event("click")
@@ -294,6 +375,12 @@ def main() -> int:
         "chapterCount": 1469,
         "viewports": ["900x700", "1280x800", "1440x900"],
         "states": ["ready", "loading", "empty", "unwritable-with-corrupt-book"],
+        "readerKeyboard": [
+            "ordinary ArrowDown scroll",
+            "held ArrowUp crosses at most one chapter",
+            "focus repeated ArrowDown matches ArrowRight focus step",
+            "focus ArrowUp returns to previous chapter",
+        ],
         "screenshots": screenshots,
         "verifiedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }

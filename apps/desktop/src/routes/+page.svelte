@@ -94,7 +94,9 @@
 		type ReadingCursorState,
 	} from "$lib/reading/cursor";
 	import {
+		createChapterNavigationKeyLatch,
 		readingScrollIntentForKey,
+		resolveFocusStep,
 		resolveReadingScroll,
 		type ReadingScrollIntent,
 	} from "$lib/reading/navigation";
@@ -230,16 +232,11 @@
 	let focusUpdateFrame: number | null = null;
 	let queuedFocusIndex: number | undefined;
 	let isFocusScrollActive = false;
-	let isFocusKeyScrollActive = false;
 	let focusScrollEndTimer: ReturnType<typeof setTimeout> | null = null;
 	let focusLockedIndex: number | null = null;
 	let focusProgrammaticScrollIndex: number | null = null;
 	let focusProgrammaticScrollTarget: number | null = null;
 	let focusProgrammaticScrollTimer: ReturnType<typeof setTimeout> | null = null;
-	let focusKeyScrollDirection: -1 | 0 | 1 = 0;
-	let focusKeyScrollFrame: number | null = null;
-	let focusKeyScrollLastTime = 0;
-	let focusInlineScrollBehavior: string | null = null;
 	let searchMatchBlocks = new Set<HTMLElement>();
 	let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let saveStateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -316,6 +313,8 @@
 	let selectedBookDetail: BookDetail | null = null;
 	let activeChapterIndex = -1;
 	let chapterSwitching = false;
+	let chapterNavigationPending = false;
+	const chapterNavigationKeyLatch = createChapterNavigationKeyLatch();
 	let preloadedChapter: {
 		bookId: string;
 		index: number;
@@ -817,10 +816,6 @@
 	const FOCUS_SPOTLIGHT_MAX_RATIO = 0.62;
 	const FOCUS_SPOTLIGHT_MIN = 48;
 	const FOCUS_PROGRAMMATIC_SCROLL_SETTLE_MS = 180;
-	const FOCUS_KEY_SCROLL_RATIO = 1.26;
-	const FOCUS_KEY_SCROLL_MIN_SPEED = 780;
-	const FOCUS_KEY_SCROLL_MAX_SPEED = 1260;
-	const FOCUS_KEY_SCROLL_MAX_FRAME_MS = 32;
 	const ARTICLE_LINK_OPEN_DELAY_MS = 240;
 	let focusEdgeSpace = 0;
 	let focusWheelDelta = 0;
@@ -1479,14 +1474,24 @@
 	}
 
 	async function navigateBookChapter(direction: -1 | 1) {
-		if (!activeBook || chapterSwitching) return;
-		const targetIndex = activeChapterIndex + direction;
-		const target = activeBook.manifest.chapters[targetIndex];
-		if (!target) {
-			if (direction > 0) await persistActiveBookProgress(true);
-			return;
+		if (!activeBook || chapterSwitching || chapterNavigationPending) return;
+		chapterNavigationPending = true;
+		try {
+			const targetIndex = activeChapterIndex + direction;
+			const target = activeBook.manifest.chapters[targetIndex];
+			if (!target) {
+				if (direction > 0) await persistActiveBookProgress(true);
+				return;
+			}
+			await openBookChapter(targetIndex, direction > 0 ? 0 : 1, direction > 0);
+		} finally {
+			chapterNavigationPending = false;
 		}
-		await openBookChapter(targetIndex, direction > 0 ? 0 : 1, direction > 0);
+	}
+
+	function navigateBookChapterFromKey(key: string, direction: -1 | 1) {
+		if (!chapterNavigationKeyLatch.tryLatch(key)) return;
+		void navigateBookChapter(direction);
 	}
 
 	async function returnToBookshelf() {
@@ -1511,7 +1516,7 @@
 	function resetReaderSurfaceForBookshelf() {
 		clearFocusStyles();
 		clearFocusScrollActive();
-		setFocusImmediateScrollMode(false);
+		chapterNavigationKeyLatch.reset();
 		if (focusUpdateFrame !== null) {
 			cancelAnimationFrame(focusUpdateFrame);
 			focusUpdateFrame = null;
@@ -1545,7 +1550,6 @@
 	function clearFocusScrollActive() {
 		isFocusScrollActive = false;
 		focusLockedIndex = null;
-		stopFocusKeyScroll({ restoreStyles: false });
 		clearProgrammaticFocusScrollLock();
 		if (focusScrollEndTimer) {
 			clearTimeout(focusScrollEndTimer);
@@ -1597,111 +1601,6 @@
 
 	function getScheduledFocusIndex() {
 		return focusProgrammaticScrollIndex ?? focusLockedIndex ?? undefined;
-	}
-
-	function getFocusKeyScrollSpeed() {
-		if (!contentEl) return FOCUS_KEY_SCROLL_MIN_SPEED;
-		return Math.max(
-			FOCUS_KEY_SCROLL_MIN_SPEED,
-			Math.min(FOCUS_KEY_SCROLL_MAX_SPEED, contentEl.clientHeight * FOCUS_KEY_SCROLL_RATIO),
-		);
-	}
-
-	function setFocusImmediateScrollMode(enabled: boolean) {
-		if (!contentEl) return;
-		if (enabled) {
-			if (focusInlineScrollBehavior === null) {
-				focusInlineScrollBehavior = contentEl.style.scrollBehavior;
-			}
-			contentEl.style.scrollBehavior = "auto";
-			return;
-		}
-
-		if (focusInlineScrollBehavior !== null) {
-			contentEl.style.scrollBehavior = focusInlineScrollBehavior;
-			focusInlineScrollBehavior = null;
-		}
-	}
-
-	function activateFocusKeyReadableMode() {
-		const wasActive = isFocusKeyScrollActive;
-		isFocusKeyScrollActive = true;
-		setFocusImmediateScrollMode(true);
-		if (!wasActive) {
-			scheduleFocusUpdate();
-		}
-	}
-
-	function deactivateFocusKeyReadableMode({ restoreStyles = true }: { restoreStyles?: boolean } = {}) {
-		const wasActive = isFocusKeyScrollActive;
-		isFocusKeyScrollActive = false;
-		setFocusImmediateScrollMode(false);
-		if (wasActive && restoreStyles && $focusMode) {
-			scheduleFocusUpdate();
-		}
-	}
-
-	function startFocusKeyScroll(direction: -1 | 1) {
-		if (!contentEl || !$focusMode) return;
-
-		if (focusKeyScrollDirection !== direction) {
-			focusKeyScrollDirection = direction;
-			focusKeyScrollLastTime = 0;
-		}
-
-		clearProgrammaticFocusScrollLock();
-		focusLockedIndex = null;
-		markFocusScrollActive();
-		activateFocusKeyReadableMode();
-
-		if (focusKeyScrollFrame === null) {
-			focusKeyScrollFrame = requestAnimationFrame(stepFocusKeyScroll);
-		}
-	}
-
-	function stopFocusKeyScroll({ restoreStyles = true }: { restoreStyles?: boolean } = {}) {
-		const wasActive = isFocusKeyScrollActive;
-		if (focusKeyScrollFrame !== null) {
-			cancelAnimationFrame(focusKeyScrollFrame);
-			focusKeyScrollFrame = null;
-		}
-		focusKeyScrollDirection = 0;
-		focusKeyScrollLastTime = 0;
-		deactivateFocusKeyReadableMode({ restoreStyles: restoreStyles && wasActive });
-	}
-
-	function stepFocusKeyScroll(timestamp: number) {
-		focusKeyScrollFrame = null;
-		if (!contentEl || !$focusMode || focusKeyScrollDirection === 0) {
-			stopFocusKeyScroll();
-			return;
-		}
-
-		const elapsedMs = focusKeyScrollLastTime === 0
-			? 16
-			: Math.min(timestamp - focusKeyScrollLastTime, FOCUS_KEY_SCROLL_MAX_FRAME_MS);
-		focusKeyScrollLastTime = timestamp;
-
-		const maxScrollTop = Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
-		const currentScrollTop = contentEl.scrollTop;
-		const delta = focusKeyScrollDirection * getFocusKeyScrollSpeed() * (elapsedMs / 1000);
-		const nextScrollTop = Math.max(0, Math.min(maxScrollTop, currentScrollTop + delta));
-
-		if (Math.abs(nextScrollTop - currentScrollTop) < 0.5) {
-			const direction = focusKeyScrollDirection;
-			stopFocusKeyScroll();
-			if (direction > 0) {
-				void advanceBookChapter();
-			} else if (direction < 0) {
-				void retreatBookChapter();
-			}
-			return;
-		}
-
-		contentEl.scrollTop = nextScrollTop;
-		markFocusScrollActive();
-
-		focusKeyScrollFrame = requestAnimationFrame(stepFocusKeyScroll);
 	}
 
 	function scheduleFocusUpdate(preferredIdx?: number) {
@@ -1853,35 +1752,19 @@
 			}
 
 			if ($currentFilePath && $focusMode && !e.ctrlKey && !e.metaKey && !e.altKey && !isTextInputTarget(e.target)) {
-				// Short taps move block-by-block; OS key repeat scrolls continuously.
-				if (e.key === "ArrowUp") {
+				const focusDirection =
+					e.key === "ArrowUp" || e.key === "ArrowLeft"
+						? -1
+						: e.key === "ArrowDown" || e.key === "ArrowRight"
+							? 1
+							: null;
+				if (focusDirection !== null) {
 					e.preventDefault();
-					if (e.repeat) {
-						startFocusKeyScroll(-1);
-					} else {
-						stopFocusKeyScroll();
-						moveFocus(-1);
+					if (chapterNavigationKeyLatch.isLatched(e.key)) return;
+					const chapterDirection = moveFocus(focusDirection);
+					if (chapterDirection !== null) {
+						navigateBookChapterFromKey(e.key, chapterDirection);
 					}
-					return;
-				}
-				if (e.key === "ArrowDown") {
-					e.preventDefault();
-					if (e.repeat) {
-						startFocusKeyScroll(1);
-					} else {
-						stopFocusKeyScroll();
-						moveFocus(1);
-					}
-					return;
-				}
-				if (e.key === "ArrowLeft") {
-					e.preventDefault();
-					moveFocus(-1);
-					return;
-				}
-				if (e.key === "ArrowRight") {
-					e.preventDefault();
-					moveFocus(1);
 					return;
 				}
 			}
@@ -1902,7 +1785,8 @@
 				const intent = readingScrollIntentForKey(e.key, e.shiftKey);
 				if (intent) {
 					e.preventDefault();
-					handleReadingScrollIntent(intent);
+					if (chapterNavigationKeyLatch.isLatched(e.key)) return;
+					handleReadingScrollIntent(intent, e.key);
 					return;
 				}
 			}
@@ -1940,13 +1824,11 @@
 		};
 
 		const handleKeyup = (e: KeyboardEvent) => {
-			if ((e.key === "ArrowUp" || e.key === "ArrowDown") && focusKeyScrollDirection !== 0) {
-				stopFocusKeyScroll();
-			}
+			chapterNavigationKeyLatch.release(e.key);
 		};
 
 		const handleWindowBlur = () => {
-			stopFocusKeyScroll();
+			chapterNavigationKeyLatch.reset();
 		};
 
 		const handleScroll = () => {
@@ -2044,7 +1926,10 @@
 
 			const stepDirection = focusWheelDelta > 0 ? 1 : -1;
 			focusWheelDelta = 0;
-			moveFocus(stepDirection);
+			const chapterDirection = moveFocus(stepDirection);
+			if (chapterDirection !== null) {
+				void navigateBookChapter(chapterDirection);
+			}
 		};
 
 		const clearPodcastSelectionReveal = () => {
@@ -2512,7 +2397,6 @@
 			void tick().then(() => renderMermaidBlocks());
 
 			// Reset focus state when file changes
-			stopFocusKeyScroll({ restoreStyles: false });
 			lastFocusedIdx = -1;
 			focusLockedIndex = null;
 			spotlightHeight = 100;
@@ -3578,7 +3462,7 @@
 	}
 
 	function applyFocusStyles(units: FocusUnit[], hitIdx: number) {
-		const signature = `${hitIdx}|${currentMatchIndex}|${searchMatchBlocks.size}|${$currentTheme.name}|${isFocusKeyScrollActive}`;
+		const signature = `${hitIdx}|${currentMatchIndex}|${searchMatchBlocks.size}|${$currentTheme.name}`;
 		if (signature === lastFocusRenderSignature) {
 			lastFocusedIdx = hitIdx;
 			return;
@@ -3656,29 +3540,7 @@
 				continue;
 			}
 
-			if (isFocusKeyScrollActive) {
-				const blur = dist === 1
-					? 0.3
-					: dist === 2
-						? 0.6
-						: dist === 3
-							? 0.9
-							: Math.min(1.2 + (dist - 3) * 0.25, 2.8);
-				const opacity = dist === 1
-					? 0.86
-					: dist === 2
-						? 0.74
-						: dist === 3
-							? 0.62
-							: Math.max(0.32, 0.54 - (dist - 3) * 0.035);
-				applyStylesToUnit(unit, {
-					filter: `blur(${blur}px)`,
-					opacity: `${opacity}`,
-					transform: "none",
-					textShadow: "none",
-					color: "",
-				});
-			} else if (dist === 1) {
+			if (dist === 1) {
 				applyStylesToUnit(unit, {
 					filter: "blur(2.5px)",
 					opacity: "0.2",
@@ -3731,29 +3593,25 @@
 		applyFocusStyles(units, hitIdx);
 	}
 
-	function moveFocus(direction: number) {
+	function moveFocus(direction: -1 | 1): -1 | 1 | null {
 		const units = getFocusUnits();
-		if (units.length === 0) return;
+		if (units.length === 0) return null;
 
 		const baseIdx = lastFocusedIdx >= 0 ? lastFocusedIdx : getClosestFocusIndex(units);
-		const requestedIdx = baseIdx + direction;
-		if (requestedIdx < 0) {
-			void retreatBookChapter();
-			return;
+		const resolution = resolveFocusStep(baseIdx, units.length, direction);
+		if (resolution.type === "chapter") {
+			return resolution.direction;
 		}
-		if (requestedIdx >= units.length) {
-			void advanceBookChapter();
-			return;
-		}
-		const nextIdx = clampFocusIndex(requestedIdx, units.length);
+		const nextIdx = resolution.index;
 		focusLockedIndex = nextIdx;
 		markFocusScrollActive();
 		updateFocusParagraph(nextIdx);
 		scrollUnitToFocusPosition(units[nextIdx], nextIdx);
 		updateSpotlightPosition();
+		return null;
 	}
 
-	function handleReadingScrollIntent(intent: ReadingScrollIntent) {
+	function handleReadingScrollIntent(intent: ReadingScrollIntent, key: string) {
 		if (!contentEl) return;
 		const resolution = resolveReadingScroll(intent, {
 			scrollTop: contentEl.scrollTop,
@@ -3761,11 +3619,7 @@
 			clientHeight: contentEl.clientHeight,
 		});
 		if (resolution.type === "chapter") {
-			if (resolution.direction > 0) {
-				void advanceBookChapter();
-			} else {
-				void retreatBookChapter();
-			}
+			navigateBookChapterFromKey(key, resolution.direction);
 			return;
 		}
 		contentEl.scrollTo({ top: resolution.top, behavior: "smooth" });
@@ -4151,7 +4005,6 @@
 	class="app"
 	class:focus-mode={$focusMode}
 	class:focus-scroll-active={isFocusScrollActive}
-	class:focus-key-scroll-active={isFocusKeyScrollActive}
 	class:is-light-theme={isLightTheme}
 	class:editing-in-focus={isEditingInDarkFocus}
 	class:reading-cursor-hidden={readingCursorState.hidden}
@@ -5398,11 +5251,6 @@
 			opacity 0.4s ease,
 			color 0.4s ease,
 			text-shadow 0.4s ease;
-	}
-	.focus-key-scroll-active :global(.article [data-focus-near="true"]),
-	.focus-key-scroll-active :global([data-focus-near="true"] > td),
-	.focus-key-scroll-active :global([data-focus-near="true"] > th) {
-		transition: none;
 	}
 	.focus-mode :global(.article pre) {
 		background: transparent;

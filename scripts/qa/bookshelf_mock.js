@@ -31,7 +31,9 @@
           updatedAt: '2026-07-10T08:13:00Z',
           chapters: [
             { id: 'a1', path: '001.md', title: '第一篇回答', date: '2026-07-10', voteCount: 12, wordCount: 420 },
-            { id: 'a2', path: '002.md', title: '第二篇回答', date: '2026-07-10', voteCount: 8, wordCount: 280 }
+            { id: 'a2', path: '002.md', title: '第二篇回答', date: '2026-07-10', voteCount: 8, wordCount: 280 },
+            { id: 'a3', path: '003.md', title: '第三篇短回答', date: '2026-07-10', voteCount: 5, wordCount: 20 },
+            { id: 'a4', path: '004.md', title: '第四篇回答', date: '2026-07-10', voteCount: 9, wordCount: 360 }
           ]
         },
         progress: { schemaVersion: 1, current: 'a1', position: 0.42, read: [], updated: '2026-07-10T08:13:00Z' },
