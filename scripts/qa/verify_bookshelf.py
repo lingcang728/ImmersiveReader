@@ -19,10 +19,10 @@ READER_NAVIGATION_MOCK = (
     "(() => {\n"
     "  const baseInvoke = window.__TAURI_INTERNALS__.invoke;\n"
     "  window.__TAURI_INTERNALS__.invoke = async (command, args) => {\n"
-    "    if (command === 'get_book_chapter_path') return 'C:\\\\qa\\\\Library\\\\001.md';\n"
+    "    if (command === 'get_book_chapter_path') return 'C:\\\\qa\\\\Library\\\\' + args.chapterId + '.md';\n"
     "    if (command === 'read_markdown_file') {\n"
     "      return {\n"
-    "        content: '# QA Reader\\\\n\\\\n' + Array.from({ length: 80 }, (_, i) =>\n"
+    "        content: '# QA Reader ' + args.path.split('\\\\\\\\').pop() + '\\\\n\\\\n' + Array.from({ length: 80 }, (_, i) =>\n"
     "          'Paragraph ' + (i + 1) + ' with enough content to make the reader scroll.'\n"
     "        ).join('\\\\n\\\\n'),\n"
     "        encoding: 'utf-8'\n"
@@ -184,10 +184,45 @@ def main() -> int:
             reader_page.add_init_script(MOCK_SCRIPT)
             reader_page.add_init_script(READER_NAVIGATION_MOCK)
             reader_page.goto(f"{ORIGIN}/?state=ready", wait_until="networkidle")
+            for _ in range(10):
+                reader_page.keyboard.press("Control+=")
+            reader_page.wait_for_timeout(350)
+            persisted_scale = reader_page.evaluate(
+                "() => JSON.parse(sessionStorage.getItem('qa.reader-preferences') || '{}').fontScale"
+            )
+            assert persisted_scale == 1.5
+            reader_page.evaluate("() => localStorage.clear()")
+            reader_page.reload(wait_until="networkidle")
+            reader_page.wait_for_selector(".book-card")
+            restored_scale = reader_page.evaluate(
+                "() => getComputedStyle(document.documentElement).getPropertyValue('--font-scale').trim()"
+            )
+            assert restored_scale == "1.5"
             reader_page.get_by_role("button", name="精读").first.click()
             reader_page.wait_for_selector(".article")
-            reader_page.get_by_role("button", name="专注模式").dispatch_event("click")
+            initial_scroll = reader_page.locator(".content").evaluate("el => el.scrollTop")
+            reader_page.keyboard.press("ArrowDown")
+            reader_page.wait_for_timeout(180)
+            assert reader_page.locator(".content").evaluate("el => el.scrollTop") > initial_scroll
+            reader_page.locator(".content").evaluate(
+                "el => { el.style.scrollBehavior = 'auto'; "
+                "el.scrollTop = el.scrollHeight - el.clientHeight; }"
+            )
+            reader_page.wait_for_timeout(50)
+            reader_page.keyboard.press("ArrowDown")
+            reader_page.wait_for_function(
+                "() => document.querySelector('.article h1')?.textContent?.includes('a2.md')"
+            )
+            reader_page.keyboard.press("F11")
+            reader_page.wait_for_function(
+                "() => document.querySelector('.app')?.classList.contains('focus-mode')"
+            )
             reader_page.wait_for_timeout(250)
+            reader_page.keyboard.press("ArrowUp")
+            reader_page.wait_for_function(
+                "() => document.querySelector('.article h1')?.textContent?.includes('a1.md')"
+            )
+            assert "focus-mode" in (reader_page.locator(".app").get_attribute("class") or "")
             reader_page.locator("button.back-btn").dispatch_event("click")
             reader_page.wait_for_selector(".bookshelf")
             reader_page.locator(".bs-body").evaluate(

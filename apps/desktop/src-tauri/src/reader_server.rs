@@ -257,6 +257,13 @@ mod tests {
         assert!(request(&service.origin, "/s/invalid/manifest", "", "").starts_with("HTTP/1.1 403"));
         assert!(request(
             &service.origin,
+            &format!("/s/{token}/heartbeat"),
+            "",
+            ""
+        )
+        .starts_with("HTTP/1.1 204"));
+        assert!(request(
+            &service.origin,
             &format!("/s/{token}/content/%2e%2e/settings.json"),
             "",
             ""

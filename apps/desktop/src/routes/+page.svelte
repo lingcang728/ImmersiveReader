@@ -40,7 +40,9 @@
 		clampFontScale,
 		FONT_SCALE_STEP,
 		readingLineHeight,
+		READING_LINE_HEIGHTS,
 		readingWidth,
+		READING_WIDTHS,
 		readingFontFamily,
 		autoFocusMode,
 	} from "$lib/stores/app";
@@ -323,6 +325,21 @@
 	} | null = null;
 	let zoomIndicatorText = "";
 	let zoomIndicatorTimer: ReturnType<typeof setTimeout> | null = null;
+	type DurableReaderPreferences = {
+		schemaVersion: 1;
+		fontScale: number;
+		lineHeight: number;
+		contentWidth: number;
+		fontFamily: "sans" | "serif";
+	};
+	type DurableReaderPreferencesLoad = {
+		preferences: DurableReaderPreferences;
+		storeExists: boolean;
+	};
+	let readerPreferencesHydrated = false;
+	let readerPreferencesBackendAvailable = false;
+	let readerPreferencesSaveTimer: ReturnType<typeof setTimeout> | null = null;
+	let lastReaderPreferencesSignature = "";
 
 	$: acquisitionTasks = taskList(taskSyncState);
 
@@ -428,6 +445,72 @@
 
 	function adjustFontScale(direction: number) {
 		setFontScale($fontScale + direction * FONT_SCALE_STEP);
+	}
+
+	function currentReaderPreferences(): DurableReaderPreferences {
+		return {
+			schemaVersion: 1,
+			fontScale: clampFontScale($fontScale),
+			lineHeight: $readingLineHeight,
+			contentWidth: $readingWidth,
+			fontFamily: $readingFontFamily,
+		};
+	}
+
+	async function saveDurableReaderPreferences() {
+		if (!readerPreferencesBackendAvailable) return;
+		try {
+			await invoke("save_reader_preferences", {
+				preferences: currentReaderPreferences(),
+			});
+		} catch (error) {
+			console.warn("Unable to save durable reader preferences.", error);
+		}
+	}
+
+	function scheduleDurableReaderPreferencesSave() {
+		if (!readerPreferencesHydrated || !readerPreferencesBackendAvailable) return;
+		if (readerPreferencesSaveTimer) clearTimeout(readerPreferencesSaveTimer);
+		readerPreferencesSaveTimer = setTimeout(() => {
+			readerPreferencesSaveTimer = null;
+			void saveDurableReaderPreferences();
+		}, 180);
+	}
+
+	async function hydrateDurableReaderPreferences() {
+		try {
+			const loaded = await invoke<DurableReaderPreferencesLoad>("load_reader_preferences");
+			readerPreferencesBackendAvailable = true;
+			if (loaded.storeExists) {
+				const preferences = loaded.preferences;
+				$fontScale = clampFontScale(preferences.fontScale);
+				if ((READING_LINE_HEIGHTS as readonly number[]).includes(preferences.lineHeight)) {
+					$readingLineHeight = preferences.lineHeight;
+				}
+				if ((READING_WIDTHS as readonly number[]).includes(preferences.contentWidth)) {
+					$readingWidth = preferences.contentWidth;
+				}
+				if (preferences.fontFamily === "sans" || preferences.fontFamily === "serif") {
+					$readingFontFamily = preferences.fontFamily;
+				}
+			}
+			readerPreferencesHydrated = true;
+			lastReaderPreferencesSignature = `${$fontScale}|${$readingLineHeight}|${$readingWidth}|${$readingFontFamily}`;
+			if (!loaded.storeExists) {
+				await saveDurableReaderPreferences();
+			}
+		} catch (error) {
+			readerPreferencesHydrated = true;
+			console.warn("Unable to load durable reader preferences; using WebView fallback.", error);
+		}
+	}
+
+	$: {
+		const signature = `${$fontScale}|${$readingLineHeight}|${$readingWidth}|${$readingFontFamily}`;
+		if (readerPreferencesHydrated && signature !== lastReaderPreferencesSignature) {
+			lastReaderPreferencesSignature = signature;
+			scheduleDurableReaderPreferencesSave();
+		}
 	}
 
 	// Any typography change (zoom, line height, width, font) reflows the whole
@@ -2200,6 +2283,7 @@
 		void loadRecentFiles().then((files) => {
 			recentFiles = files;
 		});
+		void hydrateDurableReaderPreferences();
 
 		// 外部变更自动重载：每 2s 轮询当前文件 mtime；
 		// 内容与内存一致（如刚由本应用保存）或正在编辑时不打断。
@@ -2313,6 +2397,11 @@
 			clearReadingCursorHideTimer();
 			if (zoomIndicatorTimer) {
 				clearTimeout(zoomIndicatorTimer);
+			}
+			if (readerPreferencesSaveTimer) {
+				clearTimeout(readerPreferencesSaveTimer);
+				readerPreferencesSaveTimer = null;
+				void saveDurableReaderPreferences();
 			}
 			if (statusLineTimer) {
 				clearTimeout(statusLineTimer);

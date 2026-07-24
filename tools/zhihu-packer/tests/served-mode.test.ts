@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildServedContentUrl, manifestToArticles } from '../src/reader/modes/served-mode.ts';
+import {
+  buildServedContentUrl,
+  buildServedHeartbeatUrl,
+  manifestToArticles,
+  SERVED_SESSION_HEARTBEAT_MS,
+} from '../src/reader/modes/served-mode.ts';
 
 test('served metadata preserves manifest order for a 379 chapter book', () => {
   const chapters = Array.from({ length: 379 }, (_, index) => ({
@@ -30,4 +35,9 @@ test('served content URLs encode every relative path segment', () => {
     buildServedContentUrl('/s/token/content', 'assets/封 面.png'),
     '/s/token/content/assets/%E5%B0%81%20%E9%9D%A2.png',
   );
+});
+
+test('served sessions use a frequent same-origin heartbeat', () => {
+  assert.equal(buildServedHeartbeatUrl('/s/token'), '/s/token/heartbeat');
+  assert.ok(SERVED_SESSION_HEARTBEAT_MS < 30 * 60 * 1000);
 });

@@ -10,7 +10,7 @@ use tiny_http::{Header, Method, Request, Response, ResponseBox, StatusCode};
 
 const MAX_PROGRESS_BODY: usize = 64 * 1024;
 pub(crate) const MAX_READER_SESSIONS: usize = 16;
-pub(crate) const READER_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+pub(crate) const READER_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone)]
 pub struct ReaderSession {
@@ -248,6 +248,7 @@ pub fn handle(mut request: Request, origin: &str, sessions: &Sessions, reader_ht
                 Err(error) => response(500, error, "text/plain; charset=utf-8"),
             }
         }
+        (&Method::Get, "heartbeat") => response(204, Vec::new(), "text/plain; charset=utf-8"),
         (&Method::Put, "progress") => progress_put(&mut request, origin, &session),
         (&Method::Get, value) if value.starts_with("content/") => {
             content_response(&session, value.trim_start_matches("content/"))
@@ -283,7 +284,8 @@ mod tests {
             "../../../../packages/contracts/fixtures/manifest.valid.json"
         ))
         .expect("fixture must deserialize");
-        let now = Instant::now();
+        let inserted_at = Instant::now();
+        let now = inserted_at + READER_SESSION_TTL + std::time::Duration::from_secs(1);
         let mut sessions = HashMap::new();
         sessions.insert(
             "expired".to_string(),
@@ -292,7 +294,7 @@ mod tests {
                     book_root: PathBuf::from("book"),
                     manifest,
                 },
-                now - READER_SESSION_TTL - std::time::Duration::from_secs(1),
+                inserted_at,
             ),
         );
         prune_expired_sessions(&mut sessions, now);

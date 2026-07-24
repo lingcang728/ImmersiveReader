@@ -72,6 +72,23 @@
       };
     }
     if (command === 'load_recent_files') return { json: '[]', store_exists: true };
+    if (command === 'load_reader_preferences') {
+      const raw = sessionStorage.getItem('qa.reader-preferences');
+      return {
+        preferences: raw ? JSON.parse(raw) : {
+          schemaVersion: 1,
+          fontScale: 1,
+          lineHeight: 1.8,
+          contentWidth: 760,
+          fontFamily: 'sans'
+        },
+        storeExists: raw !== null
+      };
+    }
+    if (command === 'save_reader_preferences') {
+      sessionStorage.setItem('qa.reader-preferences', JSON.stringify(args?.preferences));
+      return null;
+    }
     if (command === 'get_storage_locations') {
       return {
         channel: 'qa',

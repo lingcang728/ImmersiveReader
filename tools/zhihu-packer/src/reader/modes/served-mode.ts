@@ -9,6 +9,8 @@ export interface ServedModeData {
   mode: ReaderMode;
 }
 
+export const SERVED_SESSION_HEARTBEAT_MS = 2 * 60 * 1000;
+
 export function buildServedContentUrl(base: string, relativePath: string): string {
   const encoded = relativePath.split('/').map((segment) => encodeURIComponent(segment)).join('/');
   return `${base.replace(/\/$/, '')}/${encoded}`;
@@ -43,10 +45,33 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return await response.json() as T;
 }
 
+export function buildServedHeartbeatUrl(base: string): string {
+  return `${base.replace(/\/$/, '')}/heartbeat`;
+}
+
+function keepServedSessionAlive(base: string): void {
+  const heartbeatUrl = buildServedHeartbeatUrl(base);
+  const heartbeat = () => {
+    void fetch(heartbeatUrl, { cache: 'no-store' }).catch((error) => {
+      console.warn('连读会话保活失败，将在下次周期重试:', error);
+    });
+  };
+  const timer = window.setInterval(heartbeat, SERVED_SESSION_HEARTBEAT_MS);
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === 'visible') heartbeat();
+  };
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  window.addEventListener('pagehide', () => {
+    window.clearInterval(timer);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, { once: true });
+}
+
 export async function loadServedMode(pathname = window.location.pathname): Promise<ServedModeData | null> {
   const base = sessionBase(pathname);
   if (!base) return null;
   const manifest = await fetchJson<BookManifest>(`${base}/manifest`);
+  keepServedSessionAlive(base);
   document.title = `${manifest.title} - 沉浸阅读`;
   const mode: ReaderMode = {
     kind: 'served',

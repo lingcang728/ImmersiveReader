@@ -24,6 +24,7 @@ pub mod podcast;
 mod progress;
 pub mod publish;
 mod reader_http;
+mod reader_preferences;
 mod reader_server;
 mod secrets;
 mod settings;
@@ -379,6 +380,18 @@ fn save_recent_files(json: String) -> Result<String, String> {
     let (cleaned, _) = cleanup_recent_files_json(&json, &dir);
     atomic_write_file(&path, cleaned.as_bytes())?;
     Ok(cleaned)
+}
+
+#[tauri::command]
+fn load_reader_preferences() -> Result<reader_preferences::ReaderPreferencesLoad, String> {
+    reader_preferences::load()
+}
+
+#[tauri::command]
+fn save_reader_preferences(
+    preferences: reader_preferences::ReaderPreferences,
+) -> Result<(), String> {
+    reader_preferences::save(&preferences)
 }
 
 #[tauri::command]
@@ -1142,6 +1155,8 @@ pub fn run() {
             save_reading_state,
             load_recent_files,
             save_recent_files,
+            load_reader_preferences,
+            save_reader_preferences,
             delete_reading_state,
             markdown_file_exists,
             get_app_settings,
