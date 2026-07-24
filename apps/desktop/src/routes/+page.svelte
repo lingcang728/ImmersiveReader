@@ -91,6 +91,11 @@
 		type ReadingCursorEvent,
 		type ReadingCursorState,
 	} from "$lib/reading/cursor";
+	import {
+		readingScrollIntentForKey,
+		resolveReadingScroll,
+		type ReadingScrollIntent,
+	} from "$lib/reading/navigation";
 
 	let contentEl: HTMLElement;
 	let tocItems: TocItem[] = [];
@@ -1381,14 +1386,22 @@
 	}
 
 	async function advanceBookChapter() {
+		await navigateBookChapter(1);
+	}
+
+	async function retreatBookChapter() {
+		await navigateBookChapter(-1);
+	}
+
+	async function navigateBookChapter(direction: -1 | 1) {
 		if (!activeBook || chapterSwitching) return;
-		const nextIndex = activeChapterIndex + 1;
-		const next = activeBook.manifest.chapters[nextIndex];
-		if (!next) {
-			await persistActiveBookProgress(true);
+		const targetIndex = activeChapterIndex + direction;
+		const target = activeBook.manifest.chapters[targetIndex];
+		if (!target) {
+			if (direction > 0) await persistActiveBookProgress(true);
 			return;
 		}
-		await openBookChapter(nextIndex, 0, true);
+		await openBookChapter(targetIndex, direction > 0 ? 0 : 1, direction > 0);
 	}
 
 	async function returnToBookshelf() {
@@ -1590,7 +1603,13 @@
 		const nextScrollTop = Math.max(0, Math.min(maxScrollTop, currentScrollTop + delta));
 
 		if (Math.abs(nextScrollTop - currentScrollTop) < 0.5) {
+			const direction = focusKeyScrollDirection;
 			stopFocusKeyScroll();
+			if (direction > 0) {
+				void advanceBookChapter();
+			} else if (direction < 0) {
+				void retreatBookChapter();
+			}
 			return;
 		}
 
@@ -1782,6 +1801,27 @@
 				}
 			}
 
+			if (
+				$currentFilePath &&
+				!$focusMode &&
+				!editingParagraph &&
+				!$searchOpen &&
+				!$tocOpen &&
+				!$settingsOpen &&
+				!lightboxSrc &&
+				!e.ctrlKey &&
+				!e.metaKey &&
+				!e.altKey &&
+				!isTextInputTarget(e.target)
+			) {
+				const intent = readingScrollIntentForKey(e.key, e.shiftKey);
+				if (intent) {
+					e.preventDefault();
+					handleReadingScrollIntent(intent);
+					return;
+				}
+			}
+
 			if ($searchOpen && e.key === "Enter") {
 				e.preventDefault();
 				if (e.shiftKey) {
@@ -1877,11 +1917,16 @@
 			if ($currentFilePath || flowReaderSession) {
 				noteReadingActivity();
 			}
-			if (contentEl && activeBook && !$focusMode && e.deltaY > 0) {
+			if (contentEl && activeBook && !$focusMode && Math.abs(e.deltaY) > 0.01) {
 				const remaining = contentEl.scrollHeight - contentEl.clientHeight - contentEl.scrollTop;
-				if (remaining <= 1) {
+				if (e.deltaY > 0 && remaining <= 1) {
 					e.preventDefault();
 					void advanceBookChapter();
+					return;
+				}
+				if (e.deltaY < 0 && contentEl.scrollTop <= 1) {
+					e.preventDefault();
+					void retreatBookChapter();
 					return;
 				}
 			}
@@ -3596,12 +3641,39 @@
 		if (units.length === 0) return;
 
 		const baseIdx = lastFocusedIdx >= 0 ? lastFocusedIdx : getClosestFocusIndex(units);
-		const nextIdx = clampFocusIndex(baseIdx + direction, units.length);
+		const requestedIdx = baseIdx + direction;
+		if (requestedIdx < 0) {
+			void retreatBookChapter();
+			return;
+		}
+		if (requestedIdx >= units.length) {
+			void advanceBookChapter();
+			return;
+		}
+		const nextIdx = clampFocusIndex(requestedIdx, units.length);
 		focusLockedIndex = nextIdx;
 		markFocusScrollActive();
 		updateFocusParagraph(nextIdx);
 		scrollUnitToFocusPosition(units[nextIdx], nextIdx);
 		updateSpotlightPosition();
+	}
+
+	function handleReadingScrollIntent(intent: ReadingScrollIntent) {
+		if (!contentEl) return;
+		const resolution = resolveReadingScroll(intent, {
+			scrollTop: contentEl.scrollTop,
+			scrollHeight: contentEl.scrollHeight,
+			clientHeight: contentEl.clientHeight,
+		});
+		if (resolution.type === "chapter") {
+			if (resolution.direction > 0) {
+				void advanceBookChapter();
+			} else {
+				void retreatBookChapter();
+			}
+			return;
+		}
+		contentEl.scrollTo({ top: resolution.top, behavior: "smooth" });
 	}
 
 	function clearFocusStyles() {
