@@ -7,7 +7,7 @@ export interface ReadingScrollIntent {
 
 export type ReadingScrollResolution =
 	| { type: "scroll"; top: number }
-	| { type: "chapter"; direction: -1 | 1 };
+	| { type: "chapter"; direction: -1 | 1; offsetPx: number };
 
 export type FocusStepResolution =
 	| { type: "focus"; index: number }
@@ -22,7 +22,6 @@ export interface ChapterNavigationKeyLatch {
 
 const LINE_SCROLL_PX = 56;
 const PAGE_SCROLL_RATIO = 0.82;
-const EDGE_EPSILON_PX = 1;
 
 export function createChapterNavigationKeyLatch(): ChapterNavigationKeyLatch {
 	const latchedKeys = new Set<string>();
@@ -77,26 +76,47 @@ export function resolveReadingScroll(
 ): ReadingScrollResolution {
 	const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
 	const currentScrollTop = Math.max(0, Math.min(maxScrollTop, viewport.scrollTop));
-	const atBoundary =
-		intent.direction > 0
-			? maxScrollTop - currentScrollTop <= EDGE_EPSILON_PX
-			: currentScrollTop <= EDGE_EPSILON_PX;
-
-	if (atBoundary) {
-		return { type: "chapter", direction: intent.direction };
-	}
-
 	const distance =
 		intent.kind === "line"
 			? LINE_SCROLL_PX
 			: Math.max(LINE_SCROLL_PX, viewport.clientHeight * PAGE_SCROLL_RATIO);
+	const requestedTop = currentScrollTop + intent.direction * distance;
+
+	// Carry the unused part of the key gesture across the chapter seam. This
+	// makes separate Markdown files behave like one continuous document:
+	// ArrowUp near the start lands inside the previous chapter instead of
+	// stopping at its absolute bottom (or, worse, jumping to its top).
+	if (requestedTop < 0) {
+		return {
+			type: "chapter",
+			direction: -1,
+			offsetPx: Math.abs(requestedTop)
+		};
+	}
+	if (requestedTop > maxScrollTop) {
+		return {
+			type: "chapter",
+			direction: 1,
+			offsetPx: requestedTop - maxScrollTop
+		};
+	}
+
 	return {
 		type: "scroll",
-		top: Math.max(
-			0,
-			Math.min(maxScrollTop, currentScrollTop + intent.direction * distance)
-		)
+		top: requestedTop
 	};
+}
+
+export function resolveChapterBoundaryScroll(
+	direction: -1 | 1,
+	maxScrollTop: number,
+	offsetPx: number
+): number {
+	const safeMax = Math.max(0, Number.isFinite(maxScrollTop) ? maxScrollTop : 0);
+	const safeOffset = Math.max(0, Number.isFinite(offsetPx) ? offsetPx : 0);
+	return direction > 0
+		? Math.min(safeMax, safeOffset)
+		: Math.max(0, safeMax - safeOffset);
 }
 
 export function resolveFocusStep(

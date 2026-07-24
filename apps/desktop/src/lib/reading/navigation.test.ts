@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	createChapterNavigationKeyLatch,
 	readingScrollIntentForKey,
+	resolveChapterBoundaryScroll,
 	resolveFocusStep,
 	resolveReadingScroll
 } from "./navigation";
@@ -56,14 +57,37 @@ describe("reading keyboard navigation", () => {
 				{ direction: 1, kind: "page" },
 				{ scrollTop: 600, scrollHeight: 1000, clientHeight: 400 }
 			)
-		).toEqual({ type: "chapter", direction: 1 });
+		).toEqual({ type: "chapter", direction: 1, offsetPx: 328 });
 
 		expect(
 			resolveReadingScroll(
 				{ direction: -1, kind: "line" },
 				{ scrollTop: 0, scrollHeight: 1000, clientHeight: 400 }
 			)
-		).toEqual({ type: "chapter", direction: -1 });
+		).toEqual({ type: "chapter", direction: -1, offsetPx: 56 });
+	});
+
+	it("carries only the unconsumed part of an input across the chapter seam", () => {
+		expect(
+			resolveReadingScroll(
+				{ direction: -1, kind: "line" },
+				{ scrollTop: 20, scrollHeight: 1000, clientHeight: 400 }
+			)
+		).toEqual({ type: "chapter", direction: -1, offsetPx: 36 });
+
+		expect(
+			resolveReadingScroll(
+				{ direction: 1, kind: "line" },
+				{ scrollTop: 570, scrollHeight: 1000, clientHeight: 400 }
+			)
+		).toEqual({ type: "chapter", direction: 1, offsetPx: 26 });
+	});
+
+	it("places boundary input inside the adjacent chapter like continuous scrolling", () => {
+		expect(resolveChapterBoundaryScroll(-1, 1200, 56)).toBe(1144);
+		expect(resolveChapterBoundaryScroll(1, 1200, 56)).toBe(56);
+		expect(resolveChapterBoundaryScroll(-1, 40, 100)).toBe(0);
+		expect(resolveChapterBoundaryScroll(1, 40, 100)).toBe(40);
 	});
 
 	it("allows only one chapter transition per physical key press", () => {

@@ -18,10 +18,20 @@ MOCK_SCRIPT = (Path(__file__).with_name("bookshelf_mock.js")).read_text(encoding
 READER_NAVIGATION_MOCK = (
     "(() => {\n"
     "  const baseInvoke = window.__TAURI_INTERNALS__.invoke;\n"
+    "  window.__QA_CHAPTER_LOAD__ = { pending: null, lastStarted: null };\n"
     "  window.__TAURI_INTERNALS__.invoke = async (command, args) => {\n"
     "    if (command === 'get_book_chapter_path') return 'C:\\\\qa\\\\Library\\\\' + args.chapterId + '.md';\n"
     "    if (command === 'read_markdown_file') {\n"
-    "      const chapterName = args.path.split('\\\\\\\\').pop();\n"
+    "      const chapterName = args.path.split('\\\\').pop();\n"
+    "      if (chapterName === 'a1.md') {\n"
+    "        window.__QA_CHAPTER_LOAD__.pending = chapterName;\n"
+    "        window.__QA_CHAPTER_LOAD__.lastStarted = chapterName;\n"
+    "        try {\n"
+    "          await new Promise(resolve => setTimeout(resolve, 400));\n"
+    "        } finally {\n"
+    "          window.__QA_CHAPTER_LOAD__.pending = null;\n"
+    "        }\n"
+    "      }\n"
     "      const paragraphs = chapterName === 'a3.md'\n"
     "        ? ['Short chapter used to verify held-key chapter boundaries.']\n"
     "        : Array.from({ length: 80 }, (_, i) =>\n"
@@ -251,12 +261,90 @@ def main() -> int:
             reader_page.wait_for_function(
                 "() => document.querySelector('.article h1')?.textContent?.includes('a2.md')"
             )
+            reader_page.wait_for_timeout(550)
+
+            def reader_scroll_snapshot() -> dict[str, float]:
+                return reader_page.locator(".content").evaluate(
+                    """el => ({
+                      top: el.scrollTop,
+                      max: Math.max(0, el.scrollHeight - el.clientHeight)
+                    })"""
+                )
+
+            # A backward boundary gesture must reveal the previous chapter's
+            # ending. Keep the current chapter visible while the delayed mock
+            # prepares it, then carry the ArrowUp distance through the seam.
+            reader_page.locator(".content").evaluate("el => { el.scrollTop = 0; }")
+            reader_page.evaluate("() => { window.__QA_CHAPTER_LOAD__.lastStarted = null; }")
+            reader_page.keyboard.press("ArrowUp")
+            reader_page.wait_for_function(
+                "() => window.__QA_CHAPTER_LOAD__?.lastStarted === 'a1.md'"
+            )
+            assert reader_page.evaluate(
+                "() => window.__QA_CHAPTER_LOAD__?.pending"
+            ) == "a1.md"
+            assert "a2.md" in reader_page.locator(".article h1").inner_text()
+            assert reader_page.locator(".loading").count() == 0
+            reader_page.wait_for_function(
+                "() => document.querySelector('.article h1')?.textContent?.includes('a1.md')"
+            )
+            reader_page.wait_for_timeout(250)
+            backward_key_scroll = reader_scroll_snapshot()
+            assert backward_key_scroll["max"] > 200
+            assert abs(
+                backward_key_scroll["top"] - (backward_key_scroll["max"] - 56)
+            ) <= 2, f"backward key seam did not preserve its delta: {backward_key_scroll}"
+            assert backward_key_scroll["top"] > backward_key_scroll["max"] * 0.8
+
+            # Forward input carries the same line distance into chapter two.
+            reader_page.locator(".content").evaluate(
+                "el => { el.scrollTop = el.scrollHeight - el.clientHeight; }"
+            )
+            reader_page.keyboard.press("ArrowDown")
+            reader_page.wait_for_function(
+                """() => {
+                  const el = document.querySelector('.content');
+                  const title = document.querySelector('.article h1')?.textContent || '';
+                  return !!el && title.includes('a2.md') && Math.abs(el.scrollTop - 56) <= 2;
+                }"""
+            )
+
+            # Reverse immediately from the 56 px carried into chapter two.
+            # A -120 px wheel gesture consumes those 56 px first, then carries
+            # the remaining 64 px backward into chapter one's ending.
+            content_box = reader_page.locator(".content").bounding_box()
+            assert content_box is not None
+            reader_page.mouse.move(
+                content_box["x"] + content_box["width"] / 2,
+                content_box["y"] + content_box["height"] / 2,
+            )
+            reader_page.mouse.wheel(0, -120)
+            reader_page.wait_for_function(
+                """() => {
+                  const el = document.querySelector('.content');
+                  const title = document.querySelector('.article h1')?.textContent || '';
+                  if (!el || !title.includes('a1.md')) return false;
+                  const max = Math.max(0, el.scrollHeight - el.clientHeight);
+                  return max > 200 && Math.abs(el.scrollTop - (max - 64)) <= 2;
+                }"""
+            )
+            # Reverse again immediately: 64 px returns to chapter one's edge,
+            # and the remaining 56 px continues into chapter two.
+            reader_page.mouse.wheel(0, 120)
+            reader_page.wait_for_function(
+                """() => {
+                  const el = document.querySelector('.content');
+                  const title = document.querySelector('.article h1')?.textContent || '';
+                  return !!el && title.includes('a2.md') && Math.abs(el.scrollTop - 56) <= 2;
+                }"""
+            )
 
             # Advance to a long fourth chapter, then hold ArrowUp at its start.
             # The previous chapter is intentionally shorter than the viewport:
             # repeated keydown events must not cascade through several chapters
             # before the physical key is released.
             for chapter_name in ("a3.md", "a4.md"):
+                reader_page.wait_for_timeout(550)
                 reader_page.locator(".content").evaluate(
                     "el => { el.style.scrollBehavior = 'auto'; "
                     "el.scrollTop = el.scrollHeight - el.clientHeight; }"
@@ -266,6 +354,7 @@ def main() -> int:
                     "(name) => document.querySelector('.article h1')?.textContent?.includes(name)",
                     arg=chapter_name,
                 )
+            reader_page.wait_for_timeout(550)
             reader_page.locator(".content").evaluate("el => { el.scrollTop = 0; }")
             reader_page.evaluate(
                 "() => window.dispatchEvent(new KeyboardEvent('keydown', "
@@ -417,6 +506,8 @@ def main() -> int:
         ],
         "readerKeyboard": [
             "ordinary ArrowDown scroll",
+            "ArrowUp reveals the previous chapter ending without a loading flash",
+            "keyboard and wheel deltas carry through both chapter seam directions",
             "held ArrowUp crosses at most one chapter",
             "focus repeated ArrowDown matches ArrowRight focus step",
             "focus ArrowUp returns to previous chapter",

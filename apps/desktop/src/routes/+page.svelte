@@ -96,6 +96,7 @@
 	import {
 		createChapterNavigationKeyLatch,
 		readingScrollIntentForKey,
+		resolveChapterBoundaryScroll,
 		resolveFocusStep,
 		resolveReadingScroll,
 		type ReadingScrollIntent,
@@ -314,6 +315,9 @@
 	let activeChapterIndex = -1;
 	let chapterSwitching = false;
 	let chapterNavigationPending = false;
+	let inFlightChapterDirection: -1 | 1 | null = null;
+	let queuedChapterNavigation: { direction: -1 | 1; offsetPx: number } | null = null;
+	let chapterBoundaryRestoreGeneration = 0;
 	const chapterNavigationKeyLatch = createChapterNavigationKeyLatch();
 	let preloadedChapter: {
 		bookId: string;
@@ -1431,7 +1435,57 @@
 		}
 	}
 
-	async function openBookChapter(index: number, position = 0, completePrevious = false) {
+	type ChapterBoundaryRestore = {
+		direction: -1 | 1;
+		offsetPx: number;
+	};
+
+	function cancelChapterBoundaryRestore() {
+		chapterBoundaryRestoreGeneration += 1;
+	}
+
+	async function restoreChapterBoundaryAfterLayout(boundary: ChapterBoundaryRestore) {
+		if (!contentEl) return;
+		const restoreGeneration = ++chapterBoundaryRestoreGeneration;
+		const startedAt = performance.now();
+		let previousMaxScrollTop = -1;
+		let stableFrames = 0;
+
+		// content-visibility and late font/layout work can grow scrollHeight for
+		// several frames after the Markdown DOM appears. Stay attached to the
+		// chapter seam until the height settles, otherwise "previous end"
+		// silently collapses back to scrollTop 0.
+		while (performance.now() - startedAt < 500) {
+			await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+			if (!contentEl || restoreGeneration !== chapterBoundaryRestoreGeneration) return;
+
+			const maxScrollTop = Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
+			const targetScrollTop = resolveChapterBoundaryScroll(
+				boundary.direction,
+				maxScrollTop,
+				boundary.offsetPx,
+			);
+			const previousScrollBehavior = contentEl.style.scrollBehavior;
+			contentEl.style.scrollBehavior = "auto";
+			contentEl.scrollTop = targetScrollTop;
+			contentEl.style.scrollBehavior = previousScrollBehavior;
+			readingProgress = maxScrollTop > 0 ? targetScrollTop / maxScrollTop : 0;
+
+			const heightStable = Math.abs(maxScrollTop - previousMaxScrollTop) < 1;
+			const zeroHeightHadTimeToSettle =
+				maxScrollTop > 0 || performance.now() - startedAt >= 160;
+			stableFrames = heightStable && zeroHeightHadTimeToSettle ? stableFrames + 1 : 0;
+			previousMaxScrollTop = maxScrollTop;
+			if (stableFrames >= 3) return;
+		}
+	}
+
+	async function openBookChapter(
+		index: number,
+		position = 0,
+		completePrevious = false,
+		restoreBoundary?: ChapterBoundaryRestore,
+	) {
 		if ((await requestNavigationGuard("切换章节")) === "cancel") return;
 		if (!activeBook || chapterSwitching) return;
 		const chapter = activeBook.manifest.chapters[index];
@@ -1455,6 +1509,7 @@
 			const opened = await openFile(path, {
 				bookChapter: true,
 				restoreRatio: position,
+				restoreBoundary,
 				suppressRecent: true,
 				skipFlush: true,
 				preloaded: cached ? { result: cached.result, rendered: cached.rendered } : undefined,
@@ -1464,22 +1519,46 @@
 			tocItems = chapterTocItems(activeBook.manifest.chapters);
 			preloadedChapter = null;
 			updateWindowTitle(`${activeBook.manifest.title} · ${chapter.title}`);
+			if (restoreBoundary && contentEl) {
+				// activeChapterIndex changes the seam below the article. Apply
+				// the carried scroll only after that final layout commit, not
+				// while the loading/current chapter DOM is still settling.
+				await tick();
+				await restoreChapterBoundaryAfterLayout(restoreBoundary);
+				if ($focusMode) {
+					enterFocusMode();
+				}
+			}
 		} finally {
 			chapterSwitching = false;
 		}
 	}
 
-	async function advanceBookChapter() {
-		await navigateBookChapter(1);
-	}
-
-	async function retreatBookChapter() {
-		await navigateBookChapter(-1);
-	}
-
-	async function navigateBookChapter(direction: -1 | 1) {
-		if (!activeBook || chapterSwitching || chapterNavigationPending) return;
+	async function navigateBookChapter(direction: -1 | 1, offsetPx = 0) {
+		if (!activeBook) return;
+		if (chapterSwitching || chapterNavigationPending) {
+			if (inFlightChapterDirection !== null) {
+				if (direction === inFlightChapterDirection) {
+					// Repeated events from one wheel/key gesture must not cascade
+					// through several chapters. They also cancel an older queued
+					// reversal because the latest intent follows the active seam.
+					queuedChapterNavigation = null;
+				} else if (queuedChapterNavigation?.direction === direction) {
+					queuedChapterNavigation.offsetPx += Math.max(0, offsetPx);
+				} else {
+					// A genuine reversal can arrive while the adjacent chapter's
+					// height is still settling. Keep the latest intent and apply
+					// it as soon as the current seam has finished positioning.
+					queuedChapterNavigation = {
+						direction,
+						offsetPx: Math.max(0, offsetPx),
+					};
+				}
+			}
+			return;
+		}
 		chapterNavigationPending = true;
+		inFlightChapterDirection = direction;
 		try {
 			const targetIndex = activeChapterIndex + direction;
 			const target = activeBook.manifest.chapters[targetIndex];
@@ -1487,15 +1566,26 @@
 				if (direction > 0) await persistActiveBookProgress(true);
 				return;
 			}
-			await openBookChapter(targetIndex, direction > 0 ? 0 : 1, direction > 0);
+			await openBookChapter(
+				targetIndex,
+				direction > 0 ? 0 : 1,
+				direction > 0,
+				{ direction, offsetPx },
+			);
 		} finally {
 			chapterNavigationPending = false;
+			inFlightChapterDirection = null;
+			const queued = queuedChapterNavigation;
+			queuedChapterNavigation = null;
+			if (queued && activeBook) {
+				void navigateBookChapter(queued.direction, queued.offsetPx);
+			}
 		}
 	}
 
-	function navigateBookChapterFromKey(key: string, direction: -1 | 1) {
+	function navigateBookChapterFromKey(key: string, direction: -1 | 1, offsetPx = 0) {
 		if (!chapterNavigationKeyLatch.tryLatch(key)) return;
-		void navigateBookChapter(direction);
+		void navigateBookChapter(direction, offsetPx);
 	}
 
 	async function returnToBookshelf() {
@@ -1505,6 +1595,9 @@
 		activeBook = null;
 		trashOpen = false;
 		activeChapterIndex = -1;
+		cancelChapterBoundaryRestore();
+		inFlightChapterDirection = null;
+		queuedChapterNavigation = null;
 		preloadedChapter = null;
 		isTemporaryReading = false;
 		$currentFilePath = "";
@@ -1889,15 +1982,24 @@
 				noteReadingActivity();
 			}
 			if (contentEl && activeBook && !$focusMode && Math.abs(e.deltaY) > 0.01) {
-				const remaining = contentEl.scrollHeight - contentEl.clientHeight - contentEl.scrollTop;
-				if (e.deltaY > 0 && remaining <= 1) {
+				cancelChapterBoundaryRestore();
+				const wheelUnit =
+					e.deltaMode === WheelEvent.DOM_DELTA_LINE
+						? 40
+						: e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+							? contentEl.clientHeight
+							: 1;
+				const deltaPx = e.deltaY * wheelUnit;
+				const maxScrollTop = Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
+				const requestedTop = contentEl.scrollTop + deltaPx;
+				if (deltaPx > 0 && requestedTop > maxScrollTop) {
 					e.preventDefault();
-					void advanceBookChapter();
+					void navigateBookChapter(1, requestedTop - maxScrollTop);
 					return;
 				}
-				if (e.deltaY < 0 && contentEl.scrollTop <= 1) {
+				if (deltaPx < 0 && requestedTop < 0) {
 					e.preventDefault();
-					void retreatBookChapter();
+					void navigateBookChapter(-1, Math.abs(requestedTop));
 					return;
 				}
 			}
@@ -2338,6 +2440,7 @@
 		bookChapter?: boolean;
 		expectedNavigationGeneration?: number;
 		restoreRatio?: number;
+		restoreBoundary?: ChapterBoundaryRestore;
 		suppressRecent?: boolean;
 		skipFlush?: boolean;
 		preloaded?: {
@@ -2372,10 +2475,24 @@
 		const loadToken = `${loadGeneration}:${path}`;
 		currentLoadToken = loadToken;
 
-		$isLoading = true;
+		// Keep the current chapter visible while an adjacent chapter is prepared.
+		// The DOM swaps only when the next Markdown is ready, avoiding a spinner
+		// flash in the middle of what should feel like continuous scrolling.
+		const showLoadingState = !options.bookChapter || !$currentFilePath;
+		if (showLoadingState) {
+			$isLoading = true;
+		}
 		fileError = "";
 		const nextFileName = path.split(/[\\/]/).pop() || "";
 		let loadSucceeded = false;
+		let scrollRestore:
+			| { kind: "ratio"; value: number }
+			| { kind: "absolute"; value: number }
+			| null = options.restoreBoundary
+				? null
+				: options.restoreRatio !== undefined
+					? { kind: "ratio", value: options.restoreRatio }
+					: null;
 
 		try {
 			const result = options.preloaded?.result ?? await invoke<{content: string, encoding: string}>("read_markdown_file", {
@@ -2417,22 +2534,14 @@
 			await tick();
 			wrapArticleTables();
 
-			if (options.restoreRatio !== undefined) {
-				if (contentEl) {
-					const maxScroll = Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
-					contentEl.scrollTop = Math.max(0, Math.min(1, options.restoreRatio)) * maxScroll;
-				}
-			} else {
+			if (options.restoreRatio === undefined && !options.restoreBoundary) {
 				try {
 					const state: { scroll_position: number; bookmarks: number[]; progress?: number } =
 						await invoke("load_reading_state", { path });
 					if (currentLoadToken !== loadToken) return false;
-					if (contentEl) {
-						const maxScroll = Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
-						contentEl.scrollTop = typeof state.progress === "number" && state.progress > 0
-							? Math.max(0, Math.min(1, state.progress)) * maxScroll
-							: state.scroll_position;
-					}
+					scrollRestore = typeof state.progress === "number" && state.progress > 0
+						? { kind: "ratio", value: state.progress }
+						: { kind: "absolute", value: state.scroll_position };
 				} catch {
 					// No saved state, start from top
 				}
@@ -2457,12 +2566,24 @@
 			if (loadSucceeded && currentLoadToken === loadToken) {
 				await tick();
 				if (currentLoadToken === loadToken) {
+					if (contentEl && scrollRestore) {
+						const maxScrollTop = Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
+						const targetScrollTop =
+							scrollRestore.kind === "ratio"
+								? Math.max(0, Math.min(1, scrollRestore.value)) * maxScrollTop
+								: Math.max(0, Math.min(maxScrollTop, scrollRestore.value));
+						const previousScrollBehavior = contentEl.style.scrollBehavior;
+						contentEl.style.scrollBehavior = "auto";
+						contentEl.scrollTop = targetScrollTop;
+						contentEl.style.scrollBehavior = previousScrollBehavior;
+						readingProgress = maxScrollTop > 0 ? targetScrollTop / maxScrollTop : 0;
+					}
 					if ($searchQuery.trim()) {
 						performSearch();
 					} else if (!$focusMode) {
 						clearFocusBlockIndex();
 					}
-					if ($focusMode) {
+					if ($focusMode && !options.restoreBoundary) {
 						await tick();
 						if (currentLoadToken === loadToken) {
 							enterFocusMode();
@@ -2470,7 +2591,7 @@
 					} else if ($autoFocusMode) {
 						$focusMode = true;
 						await tick();
-						if (currentLoadToken === loadToken) {
+						if (currentLoadToken === loadToken && !options.restoreBoundary) {
 							enterFocusMode();
 						}
 					}
@@ -3617,13 +3738,14 @@
 
 	function handleReadingScrollIntent(intent: ReadingScrollIntent, key: string) {
 		if (!contentEl) return;
+		cancelChapterBoundaryRestore();
 		const resolution = resolveReadingScroll(intent, {
 			scrollTop: contentEl.scrollTop,
 			scrollHeight: contentEl.scrollHeight,
 			clientHeight: contentEl.clientHeight,
 		});
 		if (resolution.type === "chapter") {
-			navigateBookChapterFromKey(key, resolution.direction);
+			navigateBookChapterFromKey(key, resolution.direction, resolution.offsetPx);
 			return;
 		}
 		contentEl.scrollTo({ top: resolution.top, behavior: "smooth" });
