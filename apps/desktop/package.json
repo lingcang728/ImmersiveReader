@@ -12,7 +12,8 @@
     "tauri": "tauri",
     "install:latest": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1",
     "ship:local": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -Build -RegisterMarkdownAssociations",
-    "register:markdown": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RegisterMarkdownAssociations -OpenDefaultAppsSettings"
+    "register:markdown": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RegisterMarkdownAssociations -OpenDefaultAppsSettings",
+    "repair:shell-icon": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RepairShellIdentity"
   },
   "license": "MIT",
   "dependencies": {
