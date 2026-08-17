@@ -208,13 +208,21 @@ function Update-ImmersiveReaderShellIdentity {
     if (Test-Path -LiteralPath $defaultIconPath) {
       Set-Item -Path $defaultIconPath -Value $iconLocation
     }
+    $commandPath = "HKCU:\Software\Classes\$progId\shell\open\command"
+    if (Test-Path -LiteralPath $commandPath) {
+      Set-Item -Path $commandPath -Value $openCommand
+    }
   }
 
   $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\沉浸阅读"
   if (Test-Path -LiteralPath $uninstallKey) {
+    $uninstallExe = Join-Path $InstallDir "uninstall.exe"
     New-ItemProperty -Path $uninstallKey -Name "DisplayIcon" -Value $iconLocation -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $uninstallKey -Name "InstallLocation" -Value $InstallDir -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $uninstallKey -Name "DisplayName" -Value $registeredName -PropertyType String -Force | Out-Null
+    if (Test-Path -LiteralPath $uninstallExe) {
+      New-ItemProperty -Path $uninstallKey -Name "UninstallString" -Value "`"$uninstallExe`"" -PropertyType String -Force | Out-Null
+    }
   }
 
   if (-not $NoShortcuts) {
