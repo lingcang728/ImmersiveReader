@@ -14,39 +14,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Acquire verified managed runtime bundle
+      - name: Verify managed runtime release assets
         env:
-          RUNTIME_BUNDLE_URL: ${{ secrets.IMMERSIVE_READER_RUNTIME_BUNDLE_URL }}
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          if ($env:RUNTIME_BUNDLE_URL) {
-            Invoke-WebRequest -Uri $env:RUNTIME_BUNDLE_URL -OutFile runtime-bundle.zip
-          } else {
-            New-Item -ItemType Directory -Force -Path .runtime-parts | Out-Null
-            gh release download '${{ github.ref_name }}' --pattern 'runtime-bundle.zip.*' --dir .runtime-parts
-            if ($LASTEXITCODE -ne 0) { throw '无法从当前 Release 下载托管 Runtime 分卷。' }
-            $parts = @(Get-ChildItem -LiteralPath .runtime-parts -Filter 'runtime-bundle.zip.*' -File | Sort-Object Name)
-            if ($parts.Count -eq 0) { throw '当前 Release 不包含托管 Runtime 分卷。' }
-            $target = [System.IO.File]::Create((Join-Path (Get-Location) 'runtime-bundle.zip'))
-            try {
-              foreach ($part in $parts) {
-                $source = [System.IO.File]::OpenRead($part.FullName)
-                try { $source.CopyTo($target) } finally { $source.Dispose() }
-              }
-            } finally {
-              $target.Dispose()
-            }
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          $expected = Get-Content "docs/release/$version/runtime-parts.json" -Raw | ConvertFrom-Json
+          $release = gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw '无法读取当前 GitHub Release。' }
+          foreach ($part in @($expected.parts)) {
+            $asset = @($release.assets | Where-Object name -eq $part.name)
+            if ($asset.Count -ne 1) { throw "Runtime 分卷缺失或重名：$($part.name)" }
+            if ([int64]$asset[0].size -ne [int64]$part.size) { throw "Runtime 分卷大小不匹配：$($part.name)" }
+            if ([string]$asset[0].digest -ine "sha256:$($part.sha256)") { throw "Runtime 分卷 SHA-256 不匹配：$($part.name)" }
           }
-          if (Test-Path -LiteralPath runtime) { Remove-Item -LiteralPath runtime -Recurse -Force }
-          Expand-Archive -LiteralPath runtime-bundle.zip -DestinationPath .runtime-unpack -Force
-          $nested = Join-Path (Get-Location) ".runtime-unpack\runtime"
-          if (Test-Path -LiteralPath $nested) {
-            Move-Item -LiteralPath $nested -Destination runtime
-          } else {
-            Move-Item -LiteralPath (Join-Path (Get-Location) ".runtime-unpack") -Destination runtime
-          }
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-runtime.ps1
+          $total = (@($expected.parts) | Measure-Object -Property size -Sum).Sum
+          if ([int64]$total -ne [int64]$expected.bundle.size) { throw 'Runtime 分卷总大小与完整包不一致。' }
+          Write-Host "Runtime Release assets verified: $(@($expected.parts).Count) parts, $total bytes."
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -76,8 +61,7 @@ jobs:
           npm exec --yes --package=tsx@4.19.2 -- node --import tsx --test packages/contracts/tests/*.test.ts
           npm run build --prefix tools/zhihu-packer
           npm run compile-reader --prefix tools/zhihu-packer
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\prepare-runtime.ps1 -RefreshApps
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-runtime.ps1
+          npm test --prefix tools/zhihu-packer
 
       - name: Build signed Windows release
         env:
