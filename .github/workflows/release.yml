@@ -17,12 +17,27 @@ jobs:
       - name: Acquire verified managed runtime bundle
         env:
           RUNTIME_BUNDLE_URL: ${{ secrets.IMMERSIVE_READER_RUNTIME_BUNDLE_URL }}
+          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          if (-not $env:RUNTIME_BUNDLE_URL) {
-            throw "IMMERSIVE_READER_RUNTIME_BUNDLE_URL must point to a versioned runtime bundle outside Git"
+          if ($env:RUNTIME_BUNDLE_URL) {
+            Invoke-WebRequest -Uri $env:RUNTIME_BUNDLE_URL -OutFile runtime-bundle.zip
+          } else {
+            New-Item -ItemType Directory -Force -Path .runtime-parts | Out-Null
+            gh release download '${{ github.ref_name }}' --pattern 'runtime-bundle.zip.*' --dir .runtime-parts
+            if ($LASTEXITCODE -ne 0) { throw '无法从当前 Release 下载托管 Runtime 分卷。' }
+            $parts = @(Get-ChildItem -LiteralPath .runtime-parts -Filter 'runtime-bundle.zip.*' -File | Sort-Object Name)
+            if ($parts.Count -eq 0) { throw '当前 Release 不包含托管 Runtime 分卷。' }
+            $target = [System.IO.File]::Create((Join-Path (Get-Location) 'runtime-bundle.zip'))
+            try {
+              foreach ($part in $parts) {
+                $source = [System.IO.File]::OpenRead($part.FullName)
+                try { $source.CopyTo($target) } finally { $source.Dispose() }
+              }
+            } finally {
+              $target.Dispose()
+            }
           }
-          Invoke-WebRequest -Uri $env:RUNTIME_BUNDLE_URL -OutFile runtime-bundle.zip
           if (Test-Path -LiteralPath runtime) { Remove-Item -LiteralPath runtime -Recurse -Force }
           Expand-Archive -LiteralPath runtime-bundle.zip -DestinationPath .runtime-unpack -Force
           $nested = Join-Path (Get-Location) ".runtime-unpack\runtime"
@@ -76,17 +91,6 @@ jobs:
           npm run tauri --prefix apps/desktop -- build --bundles nsis
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps/desktop/scripts/collect-release.ps1
 
-      - name: Package verified runtime bundle
-        shell: pwsh
-        run: tar.exe -a -c -f runtime-bundle.zip -C runtime .
-
-      - name: Upload runtime bundle artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: immersive-reader-runtime-${{ github.ref_name }}
-          path: runtime-bundle.zip
-          if-no-files-found: error
-
       - name: Publish GitHub Release
         shell: pwsh
         env:
@@ -95,7 +99,10 @@ jobs:
           gh release view '${{ github.ref_name }}' *> $null
           $exists = $LASTEXITCODE -eq 0
           $global:LASTEXITCODE = 0
-          if (-not $exists) {
-            $installer = (Get-ChildItem -LiteralPath output/release -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
-            gh release create '${{ github.ref_name }}' --verify-tag --title "沉浸阅读 ${{ github.ref_name }}" --notes-file docs/release/1.2.0/RELEASE_NOTES.md $installer output/release/latest.json runtime-bundle.zip
+          $installer = (Get-ChildItem -LiteralPath output/release -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
+          if ($exists) {
+            gh release upload '${{ github.ref_name }}' $installer output/release/latest.json --clobber
+            gh release edit '${{ github.ref_name }}' --draft=false --prerelease=false --title "沉浸阅读 ${{ github.ref_name }}" --notes-file docs/release/1.2.0/RELEASE_NOTES.md
+          } else {
+            gh release create '${{ github.ref_name }}' --verify-tag --title "沉浸阅读 ${{ github.ref_name }}" --notes-file docs/release/1.2.0/RELEASE_NOTES.md $installer output/release/latest.json
           }
