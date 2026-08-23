@@ -21,8 +21,11 @@ jobs:
         run: |
           $version = '${{ github.ref_name }}'.TrimStart('v')
           $expected = Get-Content "docs/release/$version/runtime-parts.json" -Raw | ConvertFrom-Json
-          $release = gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw '无法读取当前 GitHub Release。' }
+          $releases = gh api "repos/${{ github.repository }}/releases?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw '无法读取 GitHub Release 列表。' }
+          $release = @($releases | Where-Object tag_name -eq '${{ github.ref_name }}')
+          if ($release.Count -ne 1) { throw '当前 Tag 的草稿 Release 缺失或重名。' }
+          $release = $release[0]
           foreach ($part in @($expected.parts)) {
             $asset = @($release.assets | Where-Object name -eq $part.name)
             if ($asset.Count -ne 1) { throw "Runtime 分卷缺失或重名：$($part.name)" }
