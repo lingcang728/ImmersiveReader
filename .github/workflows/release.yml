@@ -76,7 +76,7 @@ jobs:
           $version = (Get-Content apps/desktop/package.json -Raw | ConvertFrom-Json).version
           if ('${{ github.ref_name }}' -cne "v$version") { throw 'Tag and package version differ.' }
           npm run tauri --prefix apps/desktop -- build --bundles nsis
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps/desktop/scripts/collect-release.ps1
+          pwsh -NoProfile -File apps/desktop/scripts/collect-release.ps1
 
       - name: Publish GitHub Release
         shell: pwsh
