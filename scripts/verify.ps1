@@ -65,6 +65,10 @@ $root = Get-RepoRoot
 $npm = Require-Command -Name 'npm.cmd'
 $cargo = Require-Command -Name 'cargo.exe'
 $python = Get-PodcastPython
+$typescript = Join-Path $root 'apps\desktop\node_modules\.bin\tsc.cmd'
+if (-not (Test-Path -LiteralPath $typescript -PathType Leaf)) {
+    throw '未找到 apps/desktop 已安装的 TypeScript 编译器；请先在该目录执行 npm ci。'
+}
 Assert-NoLegacyRuntimeReferences
 Invoke-Checked 'contract schema parity' { & $python $root\scripts\verify_contract_parity.py }
 
@@ -72,7 +76,7 @@ Push-Location (Join-Path $root 'packages\contracts')
 try {
     Remove-FreshGeneratedDirectory 'packages\contracts\dist'
     Invoke-Checked 'contracts tests' { node --test tests/*.test.ts }
-    Invoke-Checked 'contracts build' { tsc -p tsconfig.json }
+    Invoke-Checked 'contracts build' { & $typescript -p tsconfig.json }
 } finally {
     Pop-Location
 }

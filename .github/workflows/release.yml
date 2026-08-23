@@ -64,19 +64,17 @@ jobs:
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\prepare-runtime.ps1 -RefreshApps
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-runtime.ps1
 
-      - name: Build draft Windows release
-        uses: tauri-apps/tauri-action@v1
+      - name: Build signed Windows release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: apps/desktop
-          tauriScript: npm run tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: 沉浸阅读 ${{ github.ref_name }}
-          releaseBody: See docs/release/1.1.0/RELEASE_NOTES.md for details.
-          releaseDraft: true
-          prerelease: false
-          args: --no-sign --bundles nsis
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content apps/desktop/package.json -Raw | ConvertFrom-Json).version
+          if ('${{ github.ref_name }}' -cne "v$version") { throw 'Tag and package version differ.' }
+          npm run tauri --prefix apps/desktop -- build --bundles nsis
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps/desktop/scripts/collect-release.ps1
 
       - name: Package verified runtime bundle
         shell: pwsh
@@ -88,3 +86,16 @@ jobs:
           name: immersive-reader-runtime-${{ github.ref_name }}
           path: runtime-bundle.zip
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view '${{ github.ref_name }}' *> $null
+          $exists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          if (-not $exists) {
+            $installer = (Get-ChildItem -LiteralPath output/release -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
+            gh release create '${{ github.ref_name }}' --verify-tag --title "沉浸阅读 ${{ github.ref_name }}" --notes-file docs/release/1.2.0/RELEASE_NOTES.md $installer output/release/latest.json runtime-bundle.zip
+          }

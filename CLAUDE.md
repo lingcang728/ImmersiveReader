@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-沉浸阅读 (ImmersiveReader) is a local-first Windows desktop app for long-form reading. It unifies three content sources — Zhihu archives, podcast transcriptions, and Markdown folders — into a single local Library. Current release: 1.1.0.
+沉浸阅读 (ImmersiveReader) is a local-first Windows desktop app for long-form reading. It unifies three content sources — Zhihu archives, podcast transcriptions, and Markdown folders — into a single local Library. Current release: 1.2.0.
 
 It is a polyglot monorepo with **no root `package.json` and no npm workspaces** — each package is built and tested independently and stitched together by the Rust backend at runtime.
 

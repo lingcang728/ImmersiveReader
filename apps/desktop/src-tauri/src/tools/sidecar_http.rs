@@ -54,6 +54,7 @@ impl SidecarHttpClient {
         if token.is_empty() {
             return Err("SIDECAR_HTTP_TOKEN_REQUIRED".to_string());
         }
+        crate::tls::ensure_crypto_provider()?;
         let client = reqwest::Client::builder()
             .http1_only()
             .connect_timeout(timeouts.connect)

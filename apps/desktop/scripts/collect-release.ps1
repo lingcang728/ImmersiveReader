@@ -1,0 +1,52 @@
+param([string]$OutputDirectory = '..\..\output\release')
+
+$ErrorActionPreference = 'Stop'
+$desktopRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$repoRoot = (Resolve-Path (Join-Path $desktopRoot '..\..')).Path
+$output = [System.IO.Path]::GetFullPath((Join-Path $desktopRoot $OutputDirectory))
+$repoPrefix = $repoRoot.TrimEnd('\') + '\'
+if (-not $output.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw '发布输出目录必须位于 ImmersiveReader 仓库内。'
+}
+
+$version = (Get-Content -LiteralPath (Join-Path $desktopRoot 'package.json') -Raw | ConvertFrom-Json).version
+$tauriVersion = (Get-Content -LiteralPath (Join-Path $desktopRoot 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json).version
+if ($version -cne $tauriVersion) { throw "版本不一致：npm=$version tauri=$tauriVersion" }
+$metadata = cargo metadata --format-version 1 --no-deps --manifest-path (Join-Path $desktopRoot 'src-tauri\Cargo.toml') | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw '无法解析 Cargo target 目录。' }
+$source = Join-Path $metadata.target_directory "release\bundle\nsis\沉浸阅读_${version}_x64-setup.exe"
+$signaturePath = "$source.sig"
+if (-not (Test-Path -LiteralPath $source) -or -not (Test-Path -LiteralPath $signaturePath)) {
+  throw '缺少沉浸阅读 NSIS 安装包或 updater 签名。'
+}
+
+New-Item -ItemType Directory -Force -Path $output | Out-Null
+Get-ChildItem -LiteralPath $output -File -ErrorAction SilentlyContinue | Remove-Item -Force
+$installerName = "ImmersiveReader_${version}_x64-setup.exe"
+$installer = Join-Path $output $installerName
+Copy-Item -LiteralPath $source -Destination $installer -Force
+if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -cne (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash) {
+  throw '沉浸阅读安装包复制校验失败。'
+}
+
+$signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+if ([string]::IsNullOrWhiteSpace($signature)) { throw 'updater 签名为空。' }
+$latest = [ordered]@{
+  version = $version
+  notes = if ($env:IMMERSIVE_READER_RELEASE_NOTES) { $env:IMMERSIVE_READER_RELEASE_NOTES.Trim() } else { '新增 GitHub Release 自动检查、下载安装与重启更新。' }
+  pub_date = (Get-Date).ToUniversalTime().ToString('o')
+  size = (Get-Item -LiteralPath $installer).Length
+  platforms = [ordered]@{
+    'windows-x86_64' = [ordered]@{
+      signature = $signature
+      url = "https://github.com/lingcang728/ImmersiveReader/releases/download/v$version/$installerName"
+      size = (Get-Item -LiteralPath $installer).Length
+    }
+  }
+}
+[System.IO.File]::WriteAllText(
+  (Join-Path $output 'latest.json'),
+  ($latest | ConvertTo-Json -Depth 6),
+  [System.Text.UTF8Encoding]::new($false)
+)
+Get-ChildItem -LiteralPath $output -File | Select-Object Name,Length,LastWriteTime,@{n='SHA256';e={(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash}}

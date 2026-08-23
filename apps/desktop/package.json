@@ -1,6 +1,6 @@
 {
   "name": "immersive-reader",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A local-first immersive reading library",
   "type": "module",
   "scripts": {
@@ -10,8 +10,9 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "tauri": "tauri",
+    "package:release": "pwsh -NoProfile -File scripts/package-and-install.ps1",
     "install:latest": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1",
-    "ship:local": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -Build -RegisterMarkdownAssociations",
+    "ship:local": "pwsh -NoProfile -File scripts/package-and-install.ps1",
     "register:markdown": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RegisterMarkdownAssociations -OpenDefaultAppsSettings",
     "repair:shell-icon": "powershell -ExecutionPolicy Bypass -File scripts/install-latest-immersive-reader.ps1 -RepairShellIdentity"
   },
@@ -22,6 +23,8 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "katex": "^0.17.0",
     "mermaid": "^11.16.0",
     "rehype-katex": "^7.0.1",

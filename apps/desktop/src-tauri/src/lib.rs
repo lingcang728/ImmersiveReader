@@ -31,6 +31,7 @@ mod settings;
 mod storage;
 pub mod tasks;
 mod temporary_content;
+mod tls;
 mod tools;
 mod trash;
 mod zhihu;
@@ -1132,6 +1133,7 @@ fn control_podcast_task(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    tls::ensure_crypto_provider().expect("failed to initialize the TLS crypto provider");
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -1147,6 +1149,8 @@ pub fn run() {
     let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_file_mtime,
             read_markdown_file,

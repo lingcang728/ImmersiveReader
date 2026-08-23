@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [switch]$Build,
+  [switch]$SignUpdater,
   [switch]$RegisterMarkdownAssociations,
   [switch]$OpenDefaultAppsSettings,
   [switch]$NoShortcuts,
@@ -339,7 +340,11 @@ if ($Build) {
     "-File", $verifyRuntime,
     "-RuntimeRoot", (Join-Path $monorepoRoot "runtime")
   )
-  Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "tauri", "build", "--", "--no-sign", "--bundles", "nsis")
+  $tauriBuildArguments = @("run", "tauri", "build", "--", "--bundles", "nsis")
+  if (-not $SignUpdater) {
+    $tauriBuildArguments += "--no-sign"
+  }
+  Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments $tauriBuildArguments
 }
 
 $bundleDir = Join-Path (Get-CargoTargetDirectory) "release\bundle\nsis"

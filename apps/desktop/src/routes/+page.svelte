@@ -5,6 +5,7 @@
 	import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 	import { open } from "@tauri-apps/plugin-dialog";
 	import { openUrl } from "@tauri-apps/plugin-opener";
+	import { checkForDesktopUpdate } from "$lib/update/service";
 	import {
 		getMarkdownSourceBlock,
 		normalizeMarkdownEditText,
@@ -1770,6 +1771,7 @@
 	}
 
 	onMount(() => {
+		void checkForDesktopUpdate(false);
 		const checkInitialFile = () => {
 			if ((window as any).__INITIAL_FILE__) {
 				openFile((window as any).__INITIAL_FILE__);

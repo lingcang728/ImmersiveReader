@@ -15,6 +15,7 @@
 		READING_WIDTHS,
 	} from "$lib/stores/app";
 	import { getThemePairs } from "$lib/theme/themes";
+	import { checkForDesktopUpdate, downloadAndInstallDesktopUpdate, updateState } from "$lib/update/service";
 
 	const themePairs = getThemePairs();
 
@@ -67,6 +68,7 @@
 	let actionBusy = false;
 	let panelNotice = "";
 	let apiKey = "";
+	let updateInstallArmed = false;
 	let stopSubscription: (() => void) | undefined;
 	let storageRows: Array<[string, string, string, number]> = [];
 	$: storageRows = locations
@@ -79,6 +81,19 @@
 				["runtime_state", "运行时状态", locations.runtimeStateRoot, usage?.runtimeStateBytes ?? 0]
 			]
 		: [];
+	$: updateBusy = ["checking", "downloading", "installing"].includes($updateState.status);
+	$: updateProgress = $updateState.totalBytes
+		? Math.min(100, Math.round($updateState.downloadedBytes / $updateState.totalBytes * 100))
+		: null;
+	$: updateStatusLabel = ({
+		idle: "尚未检查",
+		checking: "正在检查 GitHub Release",
+		available: `发现新版本 ${$updateState.version}`,
+		downloading: updateProgress === null ? "正在下载更新" : `正在下载 ${updateProgress}%`,
+		installing: "正在安装，完成后会自动重启",
+		failed: "更新失败",
+		upToDate: "当前已是最新版本",
+	} as const)[$updateState.status];
 
 	onMount(() => {
 		stopSubscription = settingsOpen.subscribe((open) => {
@@ -248,6 +263,11 @@
 	function closePanel() {
 		settingsOpen.set(false);
 	}
+
+	async function installUpdate() {
+		updateInstallArmed = false;
+		await downloadAndInstallDesktopUpdate();
+	}
 </script>
 
 {#if $settingsOpen}
@@ -379,6 +399,41 @@
 						<span class="toggle-slider" aria-hidden="true"></span>
 					</label>
 				</div>
+			</div>
+
+			<div class="settings-title section-title">软件更新</div>
+			<div class="update-card">
+				<div class="update-head">
+					<div>
+						<strong>{updateStatusLabel}</strong>
+						{#if $updateState.status === "failed"}
+							<span>{$updateState.error}</span>
+						{:else if $updateState.status === "available"}
+							<span>当前 {$updateState.currentVersion}{#if $updateState.sizeBytes} · {formatBytes($updateState.sizeBytes)}{/if}</span>
+						{:else}
+							<span>版本 {$updateState.currentVersion || "读取中"} · 每天最多静默检查一次</span>
+						{/if}
+					</div>
+					<button type="button" class="action-btn" disabled={updateBusy} on:click={() => void checkForDesktopUpdate(true)}>
+						{$updateState.status === "checking" ? "检查中…" : "检查更新"}
+					</button>
+				</div>
+				{#if $updateState.status === "downloading" && updateProgress !== null}
+					<progress value={updateProgress} max="100">{updateProgress}%</progress>
+				{/if}
+				{#if $updateState.status === "available"}
+					<div class="update-release">
+						<div><strong>沉浸阅读 {$updateState.version}</strong><span>{$updateState.notes || "本次 Release 未填写更新说明。"}</span></div>
+						<button type="button" class="action-btn update-primary" on:click={() => (updateInstallArmed = true)}>下载安装</button>
+					</div>
+				{/if}
+				{#if updateInstallArmed}
+					<div class="update-confirm" role="alert">
+						<div><strong>安装沉浸阅读 {$updateState.version}？</strong><span>应用会自动重启，书库、阅读进度与服务配置不会被删除。</span></div>
+						<button type="button" class="action-btn" on:click={() => (updateInstallArmed = false)}>取消</button>
+						<button type="button" class="action-btn update-primary" on:click={() => void installUpdate()}>确认安装</button>
+					</div>
+				{/if}
 			</div>
 
 			<div class="settings-title section-title">AI 服务与书库</div>
@@ -635,6 +690,34 @@
 		font-size: 11px;
 		color: var(--text-secondary);
 	}
+	.update-card {
+		padding: 11px 12px;
+		border: 1px solid var(--hr);
+		border-radius: 8px;
+		background: var(--bg-secondary);
+	}
+	.update-head,
+	.update-release,
+	.update-confirm {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 10px;
+	}
+	.update-head > div,
+	.update-release > div,
+	.update-confirm > div {
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+	}
+	.update-card strong { color: var(--text); font-size: 12px; }
+	.update-card span { color: var(--text-faded); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+	.update-card progress { width: 100%; height: 5px; margin-top: 9px; accent-color: var(--link); }
+	.update-release,
+	.update-confirm { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--hr); }
+	.update-confirm { grid-template-columns: minmax(0, 1fr) auto auto; }
+	.update-primary { border-color: var(--link); color: var(--text); }
 	.status-card strong {
 		color: var(--text);
 	}
