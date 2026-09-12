@@ -151,6 +151,32 @@
 		}
 	}
 
+	// P2-9: stable request id derived from the task inputs — SHA-256 of
+	// `taskKind|sorted inputs` rendered as a UUID, the same convention the
+	// +page.svelte commands use. A retry of the same payload replays the
+	// recorded command result instead of creating a second set of tasks.
+	// The material must cover exactly the claimed inputs (previewId +
+	// duplicatePolicy + budgetApproval): the backend input_hash covers the
+	// same fields and rejects a reused key with a different hash.
+	async function deriveRequestId(taskKind: string, inputs: readonly string[]): Promise<string> {
+		const material = `${taskKind}|${[...inputs].sort().join('|')}`;
+		try {
+			const digest = await crypto.subtle.digest(
+				'SHA-256',
+				new TextEncoder().encode(material)
+			);
+			const bytes = new Uint8Array(digest.slice(0, 16));
+			bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+			bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+			const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+			return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+		} catch {
+			// Non-secure context / missing WebCrypto: a random id is still
+			// safe — the backend claim just won't deduplicate.
+			return crypto.randomUUID();
+		}
+	}
+
 	async function addTasks() {
 		if (!preview || !canAdd) return;
 		busy = true;
@@ -162,12 +188,19 @@
 					estimatedApiCostUpperCny: preview.budget.estimatedApiCostUpperCny
 				}
 			: null;
+		const requestId = await deriveRequestId('podcast', [
+			preview.previewId,
+			`duplicatePolicy=${duplicatePolicy}`,
+			approval
+				? `approval=${approval.estimatedDiskBytes}/${approval.estimatedApiCostUpperCny}`
+				: 'approval=none'
+		]);
 		try {
 			const result = await invoke<PodcastAddResult>('add_podcast_files', {
 				previewId: preview.previewId,
 				duplicatePolicy,
 				budgetApproval: approval,
-				requestId: crypto.randomUUID()
+				requestId
 			});
 			createdTaskIds = result.tasks.map((task) => task.id);
 			existingBooks = result.existingBooks;

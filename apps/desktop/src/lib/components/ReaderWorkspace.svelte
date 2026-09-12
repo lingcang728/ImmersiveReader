@@ -15,7 +15,13 @@
 		min-height: 0;
 		overflow-y: auto;
 		overflow-x: hidden;
-		scroll-behavior: smooth;
+	}
+	/* P2-42: only smooth-scroll when the user has not asked for reduced
+	   motion; the media query keeps the default behavior unchanged. */
+	@media (prefers-reduced-motion: no-preference) {
+		.content {
+			scroll-behavior: smooth;
+		}
 	}
 	.content.flow-active {
 		overflow: hidden;

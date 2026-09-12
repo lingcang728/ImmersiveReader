@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import type { TaskSnapshot } from '$lib/tasks/sync';
 	import { displayTaskPercent, taskDisplayTitle } from '$lib/tasks/queueList';
 
@@ -200,8 +200,43 @@
 		return null;
 	}
 
+	// P2-39: the parent handlers are fire-and-forget (invoke promises are
+	// discarded upstream), so a successful command is detected by the next
+	// task snapshot — revision or lifecycle changes clear the busy flag; a
+	// bounded timeout covers the failure path where nothing changes.
+	const ACTION_TIMEOUT_MS = 10000;
+	let actionBusy = false;
+	let actionStamp = '';
+	let actionTimer: ReturnType<typeof setTimeout> | undefined;
+
+	$: if (actionBusy && `${task.revision}:${task.lifecycleState}` !== actionStamp) {
+		actionBusy = false;
+		if (actionTimer) {
+			clearTimeout(actionTimer);
+			actionTimer = undefined;
+		}
+	}
+
+	onDestroy(() => {
+		if (actionTimer) clearTimeout(actionTimer);
+	});
+
 	function runAction(action: Action) {
 		if (!action) return;
+		// 'open' is read-only navigation — no duplicate-submission risk, and a
+		// successful open does not change the task snapshot (would pin busy).
+		if (action.kind === 'open') {
+			onOpenTaskResult(task.id);
+			return;
+		}
+		if (actionBusy) return;
+		if (action.kind === 'cancel' && !window.confirm('确定取消该任务？')) return;
+		actionBusy = true;
+		actionStamp = `${task.revision}:${task.lifecycleState}`;
+		actionTimer = setTimeout(() => {
+			actionBusy = false;
+			actionTimer = undefined;
+		}, ACTION_TIMEOUT_MS);
 		if (action.kind === 'start') {
 			if (task.kind === 'podcast') onStartTask(task.id);
 			else onStartZhihuTask(task.id, task.revision);
@@ -222,12 +257,7 @@
 			else onStartZhihuTask(task.id, task.revision);
 			return;
 		}
-		if (action.kind === 'open') {
-			onOpenTaskResult(task.id);
-			return;
-		}
 		if (action.kind === 'cancel') {
-			if (!window.confirm('确定取消该任务？')) return;
 			if (task.kind === 'podcast') onControlTask(task.id, 'cancel', task.revision);
 			else onControlZhihuTask(task.id, 'cancel', task.revision);
 		}
@@ -287,12 +317,22 @@
 
 	<div class="task-actions">
 		{#if primary}
-			<button type="button" class="task-btn primary" on:click={() => runAction(primary.action)}>
+			<button
+				type="button"
+				class="task-btn primary"
+				disabled={actionBusy}
+				on:click={() => runAction(primary.action)}
+			>
 				{primary.label}
 			</button>
 		{/if}
 		{#if secondary}
-			<button type="button" class="task-btn danger" on:click={() => runAction(secondary.action)}>
+			<button
+				type="button"
+				class="task-btn danger"
+				disabled={actionBusy}
+				on:click={() => runAction(secondary.action)}
+			>
 				{secondary.label}
 			</button>
 		{/if}

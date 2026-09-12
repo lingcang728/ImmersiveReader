@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
 	type ResizeDirection =
@@ -22,6 +23,30 @@
 		{ dir: 'SouthWest', className: 'edge-sw' }
 	];
 
+	// P2-40: the edge strips sit above app content — they must disappear when
+	// the window is maximized or fullscreen, where they only swallow clicks.
+	let handlesEnabled = true;
+
+	async function refreshHandleState() {
+		try {
+			const win = getCurrentWebviewWindow();
+			const [maximized, fullscreen] = await Promise.all([
+				win.isMaximized(),
+				win.isFullscreen()
+			]);
+			handlesEnabled = !(maximized || fullscreen);
+		} catch {
+			/* web preview: keep handles enabled */
+		}
+	}
+
+	onMount(() => {
+		void refreshHandleState();
+		const onWindowResize = () => void refreshHandleState();
+		window.addEventListener('resize', onWindowResize);
+		return () => window.removeEventListener('resize', onWindowResize);
+	});
+
 	async function startResize(direction: ResizeDirection) {
 		try {
 			await getCurrentWebviewWindow().startResizeDragging(direction);
@@ -31,27 +56,29 @@
 	}
 </script>
 
-<div class="resize-layer" aria-hidden="true">
+{#if handlesEnabled}
 	{#each edges as edge (edge.dir)}
 		<div
 			class="resize-handle {edge.className}"
 			role="presentation"
+			aria-hidden="true"
 			on:mousedown|preventDefault={() => void startResize(edge.dir)}
 		></div>
 	{/each}
-</div>
+{/if}
 
 <style>
-	.resize-layer {
-		position: fixed;
-		inset: 0;
-		pointer-events: none;
-		z-index: 100;
-	}
-
+	/* P2-40: each handle carries its own z-index (no shared fixed layer, which
+	   would force one stacking level for all of them).
+	   - Side/bottom strips sit at 60: above page content and modal backdrops
+	     (nav guard 45, hover zone 50, chrome stack 55) yet below search ticks
+	     (90) so tick marks and the overlay scrollbar stay clickable.
+	   - Top strips sit at 85: above window chrome (70) and the reading
+	     progress line (80) so top-edge resize still works whether or not
+	     chrome is visible, while remaining below search ticks (90). */
 	.resize-handle {
-		position: absolute;
-		pointer-events: auto;
+		position: fixed;
+		z-index: 60;
 	}
 
 	.edge-n {
@@ -60,6 +87,7 @@
 		right: 6px;
 		height: 4px;
 		cursor: ns-resize;
+		z-index: 85;
 	}
 	.edge-s {
 		bottom: 0;
@@ -68,18 +96,20 @@
 		height: 4px;
 		cursor: ns-resize;
 	}
+	/* East/West strips overlap the overlay scrollbar; 3px leaves most of a
+	   ~6px scrollbar clickable while still being grabbable. */
 	.edge-e {
 		top: 6px;
 		right: 0;
 		bottom: 6px;
-		width: 4px;
+		width: 3px;
 		cursor: ew-resize;
 	}
 	.edge-w {
 		top: 6px;
 		left: 0;
 		bottom: 6px;
-		width: 4px;
+		width: 3px;
 		cursor: ew-resize;
 	}
 	.edge-ne {
@@ -88,6 +118,7 @@
 		width: 8px;
 		height: 8px;
 		cursor: nesw-resize;
+		z-index: 85;
 	}
 	.edge-nw {
 		top: 0;
@@ -95,6 +126,7 @@
 		width: 8px;
 		height: 8px;
 		cursor: nwse-resize;
+		z-index: 85;
 	}
 	.edge-se {
 		bottom: 0;

@@ -268,25 +268,66 @@
 		updateInstallArmed = false;
 		await downloadAndInstallDesktopUpdate();
 	}
+
+	// P2-32: native <dialog> gives Esc (cancel), a top-layer surface and a
+	// focus trap; the action handles autofocus + focus restore like
+	// WorkflowDialogShell. keydown stays stop-propagated so global
+	// shortcuts (Ctrl+F/O, reading keys) cannot fire while the modal is up;
+	// Esc itself still reaches us through the cancel event.
+	function settingsDialog(node: HTMLDialogElement) {
+		const previousFocus =
+			document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		if (typeof node.showModal === "function" && !node.open) {
+			try {
+				node.showModal();
+			} catch {
+				/* already open or unsupported: degrade to inline panel */
+			}
+		}
+		const target =
+			node.querySelector<HTMLElement>(
+				'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+			) ?? node;
+		target.focus();
+		return {
+			destroy() {
+				if (node.open) {
+					try {
+						node.close();
+					} catch {
+						/* already closed */
+					}
+				}
+				previousFocus?.focus();
+			}
+		};
+	}
+
+	function handleDialogCancel(event: Event) {
+		event.preventDefault();
+		closePanel();
+	}
+
+	function handleDialogClick(event: MouseEvent) {
+		// Backdrop clicks land on the <dialog> element itself.
+		if (event.target === event.currentTarget) closePanel();
+	}
 </script>
 
 {#if $settingsOpen}
-	<!-- svelte-ignore a11y-click-events-have-key-events -->
-	<!-- svelte-ignore a11y-no-static-element-interactions -->
-	<div
-		class="settings-overlay"
-		on:click={closePanel}
-		role="presentation"
+	<dialog
+		class="settings-dialog"
+		use:settingsDialog
+		aria-modal="true"
+		aria-labelledby="settings-panel-title"
+		on:cancel={handleDialogCancel}
+		on:click={handleDialogClick}
+		on:keydown|stopPropagation
 	>
-		<div
-			class="settings-panel"
-			on:click|stopPropagation
-			on:keydown|stopPropagation
-			role="presentation"
-		>
+		<div class="settings-panel" role="document">
 			<div class="settings-header">
 				<div>
-					<div class="settings-title">设置</div>
+					<div class="settings-title" id="settings-panel-title">设置</div>
 					<div class="settings-subtitle">外观 · 阅读 · 服务</div>
 				</div>
 				<button class="close-btn" type="button" on:click={closePanel} aria-label="关闭设置">×</button>
@@ -430,8 +471,8 @@
 				{#if updateInstallArmed}
 					<div class="update-confirm" role="alert">
 						<div><strong>安装沉浸阅读 {$updateState.version}？</strong><span>应用会自动重启，书库、阅读进度与服务配置不会被删除。</span></div>
-						<button type="button" class="action-btn" on:click={() => (updateInstallArmed = false)}>取消</button>
-						<button type="button" class="action-btn update-primary" on:click={() => void installUpdate()}>确认安装</button>
+						<button type="button" class="action-btn" disabled={updateBusy} on:click={() => (updateInstallArmed = false)}>取消</button>
+						<button type="button" class="action-btn update-primary" disabled={updateBusy} on:click={() => void installUpdate()}>确认安装</button>
 					</div>
 				{/if}
 			</div>
@@ -526,30 +567,31 @@
 				</div>
 			{/if}
 		</div>
-	</div>
+	</dialog>
 {/if}
 
 <style>
-	.settings-overlay {
-		position: fixed;
-		inset: 0;
-		z-index: 40;
-		background: rgba(0, 0, 0, 0.15);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 24px;
-		box-sizing: border-box;
+	.settings-dialog {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: var(--text);
+		width: min(calc(100vw - 48px), 760px);
+		max-width: calc(100vw - 16px);
+		max-height: calc(100vh - 16px);
 		animation: fadeIn 0.15s ease;
+	}
+	.settings-dialog::backdrop {
+		background: rgba(0, 0, 0, 0.15);
 	}
 	.settings-panel {
 		background: var(--bg);
 		border: 1px solid var(--hr);
 		border-radius: 12px;
 		padding: 24px;
-		max-width: 760px;
-		width: min(calc(100vw - 48px), 760px);
+		width: 100%;
 		min-width: 0;
+		box-sizing: border-box;
 		max-height: min(calc(100vh - 48px), 90vh);
 		overflow-x: hidden;
 		overflow-y: auto;

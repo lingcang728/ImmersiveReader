@@ -112,6 +112,48 @@
 		closeMenus();
 		action();
 	}
+
+	// P2-35: promote the book-detail dialog to a real modal — showModal puts it
+	// in the top layer (no more z-index stacking against settings/search),
+	// Esc arrives as a cancel event, and focus is trapped + restored.
+	function bookDetailDialog(node: HTMLDialogElement) {
+		const previousFocus =
+			document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		if (typeof node.showModal === 'function' && !node.open) {
+			try {
+				node.showModal();
+			} catch {
+				/* degrade to inline dialog */
+			}
+		}
+		const target =
+			node.querySelector<HTMLElement>(
+				'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+			) ?? node;
+		target.focus();
+		return {
+			destroy() {
+				if (node.open) {
+					try {
+						node.close();
+					} catch {
+						/* already closed */
+					}
+				}
+				previousFocus?.focus();
+			}
+		};
+	}
+
+	function handleDetailCancel(event: Event) {
+		event.preventDefault();
+		onCloseDetails();
+	}
+
+	function handleDetailClick(event: MouseEvent) {
+		// Backdrop clicks land on the <dialog> element itself.
+		if (event.target === event.currentTarget) onCloseDetails();
+	}
 </script>
 
 <svelte:window
@@ -411,96 +453,118 @@
 				0,
 				currentChapterIndex
 			)}
-			<div class="book-detail-backdrop" role="presentation">
-				<dialog open class="book-detail-dialog" aria-labelledby="book-detail-title">
-					<header class="book-detail-header">
-						<div class="book-detail-heading">
-							<h2 id="book-detail-title">{selectedBookDetail.manifest.title}</h2>
-							<p class="book-detail-summary">
-								{chapters.length} 章 · 进度 {Math.round(selectedBookDetail.progress.position * 100)}% ·
-								{lastReadLabel(selectedBookDetail.manifest.updatedAt)}
-							</p>
-						</div>
-						<button type="button" class="close-detail" aria-label="关闭详情" on:click={onCloseDetails}>×</button>
-					</header>
-					<div class="book-detail-body">
-						<div class="book-detail-actions">
+			<dialog
+				class="book-detail-dialog"
+				use:bookDetailDialog
+				aria-labelledby="book-detail-title"
+				aria-modal="true"
+				on:cancel={handleDetailCancel}
+				on:click={handleDetailClick}
+				on:keydown|stopPropagation
+			>
+				<header class="book-detail-header">
+					<div class="book-detail-heading">
+						<h2 id="book-detail-title">{selectedBookDetail.manifest.title}</h2>
+						<p class="book-detail-summary">
+							{chapters.length} 章 · 进度 {Math.round(selectedBookDetail.progress.position * 100)}% ·
+							{lastReadLabel(selectedBookDetail.manifest.updatedAt)}
+						</p>
+					</div>
+					<button type="button" class="close-detail" aria-label="关闭详情" on:click={onCloseDetails}>×</button>
+				</header>
+				<div class="book-detail-body">
+					<div class="book-detail-actions">
+						<button
+							type="button"
+							class="detail-primary"
+							on:click={() => onOpenBook(selectedBookDetail.manifest.bookId)}
+						>
+							继续阅读
+						</button>
+						{#if selectedBookDetail.manifest.source === 'zhihu' && selectedBookDetail.manifest.sourceId}
 							<button
 								type="button"
-								class="detail-primary"
-								on:click={() => onOpenBook(selectedBookDetail.manifest.bookId)}
+								class="source-link"
+								on:click={() =>
+									onOpenSource(
+										selectedBookDetail.manifest.source,
+										selectedBookDetail.manifest.sourceId
+									)}>打开知乎主页</button
 							>
-								继续阅读
-							</button>
-							{#if selectedBookDetail.manifest.source === 'zhihu' && selectedBookDetail.manifest.sourceId}
-								<button
-									type="button"
-									class="source-link"
-									on:click={() =>
-										onOpenSource(
-											selectedBookDetail.manifest.source,
-											selectedBookDetail.manifest.sourceId
-										)}>打开知乎主页</button
-								>
-							{/if}
-						</div>
-
-						<section class="chapter-section" aria-label="目录">
-							<header class="chapter-section-header">
-								<h3>目录</h3>
-								<span
-									>{Math.min(detailChapterVisible, chapters.length)} / {chapters.length}</span
-								>
-							</header>
-							<ol class="chapter-list">
-								{#each chapters.slice(0, detailChapterVisible) as chapter, index}
-									<li class:current={index === currentIdx || chapter.id === currentChapterId}>
-										<span>{chapter.title}</span>
-										<small>{chapter.date ?? ''}</small>
-									</li>
-								{/each}
-							</ol>
-							{#if detailChapterVisible < chapters.length}
-								<button
-									type="button"
-									class="load-more-chapters"
-									on:click={() => (detailChapterVisible += 40)}
-								>
-									加载更多（+40）
-								</button>
-							{/if}
-						</section>
-
-						<details class="tech-details">
-							<summary>技术信息</summary>
-							<dl class="book-detail-meta">
-								<div><dt>来源</dt><dd>{sourceLabel(selectedBookDetail.manifest.source)}</dd></div>
-								<div><dt>书目 ID</dt><dd>{selectedBookDetail.manifest.bookId}</dd></div>
-								<div><dt>生成时间</dt><dd>{selectedBookDetail.manifest.generatedAt}</dd></div>
-								<div><dt>更新时间</dt><dd>{selectedBookDetail.manifest.updatedAt}</dd></div>
-								<div><dt>当前章节</dt><dd>{currentChapterTitle || '未开始'}</dd></div>
-							</dl>
-							{#if selectedBookDetail.provenance}
-								<div class="provenance-grid">
-									<div>
-										<span>版本</span>
-										<strong>{selectedBookDetail.provenance.revision ?? '—'}</strong>
-									</div>
-									<div>
-										<span>引擎</span>
-										<strong>{selectedBookDetail.provenance.engineVersion ?? '—'}</strong>
-									</div>
-								</div>
-							{/if}
-							{#if selectedBookDetail.taskRecords.length > 0}
-								<p class="book-detail-note">
-									关联任务 {selectedBookDetail.taskRecords.length} 条（默认折叠）
-								</p>
-							{/if}
-						</details>
+						{/if}
 					</div>
-				</dialog>
-			</div>
+
+					<section class="chapter-section" aria-label="目录">
+						<header class="chapter-section-header">
+							<h3>目录</h3>
+							<span
+								>{Math.min(detailChapterVisible, chapters.length)} / {chapters.length}</span
+							>
+						</header>
+						<ol class="chapter-list">
+							{#each chapters.slice(0, detailChapterVisible) as chapter, index}
+								<li class:current={index === currentIdx || chapter.id === currentChapterId}>
+									<span>{chapter.title}</span>
+									<small>{chapter.date ?? ''}</small>
+								</li>
+							{/each}
+						</ol>
+						{#if detailChapterVisible < chapters.length}
+							<button
+								type="button"
+								class="load-more-chapters"
+								on:click={() => (detailChapterVisible += 40)}
+							>
+								加载更多（+40）
+							</button>
+						{/if}
+					</section>
+
+					<details class="tech-details">
+						<summary>技术信息</summary>
+						<dl class="book-detail-meta">
+							<div><dt>来源</dt><dd>{sourceLabel(selectedBookDetail.manifest.source)}</dd></div>
+							<div><dt>书目 ID</dt><dd>{selectedBookDetail.manifest.bookId}</dd></div>
+							<div><dt>生成时间</dt><dd>{selectedBookDetail.manifest.generatedAt}</dd></div>
+							<div><dt>更新时间</dt><dd>{selectedBookDetail.manifest.updatedAt}</dd></div>
+							<div><dt>当前章节</dt><dd>{currentChapterTitle || '未开始'}</dd></div>
+						</dl>
+						{#if selectedBookDetail.provenance}
+							<div class="provenance-grid">
+								<div>
+									<span>版本</span>
+									<strong>{selectedBookDetail.provenance.revision ?? '—'}</strong>
+								</div>
+								<div>
+									<span>引擎</span>
+									<strong>{selectedBookDetail.provenance.engineVersion ?? '—'}</strong>
+								</div>
+							</div>
+						{/if}
+						{#if selectedBookDetail.taskRecords.length > 0}
+							<p class="book-detail-note">
+								关联任务 {selectedBookDetail.taskRecords.length} 条（默认折叠）
+							</p>
+						{/if}
+					</details>
+				</div>
+			</dialog>
 		{/if}
 	</div>
 </section>
+
+<style>
+	/* P2-35: the dialog is shown modally via showModal(); the top layer makes
+	   the old .book-detail-backdrop z-index wrapper unnecessary. These scoped
+	   rules only re-center the dialog and paint its ::backdrop — the panel
+	   styling itself stays in bookshelf.css. */
+	.book-detail-dialog {
+		position: fixed;
+		inset: 0;
+		margin: auto;
+		height: fit-content;
+	}
+	.book-detail-dialog::backdrop {
+		background: rgba(0, 0, 0, 0.34);
+	}
+</style>

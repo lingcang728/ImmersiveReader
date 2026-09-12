@@ -13,6 +13,12 @@
 	let selectedIndex = 0;
 	let wasOpen = false;
 
+	// P2-5: cap the rendered rows — TopN books can produce ~5000 headings.
+	// A ~200-row sliding window follows the selection; the remainder shows
+	// as paging hints instead of mounted DOM.
+	const TOC_WINDOW = 200;
+	let windowStart = 0;
+
 	$: filtered = query.trim()
 		? items.filter((item) =>
 				item.text.toLowerCase().includes(query.trim().toLowerCase()),
@@ -26,6 +32,10 @@
 			query = "";
 			const activeIdx = items.findIndex((item) => item.id === activeId);
 			selectedIndex = activeIdx >= 0 ? activeIdx : 0;
+			windowStart = Math.max(
+				0,
+				Math.min(selectedIndex - 40, items.length - TOC_WINDOW),
+			);
 			void tick().then(() => {
 				inputEl?.focus();
 				scrollSelectedIntoView();
@@ -35,6 +45,41 @@
 
 	$: if (selectedIndex >= filtered.length) {
 		selectedIndex = Math.max(0, filtered.length - 1);
+	}
+
+	// Keep the sliding render window containing the selection — re-runs only
+	// when the filtered list or the selection changes.
+	$: syncTocWindow(filtered.length, selectedIndex);
+
+	$: visibleItems = filtered.slice(windowStart, windowStart + TOC_WINDOW);
+	$: hiddenBefore = Math.min(windowStart, filtered.length);
+	$: hiddenAfter = Math.max(
+		0,
+		filtered.length - windowStart - visibleItems.length,
+	);
+
+	function syncTocWindow(listLength: number, selection: number) {
+		const maxStart = Math.max(0, listLength - TOC_WINDOW);
+		if (selection < windowStart) {
+			windowStart = selection;
+		} else if (selection >= windowStart + TOC_WINDOW) {
+			windowStart = selection - TOC_WINDOW + 1;
+		}
+		windowStart = Math.min(Math.max(windowStart, 0), maxStart);
+	}
+
+	function pageWindow(direction: 1 | -1) {
+		const maxStart = Math.max(0, filtered.length - TOC_WINDOW);
+		windowStart = Math.min(
+			Math.max(0, windowStart + direction * TOC_WINDOW),
+			maxStart,
+		);
+		// Anchor the selection inside the new window so it cannot snap back.
+		selectedIndex =
+			direction > 0
+				? windowStart
+				: Math.min(windowStart + TOC_WINDOW, filtered.length) - 1;
+		scrollSelectedIntoView();
 	}
 
 	function scrollSelectedIntoView() {
@@ -88,13 +133,23 @@
 				<span class="toc-count">{filtered.length}</span>
 			</div>
 			<div class="toc-list" bind:this={listEl}>
-				{#each filtered as item, i (item.id)}
+				{#if hiddenBefore > 0}
+					<button
+						type="button"
+						class="toc-overflow"
+						on:click={() => pageWindow(-1)}
+					>
+						还有 {hiddenBefore} 条 · 上一页
+					</button>
+				{/if}
+				{#each visibleItems as item, i (item.id)}
+					{@const realIndex = windowStart + i}
 					<button
 						class="toc-item toc-level-{item.level}"
-						class:selected={i === selectedIndex}
+						class:selected={realIndex === selectedIndex}
 						class:current={item.id === activeId}
 						on:click={() => jump(item.id)}
-						on:mousemove={() => (selectedIndex = i)}
+						on:mouseenter={() => (selectedIndex = realIndex)}
 					>
 						<span class="toc-text">{item.text}</span>
 						{#if item.id === activeId}
@@ -104,6 +159,15 @@
 				{:else}
 					<div class="toc-empty">无匹配标题</div>
 				{/each}
+				{#if hiddenAfter > 0}
+					<button
+						type="button"
+						class="toc-overflow"
+						on:click={() => pageWindow(1)}
+					>
+						还有 {hiddenAfter} 条 · 下一页
+					</button>
+				{/if}
 			</div>
 		</div>
 	</div>
@@ -220,6 +284,23 @@
 		text-align: center;
 		color: var(--text-faded);
 		font-size: 13px;
+	}
+
+	.toc-overflow {
+		display: block;
+		width: 100%;
+		border: none;
+		background: transparent;
+		color: var(--text-faded);
+		font-size: 12px;
+		padding: 8px 10px;
+		text-align: center;
+		cursor: pointer;
+		border-radius: 8px;
+	}
+	.toc-overflow:hover {
+		background: var(--bg);
+		color: var(--text-secondary);
 	}
 
 	@keyframes fadeIn {

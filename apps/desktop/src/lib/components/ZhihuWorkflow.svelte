@@ -38,9 +38,42 @@
 	let errorText = '';
 	let noticeText = '';
 
+	// P2-39: task action buttons must not allow repeat submissions. The
+	// parent handlers are fire-and-forget, so the busy flag clears on the
+	// next snapshot (revision/lifecycle change) or a bounded timeout.
+	const TASK_ACTION_TIMEOUT_MS = 10000;
+	let taskActionBusy = false;
+	let taskActionStamp = '';
+	let taskActionTimer: ReturnType<typeof setTimeout> | undefined;
+
 	$: createdTask = createdTaskId
 		? (tasks.find((task) => task.id === createdTaskId) ?? null)
 		: null;
+
+	$: if (
+		taskActionBusy &&
+		(!createdTask || `${createdTask.revision}:${createdTask.lifecycleState}` !== taskActionStamp)
+	) {
+		taskActionBusy = false;
+		if (taskActionTimer) {
+			clearTimeout(taskActionTimer);
+			taskActionTimer = undefined;
+		}
+	}
+
+	function runTaskAction(action: () => void) {
+		if (taskActionBusy) return;
+		taskActionBusy = true;
+		taskActionStamp = createdTask
+			? `${createdTask.revision}:${createdTask.lifecycleState}`
+			: '';
+		clearTimeout(taskActionTimer);
+		taskActionTimer = setTimeout(() => {
+			taskActionBusy = false;
+			taskActionTimer = undefined;
+		}, TASK_ACTION_TIMEOUT_MS);
+		action();
+	}
 
 	function taskStateLabel(task: TaskSnapshot): string {
 		if (task.lifecycleState === 'queued') return '等待开始';
@@ -114,6 +147,9 @@
 
 	onMount(() => {
 		void refreshLoginStatus();
+		return () => {
+			if (taskActionTimer) clearTimeout(taskActionTimer);
+		};
 	});
 </script>
 
@@ -183,25 +219,40 @@
 				<button
 					type="button"
 					class="wf-primary"
-					on:click={() => onStartTask(createdTask.id, createdTask.revision)}>开始抓取</button
+					disabled={taskActionBusy}
+					on:click={() =>
+						runTaskAction(() => onStartTask(createdTask.id, createdTask.revision))}
+					>开始抓取</button
 				>
 			{:else if createdTask.canPause}
 				<button
 					type="button"
 					class="wf-secondary"
-					on:click={() => onControlTask(createdTask.id, 'pause', createdTask.revision)}>暂停</button
+					disabled={taskActionBusy}
+					on:click={() =>
+						runTaskAction(() =>
+							onControlTask(createdTask.id, 'pause', createdTask.revision)
+						)}>暂停</button
 				>
 			{:else if createdTask.canResume}
 				<button
 					type="button"
 					class="wf-secondary"
-					on:click={() => onControlTask(createdTask.id, 'resume', createdTask.revision)}>恢复</button
+					disabled={taskActionBusy}
+					on:click={() =>
+						runTaskAction(() =>
+							onControlTask(createdTask.id, 'resume', createdTask.revision)
+						)}>恢复</button
 				>
 			{:else if createdTask.canCancel}
 				<button
 					type="button"
 					class="wf-secondary"
-					on:click={() => onControlTask(createdTask.id, 'cancel', createdTask.revision)}>取消</button
+					disabled={taskActionBusy}
+					on:click={() =>
+						runTaskAction(() =>
+							onControlTask(createdTask.id, 'cancel', createdTask.revision)
+						)}>取消</button
 				>
 			{/if}
 			{#if createdTask.lifecycleState === 'terminal'}

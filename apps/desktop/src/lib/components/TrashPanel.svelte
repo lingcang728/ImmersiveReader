@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
 	import type { TrashItem } from '$lib/trash/types';
 	import BackButton from './BackButton.svelte';
 
@@ -8,6 +9,50 @@
 	export let onRefresh: () => void;
 	export let onRestore: (item: TrashItem) => void;
 	export let onDelete: (item: TrashItem) => void;
+
+	// P2-39: the parent handlers are fire-and-forget (the invoke promise is
+	// discarded upstream), so we cannot await them. Track a per-row pending
+	// flag that clears when the trash list refreshes (success removes the row)
+	// or after a bounded safety timeout (failure leaves the row in place).
+	const PENDING_TIMEOUT_MS = 15000;
+	let pendingIds: ReadonlySet<string> = new Set();
+	const pendingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	let lastItems = items;
+
+	function markPending(trashId: string) {
+		pendingIds = new Set(pendingIds).add(trashId);
+		clearTimeout(pendingTimers.get(trashId));
+		pendingTimers.set(
+			trashId,
+			setTimeout(() => clearPending(trashId), PENDING_TIMEOUT_MS)
+		);
+	}
+
+	function clearPending(trashId: string) {
+		if (!pendingIds.has(trashId)) return;
+		const next = new Set(pendingIds);
+		next.delete(trashId);
+		pendingIds = next;
+		clearTimeout(pendingTimers.get(trashId));
+		pendingTimers.delete(trashId);
+	}
+
+	// Any list refresh settles in-flight row actions.
+	$: if (items !== lastItems) {
+		lastItems = items;
+		for (const id of [...pendingIds]) clearPending(id);
+	}
+
+	function runItemAction(item: TrashItem, action: (item: TrashItem) => void) {
+		if (loading || pendingIds.has(item.trashId)) return;
+		markPending(item.trashId);
+		action(item);
+	}
+
+	onDestroy(() => {
+		for (const timer of pendingTimers.values()) clearTimeout(timer);
+		pendingTimers.clear();
+	});
 
 	function deletedLabel(value: string): string {
 		const date = new Date(value);
@@ -61,8 +106,18 @@
 							<span>revision {item.revision}</span>
 						</div>
 						<div class="trash-actions">
-							<button type="button" class="restore" on:click={() => onRestore(item)}>恢复</button>
-							<button type="button" class="delete" on:click={() => onDelete(item)}>永久删除…</button>
+							<button
+								type="button"
+								class="restore"
+								disabled={loading || pendingIds.has(item.trashId)}
+								on:click={() => runItemAction(item, onRestore)}>恢复</button
+							>
+							<button
+								type="button"
+								class="delete"
+								disabled={loading || pendingIds.has(item.trashId)}
+								on:click={() => runItemAction(item, onDelete)}>永久删除…</button
+							>
 						</div>
 					</article>
 				{/each}
@@ -185,6 +240,10 @@
 		border-radius: 8px;
 		padding: 7px 11px;
 		font-size: 12px;
+	}
+	.trash-actions button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 	.restore {
 		border: 1px solid color-mix(in srgb, var(--link) 55%, var(--hr));
