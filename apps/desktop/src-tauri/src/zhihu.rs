@@ -6,8 +6,9 @@ use crate::tasks::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -15,6 +16,32 @@ use tauri::{AppHandle, Emitter};
 const TASK_EVENT_NAME: &str = "acquisition://task-event";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_EMIT_INTERVAL: Duration = Duration::from_secs(5);
+/// Hard wall-clock cap for one `reconcile_active_tasks` pass. The reconcile
+/// runs on the acquisition-snapshot path and must never scale with the number
+/// of local tasks (previously N x ~15s of serial sidecar waits per pass).
+const RECONCILE_DEADLINE: Duration = Duration::from_secs(20);
+/// Maximum number of concurrent sidecar fetches during a reconcile pass.
+const RECONCILE_MAX_CONCURRENCY: usize = 4;
+
+/// Set while a reconcile pass is in flight so overlapping invocations from
+/// sibling blocking threads return early instead of doubling the fan-out.
+static RECONCILE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// RAII latch for [`RECONCILE_RUNNING`]; released on every exit path.
+struct ReconcilePassGuard;
+
+impl Drop for ReconcilePassGuard {
+    fn drop(&mut self) {
+        RECONCILE_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn try_begin_reconcile_pass() -> Option<ReconcilePassGuard> {
+    RECONCILE_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| ReconcilePassGuard)
+}
 
 static ACTIVE_POLLERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -157,6 +184,10 @@ fn create_event(snapshot: TaskSnapshot) -> TaskEvent {
     }
 }
 
+/// Blocking: performs a bounded (~15s) sidecar HTTP request plus SQLite writes,
+/// and may launch the sidecar on first use. Must run on a blocking context
+/// (`tauri::async_runtime::spawn_blocking` or a dedicated thread) — never
+/// directly on the Tauri IPC event-loop thread.
 pub fn create_task(
     settings: &AppSettings,
     request: &CreateZhihuTaskRequest,
@@ -187,6 +218,9 @@ pub fn create_task(
     Ok(snapshot)
 }
 
+/// Blocking: one bounded (~15s) sidecar HTTP request, plus a possible sidecar
+/// launch on first use. Call only from a blocking context — never directly on
+/// the Tauri IPC event-loop thread.
 pub fn login_status(settings: &AppSettings) -> Result<ZhihuLoginStatus, String> {
     let response: ApiResponse<ZhihuLoginStatus> =
         crate::tools::zhihu_get_json(settings, "/api/login-status")?;
@@ -200,6 +234,9 @@ pub fn login_status(settings: &AppSettings) -> Result<ZhihuLoginStatus, String> 
         .ok_or_else(|| "ZHIHU_LOGIN_STATUS_MISSING".to_string())
 }
 
+/// Blocking: one bounded (~15s) sidecar HTTP request, plus a possible sidecar
+/// launch on first use. Call only from a blocking context — never directly on
+/// the Tauri IPC event-loop thread.
 pub fn start_login(settings: &AppSettings) -> Result<(), String> {
     let response: ApiResponse<serde_json::Value> =
         crate::tools::zhihu_post_json(settings, "/api/login/start", &serde_json::json!({}))?;
@@ -212,6 +249,9 @@ pub fn start_login(settings: &AppSettings) -> Result<(), String> {
     }
 }
 
+/// Blocking: SQLite reads/writes plus one bounded (~15s) sidecar HTTP request
+/// (and a possible sidecar launch on first use). Call only from a blocking
+/// context — never directly on the Tauri IPC event-loop thread.
 pub fn start_task(
     task_id: &str,
     expected_revision: u64,
@@ -254,6 +294,9 @@ pub fn start_task(
     Ok(snapshot)
 }
 
+/// Blocking: SQLite reads/writes plus one bounded (~15s) sidecar HTTP request
+/// (and a possible sidecar launch on first use). Call only from a blocking
+/// context — never directly on the Tauri IPC event-loop thread.
 pub fn control_task(
     task_id: &str,
     action: &str,
@@ -480,6 +523,10 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
     }
 }
 
+/// Blocking single-task fetch: one bounded (~15s) sidecar HTTP request via
+/// `tools::zhihu_get_json` (which may also launch the sidecar on first use).
+/// Only call from blocking threads — poller threads and reconcile workers, or
+/// a `spawn_blocking` context — never on the Tauri IPC event-loop thread.
 fn fetch_remote_task(settings: &AppSettings, task_id: &str) -> Result<RemoteTask, String> {
     let response: ApiResponse<RemoteTask> =
         crate::tools::zhihu_get_json(settings, &format!("/api/tasks/{task_id}"))?;
@@ -495,6 +542,9 @@ fn fetch_remote_task(settings: &AppSettings, task_id: &str) -> Result<RemoteTask
 
 /// Apply sidecar task state into the control DB. Sidecar success overrides a
 /// false local "interrupted/crashed" terminal mirror.
+/// Blocking (SQLite + event emit only — no sidecar I/O); keep it on the
+/// calling thread so DB writes stay serialized. Runs on poller threads and on
+/// the reconcile caller thread; never on the IPC event-loop thread.
 fn apply_remote_task(
     remote: RemoteTask,
     app: Option<&AppHandle>,
@@ -521,6 +571,8 @@ fn apply_remote_task(
 
 /// Ensure a durable per-task supervisor is running (deduped by task id).
 /// Runs until the task reaches a real terminal state — no 10-minute cap.
+/// Non-blocking itself: all polling (`fetch_remote_task`, bounded ~15s per
+/// request) happens on the spawned supervisor thread.
 pub fn ensure_poller(task_id: String, settings: AppSettings, app: AppHandle) {
     {
         let Ok(mut guard) = active_pollers().lock() else {
@@ -588,15 +640,38 @@ pub fn ensure_poller(task_id: String, settings: AppSettings, app: AppHandle) {
     });
 }
 
-/// Reconcile non-terminal (and falsely interrupted) Zhihu tasks with the sidecar.
-/// Starts durable supervisors for still-active remote tasks.
+/// Reconcile non-terminal (and falsely interrupted) Zhihu tasks with the
+/// sidecar. Starts durable supervisors for still-active remote tasks.
+///
+/// # Blocking contract
+///
+/// This function performs blocking SQLite work and bounded sidecar HTTP
+/// fan-out: per-task fetches run on a pool of at most
+/// [`RECONCILE_MAX_CONCURRENCY`] detached worker threads (each request keeps
+/// the sidecar client's own ~15s timeout) while this thread applies results
+/// serially until every task has answered or [`RECONCILE_DEADLINE`] elapses.
+/// It therefore never scales with the number of local tasks (previously a
+/// serial N x ~15s per pass on the snapshot path).
+///
+/// It MUST NOT be invoked directly on the Tauri IPC event-loop thread —
+/// command-path callers must dispatch it via
+/// `tauri::async_runtime::spawn_blocking` (or another dedicated blocking
+/// thread). It is safe to invoke from several blocking threads at once:
+/// overlapping passes return `Ok(0)` immediately instead of doubling the
+/// sidecar fan-out, and the in-flight pass's writes land in the same control
+/// DB the caller reads afterwards.
 pub fn reconcile_active_tasks(
     settings: &AppSettings,
     app: Option<&AppHandle>,
 ) -> Result<u32, String> {
+    let Some(_pass) = try_begin_reconcile_pass() else {
+        // A sibling blocking thread is already reconciling; its writes land
+        // in the same control DB, so skipping this pass is safe.
+        return Ok(0);
+    };
     let control = ControlDb::open_current()?;
     let tasks = control.task_snapshots(Some(TaskKind::Zhihu))?;
-    let mut updated = 0u32;
+    let mut pending = VecDeque::new();
     for snapshot in tasks {
         let needs_reconcile = matches!(
             snapshot.lifecycle_state,
@@ -607,26 +682,76 @@ pub fn reconcile_active_tasks(
                 | LifecycleState::Stopping
         ) || (snapshot.lifecycle_state == LifecycleState::Terminal
             && matches!(snapshot.outcome, TaskOutcome::Interrupted));
-        if !needs_reconcile {
-            continue;
+        if needs_reconcile {
+            pending.push_back(snapshot.id);
         }
-        match fetch_remote_task(settings, &snapshot.id) {
-            Ok(remote) => {
+    }
+    let total = pending.len();
+    if total == 0 {
+        return Ok(0);
+    }
+
+    // Bounded fan-out: workers pull task ids and fetch remote state while this
+    // thread applies results as they arrive. Workers are deliberately detached
+    // — joining them would defeat the deadline; they unwind on their own once
+    // the result receiver is dropped (each in-flight request is itself bounded
+    // by the sidecar client's ~15s timeout), and failed sends just end them.
+    let work = Arc::new(Mutex::new(pending));
+    let (results_tx, results_rx) = mpsc::channel::<(String, Result<RemoteTask, String>)>();
+    for _ in 0..total.min(RECONCILE_MAX_CONCURRENCY) {
+        let work = Arc::clone(&work);
+        let results_tx = results_tx.clone();
+        let settings = settings.clone();
+        thread::spawn(move || loop {
+            let task_id = {
+                let Ok(mut queue) = work.lock() else {
+                    return;
+                };
+                match queue.pop_front() {
+                    Some(task_id) => task_id,
+                    None => return,
+                }
+            };
+            let result = fetch_remote_task(&settings, &task_id);
+            if results_tx.send((task_id, result)).is_err() {
+                return;
+            }
+        });
+    }
+    drop(results_tx);
+
+    let deadline = Instant::now() + RECONCILE_DEADLINE;
+    let mut updated = 0u32;
+    let mut received = 0usize;
+    while received < total {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            // Outstanding fetches are abandoned; workers unwind once their
+            // bounded request ends and the send fails. Unreconciled tasks are
+            // picked up by the next snapshot pass.
+            break;
+        }
+        match results_rx.recv_timeout(remaining) {
+            Ok((task_id, Ok(remote))) => {
+                received += 1;
                 let remote_active = matches!(remote.status.as_str(), "running" | "paused");
                 if apply_remote_task(remote, app)?.is_some() {
                     updated = updated.saturating_add(1);
                 }
                 if remote_active {
                     if let Some(app) = app {
-                        ensure_poller(snapshot.id.clone(), settings.clone(), app.clone());
-                    } else {
-                        // Snapshot path without AppHandle still updates DB; poller starts on next start/resume.
+                        ensure_poller(task_id, settings.clone(), app.clone());
                     }
+                    // Snapshot path without AppHandle still updates the DB;
+                    // the poller starts on next start/resume.
                 }
             }
-            Err(_) => {
-                // Leave local state; avoid marking crashed solely because the sidecar was briefly down.
+            Ok((_task_id, Err(_))) => {
+                received += 1;
+                // Leave local state; avoid marking crashed solely because the
+                // sidecar was briefly down.
             }
+            Err(_) => break, // deadline elapsed or all workers exited early
         }
     }
     Ok(updated)
