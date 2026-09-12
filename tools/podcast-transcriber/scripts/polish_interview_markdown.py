@@ -67,9 +67,7 @@ from podcast_transcriber.common import (  # noqa: E402
     WORK,
 )
 from podcast_transcriber.deepseek import (  # noqa: E402
-    DeepSeekLengthTruncatedError as DeepSeekLengthTruncatedError,
-)
-from podcast_transcriber.deepseek import (  # noqa: E402
+    DeepSeekLengthTruncatedError as DeepSeekLengthTruncatedError,  # re-export
     deepseek_api_semaphore,
     deepseek_prompt_limit,
     effective_provider_name,
