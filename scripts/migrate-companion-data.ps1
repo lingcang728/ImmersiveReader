@@ -9,6 +9,25 @@ Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
+# Same sanitization as migrate-v3-production-data.ps1: a legacy config may carry
+# a plaintext api_key, and it must never land on disk in the managed location.
+function Remove-SecretProperties {
+    param($Value)
+    if ($null -eq $Value -or $Value -is [string] -or $Value.GetType().IsPrimitive) { return }
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [pscustomobject]) {
+        foreach ($item in $Value) { Remove-SecretProperties -Value $item }
+        return
+    }
+    $properties = @($Value.PSObject.Properties)
+    foreach ($property in $properties) {
+        if ($property.Name -match '^(?i:api_?key|deepseek_?api_?key)$') {
+            $Value.PSObject.Properties.Remove($property.Name)
+        } else {
+            Remove-SecretProperties -Value $property.Value
+        }
+    }
+}
+
 $root = Get-RepoRoot
 $runtime = Join-Path $root 'runtime\podcast'
 $target = Join-Path $env:LOCALAPPDATA 'ImmersiveReader\podcast'
@@ -39,10 +58,18 @@ if ((Test-Path -LiteralPath $targetConfig) -and -not $Force) {
         Join-Path $runtime 'app\config.example.json'
     }
     $raw = Get-Content -Raw -LiteralPath $source
-    $null = $raw | ConvertFrom-Json
+    $configToWrite = $raw | ConvertFrom-Json
+    $hadSecret = $raw -match '(?i)"(?:api_?key|deepseek_?api_?key)"\s*:\s*"[^"\s][^"]*"'
+    Remove-SecretProperties -Value $configToWrite
     $temporary = "$targetConfig.tmp"
-    Copy-Item -LiteralPath $source -Destination $temporary -Force
+    $configToWrite | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $temporary -Encoding utf8
     Move-Item -LiteralPath $temporary -Destination $targetConfig -Force
+    if ((Get-Content -Raw -LiteralPath $targetConfig) -match '(?i)"(?:api_?key|deepseek_?api_?key)"') {
+        throw '[migration] managed Podcast config still contains a key field'
+    }
+    if ($hadSecret) {
+        Write-Warning '[migration] api_key was stripped from the migrated Podcast config; re-enter it in app settings (stored in Windows Credential Manager).'
+    }
     Write-Output '[migration] Podcast config migrated without exposing its contents'
 }
 

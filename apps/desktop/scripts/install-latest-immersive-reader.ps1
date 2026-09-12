@@ -56,6 +56,19 @@ function Get-FileSha256Hex {
   return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+function ConvertTo-ThreePartVersion {
+  # Normalizes "1.2", "1.2.0", "1.2.0.0" to a comparable Major.Minor.Build so a
+  # four-part ProductVersion never reads as "newer" than the same semver.
+  param([AllowNull()][AllowEmptyString()][string]$Text)
+  if ([string]::IsNullOrWhiteSpace($Text) -or $Text -notmatch '(\d+(?:\.\d+){1,3})') {
+    return $null
+  }
+  $parsed = [version]$Matches[1]
+  $minor = if ($parsed.Minor -lt 0) { 0 } else { $parsed.Minor }
+  $build = if ($parsed.Build -lt 0) { 0 } else { $parsed.Build }
+  return [version]::new($parsed.Major, $minor, $build)
+}
+
 function Get-QuotedIconLocation {
   param(
     [Parameter(Mandatory)][string]$InstalledExe,
@@ -215,7 +228,18 @@ function Update-ImmersiveReaderShellIdentity {
     New-ItemProperty -Path $capabilitiesPath -Name "ApplicationName" -Value $registeredName -PropertyType String -Force | Out-Null
   }
 
+  # ImmersiveReader.Markdown is our own ProgId — always safe to refresh. The
+  # bare `md` ProgId may belong to another application; only rewrite it when
+  # its existing open command already points at this product family, matching
+  # the ownership guard used by the -RegisterMarkdownAssociations path.
   foreach ($progId in @("ImmersiveReader.Markdown", "md")) {
+    if ($progId -eq "md") {
+      $mdCommandPath = "HKCU:\Software\Classes\md\shell\open\command"
+      $existingCommand = (Get-ItemProperty -LiteralPath $mdCommandPath -Name "(default)" -ErrorAction SilentlyContinue).'(default)'
+      if (-not ($existingCommand -and $existingCommand -match "(?i)(mmbook|immersive-reader|沉浸阅读)")) {
+        continue
+      }
+    }
     $defaultIconPath = "HKCU:\Software\Classes\$progId\DefaultIcon"
     if (Test-Path -LiteralPath $defaultIconPath) {
       Set-Item -Path $defaultIconPath -Value $iconLocation
@@ -439,6 +463,32 @@ $installer = Get-ChildItem -LiteralPath $bundleDir -Filter "沉浸阅读_*_x64-s
   Select-Object -First 1
 if (-not $installer) {
   throw "No 沉浸阅读 NSIS installer found in $bundleDir"
+}
+
+# LastWriteTime picks the newest artifact, but the version encoded in the
+# filename must still be sane: a stale older build re-touched by a rebuild, or
+# a downgrade of the installed app, must fail loudly instead of installing.
+$installerVersion = ConvertTo-ThreePartVersion -Text $installer.Name
+if ($null -eq $installerVersion) {
+  throw "Cannot parse a version from installer name: $($installer.Name)"
+}
+$tauriConfigPath = Join-Path $desktopRoot "src-tauri\tauri.conf.json"
+$repoVersion = ConvertTo-ThreePartVersion -Text ([string](Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json).version)
+if ($null -eq $repoVersion) {
+  throw "Cannot parse version from $tauriConfigPath"
+}
+if ($installerVersion -lt $repoVersion) {
+  throw "Newest installer $($installer.Name) is v$installerVersion, older than the repository version v$repoVersion — rebuild instead of installing a stale artifact."
+}
+if ($installerVersion -gt $repoVersion) {
+  Write-Warning "Installer version $installerVersion is newer than the repository version $repoVersion."
+}
+$existingExe = Join-Path $InstallDir "immersive-reader.exe"
+if (Test-Path -LiteralPath $existingExe) {
+  $installedVersion = ConvertTo-ThreePartVersion -Text ([string](Get-Item -LiteralPath $existingExe).VersionInfo.ProductVersion)
+  if ($null -ne $installedVersion -and $installerVersion -lt $installedVersion) {
+    throw "Installer v$installerVersion would downgrade the installed v$installedVersion at $existingExe; uninstall first if a downgrade is intended."
+  }
 }
 
 if (-not (Test-Path -LiteralPath $InstallDir)) {

@@ -15,6 +15,7 @@ runtime/
 **/models/
 **/.browser-profile/
 **/.obscura-profile/
+**/.browser-cache/
 
 # User content and runtime state
 /Library/

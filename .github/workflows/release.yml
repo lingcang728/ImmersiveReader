@@ -57,6 +57,20 @@ jobs:
       - name: Install Zhihu build dependencies
         run: npm ci --prefix tools/zhihu-packer
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests and contract parity
+        shell: pwsh
+        run: |
+          python -m pip install --quiet jsonschema
+          python scripts/verify_contract_parity.py
+          npm run check --prefix apps/desktop
+          npm test --prefix apps/desktop
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+
       - name: Build contracts and Zhihu reader
         shell: pwsh
         run: |
@@ -74,6 +88,16 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content apps/desktop/package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoToml = Get-Content apps/desktop/src-tauri/Cargo.toml -Raw
+          $packageSection = [regex]::Match($cargoToml, '(?ms)^\[package\](.*?)(?=^\[)')
+          if (-not $packageSection.Success) { throw 'Cargo.toml is missing a [package] section.' }
+          $cargoMatch = [regex]::Match($packageSection.Groups[1].Value, '(?m)^\s*version\s*=\s*"([^"]+)"')
+          if (-not $cargoMatch.Success) { throw 'Cargo.toml [package] is missing a version.' }
+          $cargoVersion = $cargoMatch.Groups[1].Value
+          if ($version -cne $tauriVersion -or $version -cne $cargoVersion) {
+            throw "Version mismatch: package.json=$version tauri.conf.json=$tauriVersion Cargo.toml=$cargoVersion"
+          }
           if ('${{ github.ref_name }}' -cne "v$version") { throw 'Tag and package version differ.' }
           npm run tauri --prefix apps/desktop -- build --bundles nsis
           pwsh -NoProfile -File apps/desktop/scripts/collect-release.ps1
@@ -83,13 +107,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          $notesFile = "docs/release/$version/RELEASE_NOTES.md"
+          if (-not (Test-Path -LiteralPath $notesFile -PathType Leaf)) {
+            throw "Release notes missing for $version: $notesFile"
+          }
           gh release view '${{ github.ref_name }}' *> $null
           $exists = $LASTEXITCODE -eq 0
           $global:LASTEXITCODE = 0
           $installer = (Get-ChildItem -LiteralPath output/release -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
           if ($exists) {
             gh release upload '${{ github.ref_name }}' $installer output/release/latest.json --clobber
-            gh release edit '${{ github.ref_name }}' --draft=false --prerelease=false --title "沉浸阅读 ${{ github.ref_name }}" --notes-file docs/release/1.2.0/RELEASE_NOTES.md
+            gh release edit '${{ github.ref_name }}' --draft=false --prerelease=false --title "沉浸阅读 ${{ github.ref_name }}" --notes-file $notesFile
           } else {
-            gh release create '${{ github.ref_name }}' --verify-tag --title "沉浸阅读 ${{ github.ref_name }}" --notes-file docs/release/1.2.0/RELEASE_NOTES.md $installer output/release/latest.json
+            gh release create '${{ github.ref_name }}' --verify-tag --title "沉浸阅读 ${{ github.ref_name }}" --notes-file $notesFile $installer output/release/latest.json
           }

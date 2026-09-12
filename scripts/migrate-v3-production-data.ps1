@@ -345,6 +345,13 @@ $targetDatabase = Join-Path $LocalAppRoot 'Data\Zhihu\zhihu-packer.db'
 $targetProfile = Join-Path $LocalAppRoot 'Data\Private\ZhihuProfile'
 $targetSettings = Join-Path $ReaderRoot 'settings.json'
 
+# Capture the DeepSeek key into a script variable and scrub it from this
+# process's environment immediately: every child spawned below (sqlite3, npm)
+# inherits the environment and would otherwise receive the key, and a throw
+# before the old end-of-script cleanup left it set.
+$providedKey = [string]$env:IMMERSIVE_MIGRATION_DEEPSEEK_KEY
+$env:IMMERSIVE_MIGRATION_DEEPSEEK_KEY = $null
+
 $legacyConfigObject = Read-JsonObject -Path $legacyPodcastConfig
 $legacyKeyPresent = $null -ne (Get-DeepSeekValue -Config $legacyConfigObject)
 $preview = [ordered]@{
@@ -381,11 +388,12 @@ if (-not $Apply) {
 }
 if (Test-Path -LiteralPath $migrationRoot) { throw "迁移 RunId 已存在：$migrationRoot" }
 Assert-NoLiveImmersiveProcesses -Force:$Force
-$providedKey = [string]$env:IMMERSIVE_MIGRATION_DEEPSEEK_KEY
 if ([string]::IsNullOrWhiteSpace($providedKey)) {
     throw '应用迁移必须通过 IMMERSIVE_MIGRATION_DEEPSEEK_KEY 临时环境变量提供 DeepSeek Key。'
 }
 if ($providedKey -notmatch '^sk-[A-Za-z0-9_-]{16,}$') { throw 'DeepSeek Key 格式无效。' }
+
+try {
 
 New-Item -ItemType Directory -Path $migrationRoot -Force | Out-Null
 $rollbackRoot = Join-Path $migrationRoot 'rollback'
@@ -469,6 +477,9 @@ foreach ($target in $CredentialTargets) {
     if ([ImmersiveReaderCredential]::Read($target) -ne $providedKey) { throw "凭据读回校验失败：$target" }
 }
 $legacyKey = $null
+# The key is only needed for the credential provisioning above — clear the
+# in-memory copy here too; the finally block covers every exit path.
+$providedKey = $null
 
 # Podcast configuration and legacy outputs.
 $sanitizedLegacyBackup = Join-Path $rollbackRoot 'podcast\legacy-config.sanitized.json'
@@ -682,6 +693,10 @@ $receipt = [ordered]@{
 }
 Write-RollbackJournal
 Write-JsonAtomic -Path (Join-Path $migrationRoot 'receipt.json') -Value $receipt
-$providedKey = $null
-$env:IMMERSIVE_MIGRATION_DEEPSEEK_KEY = $null
 $receipt | ConvertTo-Json -Depth 20
+} finally {
+    # Guaranteed cleanup on every exit path (success, throw, Ctrl+C): the
+    # plaintext key copy and the inheritable env var never survive the apply.
+    $providedKey = $null
+    $env:IMMERSIVE_MIGRATION_DEEPSEEK_KEY = $null
+}

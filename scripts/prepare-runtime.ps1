@@ -18,11 +18,18 @@ $fullRuntime = [IO.Path]::GetFullPath($runtime)
 $zhihuSource = Join-Path $root 'tools\zhihu-packer'
 $podcastAppSource = Join-Path $root 'tools\podcast-transcriber'
 $contractsSource = Join-Path $root 'packages\contracts'
-$podcastSitePackages = if ($PodcastSource) {
-    Join-Path $PodcastSource '.venv\Lib\site-packages'
+# site-packages bootstrap order: an explicit -PodcastSource is honored as-is;
+# otherwise the tool's own dev venv (the real upstream source) wins, then — to
+# keep refreshes working — the already-provisioned runtime. Without the venv
+# fallback a clean machine dead-ended: building runtime required runtime.
+$podcastSitePackagesCandidates = @()
+if ($PodcastSource) {
+    $podcastSitePackagesCandidates += Join-Path $PodcastSource '.venv\Lib\site-packages'
 } else {
-    Join-Path $runtime 'podcast\python\Lib\site-packages'
+    $podcastSitePackagesCandidates += Join-Path $podcastAppSource '.venv\Lib\site-packages'
+    $podcastSitePackagesCandidates += Join-Path $runtime 'podcast\python\Lib\site-packages'
 }
+$podcastSitePackages = [string]($podcastSitePackagesCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1)
 $podcastModels = if ($PodcastSource) {
     Join-Path $PodcastSource 'models'
 } else {
@@ -96,6 +103,61 @@ function Assert-RuntimeNotInUse {
     }
 }
 
+function Assert-ZhihuNode {
+    param(
+        [Parameter(Mandatory)][string]$NodeExe,
+        [Parameter(Mandatory)][string]$Label
+    )
+    # tools\zhihu-packer\src\db.ts imports node:sqlite (DatabaseSync), which only
+    # exists in Node >= 22.5.0 — assert both the version and that the module
+    # actually loads so a torn or too-old vendored copy fails at build time.
+    $versionText = [string](& $NodeExe --version 2>&1 | Select-Object -First 1)
+    if ($versionText -notmatch 'v?(\d+\.\d+\.\d+)') {
+        throw "$Label node.exe 无法报告版本（可能损坏）：$NodeExe"
+    }
+    $version = [version]$Matches[1]
+    if ($version -lt [version]'22.5.0') {
+        throw "$Label node.exe $version 过旧：zhihu-packer 需要 node:sqlite（Node >= 22.5.0）：$NodeExe"
+    }
+    & $NodeExe -e "require('node:sqlite')" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Label node.exe 缺少可用的 node:sqlite 模块：$NodeExe"
+    }
+    Write-Output "[runtime] $Label node.exe $version (node:sqlite ok)"
+}
+
+function Assert-MediaTool {
+    param(
+        [Parameter(Mandatory)][string]$Exe,
+        [Parameter(Mandatory)][string]$Label
+    )
+    # ffmpeg/ffprobe must run and report a modern version — a binary that
+    # cannot execute means the vendored copy is corrupt.
+    $line = [string](& $Exe -version 2>&1 | Select-Object -First 1)
+    if ([string]::IsNullOrWhiteSpace($line) -or $line -notmatch 'version (\d+(?:\.\d+)+)') {
+        throw "$Label 无法报告版本（可能损坏）：$Exe"
+    }
+    if ([version]$Matches[1] -lt [version]'5.0') {
+        throw "$Label 版本过旧（要求 >= 5.0）：$Exe"
+    }
+    Write-Output "[runtime] $Label $line"
+}
+
+function Assert-PythonRuntime {
+    param(
+        [Parameter(Mandatory)][string]$PythonExe,
+        [Parameter(Mandatory)][string]$Label
+    )
+    $line = [string](& $PythonExe --version 2>&1 | Select-Object -First 1)
+    if ($line -notmatch 'Python (\d+\.\d+\.\d+)') {
+        throw "$Label python.exe 无法报告版本（可能损坏）：$PythonExe"
+    }
+    if ([version]$Matches[1] -lt [version]'3.9.0') {
+        throw "$Label python.exe 版本过旧（要求 >= 3.9）：$PythonExe"
+    }
+    Write-Output "[runtime] $Label $line"
+}
+
 function Get-CriticalRuntimeFiles {
     param([Parameter(Mandatory)][string]$RuntimeRoot)
 
@@ -164,6 +226,7 @@ if ($RefreshApps) {
     foreach ($requiredRuntime in @(
         (Join-Path $runtime 'zhihu\node\node.exe'),
         (Join-Path $runtime 'podcast\python\python.exe'),
+        (Join-Path $runtime 'podcast\ffmpeg\ffmpeg.exe'),
         (Join-Path $runtime 'podcast\models'),
         (Join-Path $zhihuSource 'dist\server.js'),
         (Join-Path $zhihuSource 'node_modules'),
@@ -171,6 +234,11 @@ if ($RefreshApps) {
     )) {
         Require-Path -Path $requiredRuntime
     }
+    # Vendored binaries are refreshed into installs unchanged — they must run
+    # and meet minimum versions, not merely exist.
+    Assert-ZhihuNode -NodeExe (Join-Path $runtime 'zhihu\node\node.exe') -Label 'vendored'
+    Assert-PythonRuntime -PythonExe (Join-Path $runtime 'podcast\python\python.exe') -Label 'vendored'
+    Assert-MediaTool -Exe (Join-Path $runtime 'podcast\ffmpeg\ffmpeg.exe') -Label 'vendored ffmpeg'
     Assert-RuntimeNotInUse
     $zhihuApp = Join-Path $runtime 'zhihu\app'
     $podcastApp = Join-Path $runtime 'podcast\app'
@@ -179,7 +247,7 @@ if ($RefreshApps) {
     Reset-AppDestination -Destination $podcastApp
     Reset-AppDestination -Destination $contractsRuntime
     Copy-Tree -Source $zhihuSource -Destination $zhihuApp `
-        -ExcludeDirectories @('.git', '.browser-profile', '.obscura-profile') `
+        -ExcludeDirectories @('.git', '.browser-profile', '.obscura-profile', '.browser-cache') `
         -ExcludeFiles @('*.log', '*.db', '*.db-*')
     Copy-Tree -Source $podcastAppSource -Destination $podcastApp `
         -ExcludeDirectories @('.git', '.venv', 'models', 'input', 'output', 'work', '.pytest_cache', '__pycache__') `
@@ -191,6 +259,18 @@ if ($RefreshApps) {
     exit 0
 }
 
+if (-not $podcastSitePackages) {
+    if ($PodcastSource) {
+        throw "-PodcastSource 缺少 site-packages：$(Join-Path $PodcastSource '.venv\Lib\site-packages')（需要 .venv 布局的旧安装/开发目录）。"
+    }
+    throw "找不到 Podcast site-packages 来源。请为 tools\podcast-transcriber 创建 .venv（pip install -r requirements.txt）、传入 -PodcastSource <旧安装目录>，或先恢复现有 runtime。"
+}
+if ($podcastSitePackages -ieq (Join-Path $runtime 'podcast\python\Lib\site-packages')) {
+    Write-Warning '[runtime] site-packages 复用自现有 runtime；如需干净自举请改用 tools\podcast-transcriber\.venv 或 -PodcastSource。'
+}
+if (-not (Test-Path -LiteralPath $podcastModels)) {
+    throw "缺少 Podcast 模型目录：$podcastModels（模型不在仓库内；传 -PodcastSource 或先恢复现有 runtime）。"
+}
 $required = @(
     (Join-Path $zhihuSource 'dist\server.js'),
     (Join-Path $zhihuSource 'node_modules'),
@@ -206,6 +286,14 @@ $required = @(
     $ffprobe
 )
 $required | ForEach-Object { Require-Path -Path $_ }
+
+# Assert the tool versions being vendored before anything is copied: the
+# zhihu sidecar needs node:sqlite (Node >= 22.5.0) and a binary that cannot
+# execute here would ship broken.
+Assert-ZhihuNode -NodeExe $node -Label 'source'
+Assert-PythonRuntime -PythonExe (Join-Path $PythonRoot 'python.exe') -Label 'source'
+Assert-MediaTool -Exe $ffmpeg -Label 'source ffmpeg'
+Assert-MediaTool -Exe $ffprobe -Label 'source ffprobe'
 
 if ($ValidateOnly) {
     Write-Output '[runtime] all reusable sources are available'
@@ -237,7 +325,7 @@ $podcastRuntime = Join-Path $stagingRuntime 'podcast'
 New-Item -ItemType Directory -Path (Join-Path $zhihuRuntime 'node') -Force | Out-Null
 Copy-Item -LiteralPath $node -Destination (Join-Path $zhihuRuntime 'node\node.exe')
 Copy-Tree -Source $zhihuSource -Destination (Join-Path $zhihuRuntime 'app') `
-    -ExcludeDirectories @('.git', '.browser-profile', '.obscura-profile') `
+    -ExcludeDirectories @('.git', '.browser-profile', '.obscura-profile', '.browser-cache') `
     -ExcludeFiles @('*.log', '*.db', '*.db-*')
 Copy-Tree -Source $EdgeRoot -Destination (Join-Path $zhihuRuntime 'chromium')
 Copy-Tree -Source $contractsSource -Destination (Join-Path $stagingRuntime 'packages\contracts') `
@@ -254,6 +342,14 @@ New-Item -ItemType Directory -Path (Join-Path $podcastRuntime 'ffmpeg') -Force |
 Copy-Item -LiteralPath $ffmpeg -Destination (Join-Path $podcastRuntime 'ffmpeg\ffmpeg.exe')
 Copy-Item -LiteralPath $ffprobe -Destination (Join-Path $podcastRuntime 'ffmpeg\ffprobe.exe')
 Copy-Tree -Source $podcastModels -Destination (Join-Path $podcastRuntime 'models')
+
+# The staged binaries must actually run before the swap: a truncated copy
+# would otherwise only fail at first launch, after the previous runtime was
+# already replaced.
+Assert-ZhihuNode -NodeExe (Join-Path $stagingRuntime 'zhihu\node\node.exe') -Label 'vendored'
+Assert-PythonRuntime -PythonExe (Join-Path $stagingRuntime 'podcast\python\python.exe') -Label 'vendored'
+Assert-MediaTool -Exe (Join-Path $stagingRuntime 'podcast\ffmpeg\ffmpeg.exe') -Label 'vendored ffmpeg'
+Assert-MediaTool -Exe (Join-Path $stagingRuntime 'podcast\ffmpeg\ffprobe.exe') -Label 'vendored ffprobe'
 
 Write-CriticalRuntimeManifest -RuntimeRoot $stagingRuntime
 

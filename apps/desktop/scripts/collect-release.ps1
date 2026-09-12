@@ -14,6 +14,13 @@ $tauriVersion = (Get-Content -LiteralPath (Join-Path $desktopRoot 'src-tauri\tau
 if ($version -cne $tauriVersion) { throw "版本不一致：npm=$version tauri=$tauriVersion" }
 $metadata = cargo metadata --format-version 1 --no-deps --manifest-path (Join-Path $desktopRoot 'src-tauri\Cargo.toml') | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw '无法解析 Cargo target 目录。' }
+# All three version declarations must agree — Cargo.toml is the one the Rust
+# crate and NSIS metadata actually carry.
+$cargoPackage = @($metadata.packages) | Where-Object { $_.name -eq 'immersive-reader' } | Select-Object -First 1
+if ($null -eq $cargoPackage) { throw '无法从 Cargo metadata 解析 immersive-reader crate。' }
+$cargoVersion = [string]$cargoPackage.version
+if (-not $cargoVersion) { throw '无法从 Cargo metadata 解析 immersive-reader crate 版本。' }
+if ($version -cne $cargoVersion) { throw "版本不一致：npm=$version cargo=$cargoVersion" }
 $source = Join-Path $metadata.target_directory "release\bundle\nsis\沉浸阅读_${version}_x64-setup.exe"
 $signaturePath = "$source.sig"
 if (-not (Test-Path -LiteralPath $source) -or -not (Test-Path -LiteralPath $signaturePath)) {
