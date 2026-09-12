@@ -106,8 +106,7 @@ pub fn suspend_process(process: HANDLE, process_id: u32) -> Result<(), String> {
         Ok(threads) => threads,
         Err(first) => process_thread_handles(process_id).map_err(|_| first)?,
     };
-    let mut suspended = 0_usize;
-    for thread in &threads {
+    for (suspended, thread) in threads.iter().enumerate() {
         let previous = unsafe { SuspendThread(thread.as_raw_handle() as HANDLE) };
         if previous == u32::MAX {
             let error = format!(
@@ -119,7 +118,6 @@ pub fn suspend_process(process: HANDLE, process_id: u32) -> Result<(), String> {
             }
             return Err(error);
         }
-        suspended += 1;
     }
     Ok(())
 }
