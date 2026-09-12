@@ -35,11 +35,11 @@ pub(super) fn tool_paths(runtime_root: &Path, kind: ToolKind) -> ToolPaths {
     }
 }
 
-pub(super) fn require_runtime(paths: &ToolPaths) -> Result<(), String> {
+pub(super) fn require_runtime(runtime_root: &Path, paths: &ToolPaths) -> Result<(), String> {
     if paths.executable.is_file() && paths.script.is_file() && paths.working_directory.is_dir() {
         return Ok(());
     }
-    Err("受管工具运行时不完整，请重新运行 scripts\\prepare-runtime.ps1。".to_string())
+    Err(crate::storage::runtime_bundle_help(runtime_root))
 }
 
 fn prepare_podcast_data(
@@ -67,7 +67,7 @@ pub(super) fn command_for(
     token: &str,
 ) -> Result<Command, String> {
     let paths = tool_paths(runtime_root, kind);
-    require_runtime(&paths)?;
+    require_runtime(runtime_root, &paths)?;
     let mut command = Command::new(&paths.executable);
     command
         .arg(&paths.script)

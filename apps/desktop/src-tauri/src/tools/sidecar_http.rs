@@ -6,6 +6,12 @@ use std::time::Duration;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Runtime `/health` probes use tighter bounds than request traffic: a hung
+/// sidecar (TCP accepts, never responds) fails in ~4s instead of holding the
+/// full 15s request timeout on every poll.
+const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const HEALTH_READ_TIMEOUT: Duration = Duration::from_secs(3);
+const HEALTH_TOTAL_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Copy)]
 struct HttpTimeouts {
@@ -37,6 +43,21 @@ impl SidecarHttpClient {
                 connect: CONNECT_TIMEOUT,
                 read: READ_TIMEOUT,
                 total: TOTAL_TIMEOUT,
+            },
+        )
+    }
+
+    /// Client for runtime health-gate probes: same loopback/bearer rules as
+    /// request traffic, but bounded by the health timeouts so a hung engine
+    /// is detected quickly on every status/request path.
+    pub(crate) fn for_health_probe(base_url: &str, token: &str) -> Result<Self, String> {
+        Self::with_timeouts(
+            base_url,
+            token,
+            HttpTimeouts {
+                connect: HEALTH_CONNECT_TIMEOUT,
+                read: HEALTH_READ_TIMEOUT,
+                total: HEALTH_TOTAL_TIMEOUT,
             },
         )
     }

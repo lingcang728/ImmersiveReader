@@ -5,6 +5,18 @@ use std::path::{Path, PathBuf};
 mod path_guard;
 pub use path_guard::validate_library_root;
 
+/// User-facing acquisition hint for the managed runtime bundle. The NSIS
+/// installer ships only the application; the multi-gigabyte runtime is a
+/// separate GitHub Release asset (`runtime-bundle.zip.*` volumes) that must
+/// be unpacked so `runtime\` sits next to the executable. See
+/// `docs/runtime-acquisition.md`.
+pub fn runtime_bundle_help(runtime_root: &Path) -> String {
+    format!(
+        "受管工具运行时缺失或不完整（期望位置：{}）。请从沉浸阅读 GitHub Release 下载同版本的 runtime-bundle.zip 全部分卷，合并解压到该目录后重启应用；获取与校验步骤见仓库 docs/runtime-acquisition.md。",
+        runtime_root.display()
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageLocations {

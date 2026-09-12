@@ -27,7 +27,9 @@ use ready::wait_for_ready;
 #[cfg(windows)]
 use sidecar_http::SidecarHttpClient;
 #[cfg(windows)]
-use tool_manager::{EngineHealth, LaunchClaim, ManagedProcess, ProcessDescriptor, ToolManager};
+use tool_manager::{
+    EngineHealth, LaunchClaim, ManagedProcess, ProbeOutcome, ProcessDescriptor, ToolManager,
+};
 
 #[cfg(windows)]
 static TOOL_MANAGER: OnceLock<Mutex<ToolManager>> = OnceLock::new();
@@ -162,12 +164,113 @@ fn persist_engine_exit(
     Ok(())
 }
 
+/// Runtime health-gate outcome for one managed engine.
+#[cfg(windows)]
+enum HealthGate {
+    /// No live managed process (never launched, still starting, or exited).
+    NotRunning,
+    /// `/health` answered within the probe timeout.
+    Healthy,
+    /// `/health` is failing but the restart threshold has not been reached —
+    /// the live process is still handed to callers.
+    Degraded,
+    /// The engine is hung but the restart backoff window has not elapsed, so
+    /// the process is left in place until the debounce permits a restart.
+    Hung,
+    /// The engine crossed the failure threshold and was destroyed through its
+    /// Job Object; the caller should launch a replacement.
+    Killed,
+}
+
+/// Probes `/health` on a live managed engine — bounded IO that always runs
+/// with `TOOL_MANAGER` released — then feeds the outcome back through a
+/// short lock. Once the consecutive-failure threshold is reached and the
+/// per-engine restart backoff permits, the process is removed and destroyed
+/// (Job kill) so the caller can launch a replacement.
+#[cfg(windows)]
+fn gate_engine_health(kind: ToolKind) -> Result<HealthGate, String> {
+    let key = kind.key();
+    // Short lock: liveness refresh plus the probe target (pid + port + token).
+    let target = {
+        let mut manager = tool_manager()?;
+        match manager.refresh(key)? {
+            Some(snapshot) if snapshot.exit_status.is_none() => {
+                match (snapshot.port, manager.token(key)) {
+                    (Some(port), Some(token)) => {
+                        Some((snapshot.pid, port, token.to_string()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    let Some((pid, port, token)) = target else {
+        return Ok(HealthGate::NotRunning);
+    };
+    // Unlocked IO: a hung sidecar fails within the ~4s probe timeout instead
+    // of burning the full 15s request timeout on every call forever.
+    let healthy = SidecarHttpClient::for_health_probe(&format!("http://127.0.0.1:{port}"), &token)
+        .and_then(|client| {
+            tauri::async_runtime::block_on(async move { client.health().await.map(|_| ()) })
+        })
+        .is_ok();
+    // Short lock: record the outcome, run the backoff gate, and take the
+    // process out so its Job kill runs with the lock released.
+    let taken = {
+        let mut manager = tool_manager()?;
+        match manager.record_health_probe(key, pid, healthy)? {
+            ProbeOutcome::Healthy => return Ok(HealthGate::Healthy),
+            ProbeOutcome::Gone => return Ok(HealthGate::NotRunning),
+            ProbeOutcome::Failed(failures)
+                if failures < tool_manager::HEALTH_FAILURE_THRESHOLD =>
+            {
+                return Ok(HealthGate::Degraded);
+            }
+            ProbeOutcome::Failed(_) => {
+                if manager.restart_permitted(key) {
+                    manager.take(key, pid)
+                } else {
+                    return Ok(HealthGate::Hung);
+                }
+            }
+        }
+    };
+    if let Some(process) = taken {
+        // Unlocked: the kill-on-close Job teardown terminates even a
+        // suspended child, then the reaper wait just collects the status.
+        // The forced exit is recorded like a crash so active tasks flip to
+        // interrupted and can be reconciled after the relaunch.
+        let exit_status = process.kill_and_reap();
+        if let Ok(mut control) = crate::control::ControlDb::open_current() {
+            let _ = control.mark_engine_crashed(key, pid, exit_status.and_then(|s| s.code));
+        }
+    }
+    Ok(HealthGate::Killed)
+}
+
+/// Relaunches an engine that was just destroyed by the health gate. Launch
+/// failures are logged and leave the engine stopped — `status` still reports
+/// the runtime state, and the next caller retries through the claimed path.
+#[cfg(windows)]
+fn relaunch_after_kill(tool: &str) {
+    match crate::settings::load_settings() {
+        Ok(settings) => {
+            if let Err(error) = launch(tool, &settings) {
+                eprintln!("[tools] {tool} restart after health failure failed: {error}");
+            }
+        }
+        Err(error) => eprintln!("[tools] {tool} restart after health failure skipped: {error}"),
+    }
+}
+
 pub fn status(tool: &str) -> Result<ToolStatus, String> {
     let kind = action_for(tool)?;
-    let paths = tool_paths(&crate::settings::runtime_root()?, kind);
-    let ready = require_runtime(&paths).is_ok();
+    let runtime_root = crate::settings::runtime_root()?;
+    let paths = tool_paths(&runtime_root, kind);
+    let ready = require_runtime(&runtime_root, &paths).is_ok();
     #[cfg(windows)]
-    let running = {
+    let (running, unresponsive) = {
         recover_stale_engine_instances()?;
         // Short lock: refresh only runs try_wait on the managed child.
         let snapshot = {
@@ -178,17 +281,44 @@ pub fn status(tool: &str) -> Result<ToolStatus, String> {
         if let Some(snapshot) = &snapshot {
             persist_engine_exit(kind, snapshot)?;
         }
-        snapshot.is_some_and(|snapshot| snapshot.exit_status.is_none())
+        if !snapshot.is_some_and(|snapshot| snapshot.exit_status.is_none()) {
+            (false, false)
+        } else {
+            // A live process is only "running" once /health answers; a hung
+            // one is killed through its Job Object and relaunched inline.
+            match gate_engine_health(kind)? {
+                HealthGate::Healthy => (true, false),
+                // Below the restart threshold the live process still serves
+                // callers; once the threshold trips and backoff debounces,
+                // report the hung engine as unresponsive.
+                HealthGate::Degraded => (true, false),
+                HealthGate::Hung => (true, true),
+                HealthGate::NotRunning => (false, false),
+                HealthGate::Killed => {
+                    relaunch_after_kill(tool);
+                    let snapshot = tool_manager()?.refresh(kind.key())?;
+                    (
+                        snapshot.is_some_and(|snapshot| snapshot.exit_status.is_none()),
+                        false,
+                    )
+                }
+            }
+        }
     };
     #[cfg(not(windows))]
-    let running = LAUNCHED
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .map_err(|_| "Tool launch state is unavailable".to_string())?
-        .contains(tool);
+    let (running, unresponsive) = (
+        LAUNCHED
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|_| "Tool launch state is unavailable".to_string())?
+            .contains(tool),
+        false,
+    );
     Ok(ToolStatus {
         tool: tool.to_string(),
-        state: if running {
+        state: if unresponsive {
+            "unresponsive"
+        } else if running {
             "running"
         } else if ready {
             "ready"
@@ -197,12 +327,13 @@ pub fn status(tool: &str) -> Result<ToolStatus, String> {
         }
         .to_string(),
         version: "1.0.0".to_string(),
-        message: if ready {
-            "受管运行时已就绪。"
+        message: if unresponsive {
+            "受管工具进程已连续多次未通过健康检查，正在自动恢复。".to_string()
+        } else if ready {
+            "受管运行时已就绪。".to_string()
         } else {
-            "受管运行时缺失，请重新准备运行时。"
-        }
-        .to_string(),
+            crate::storage::runtime_bundle_help(&runtime_root)
+        },
     })
 }
 
@@ -374,6 +505,15 @@ pub fn request_engine_warmup(kind: ToolKind) {
 #[cfg(windows)]
 fn zhihu_client(settings: &AppSettings) -> Result<SidecarHttpClient, String> {
     launch("zhihu", settings)?;
+    // A live engine that keeps failing /health is hung (e.g. a suspended
+    // node.exe): kill it through its Job Object and relaunch once the
+    // restart backoff permits. While the backoff still debounces, fail fast
+    // instead of burning a full request timeout on a frozen process.
+    match gate_engine_health(ToolKind::Zhihu)? {
+        HealthGate::Killed => launch("zhihu", settings)?,
+        HealthGate::Hung => return Err("ZHIHU_ENGINE_UNRESPONSIVE".to_string()),
+        HealthGate::Healthy | HealthGate::Degraded | HealthGate::NotRunning => {}
+    }
     let (port, token) = {
         let mut manager = tool_manager()?;
         let snapshot = manager
