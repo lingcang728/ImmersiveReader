@@ -1,5 +1,6 @@
 param(
     [switch]$Apply,
+    [switch]$Force,
     [string]$LibraryRoot = (Join-Path $env:USERPROFILE 'Documents\沉浸阅读\Library'),
     [string]$LegacyReaderRoot = (Join-Path $env:APPDATA 'mmbook'),
     [string]$ReaderRoot = (Join-Path $env:APPDATA 'immersive-reader'),
@@ -121,10 +122,18 @@ function Copy-TreeVerified {
         [Parameter(Mandatory)][string]$Target,
         [string[]]$ExcludedDirectories = @()
     )
-    if (Test-Path -LiteralPath $Target) {
-        throw "目标目录已存在，不能无损迁移：$Target"
-    }
     $sourceSummary = Get-TreeSummary -Root $Source -ExcludedDirectories $ExcludedDirectories
+    if (Test-Path -LiteralPath $Target) {
+        # Re-entrant apply: a target left by an earlier run is fine only when its
+        # content already matches the source; anything else still stops the run.
+        $existingSummary = Get-TreeSummary -Root $Target -ExcludedDirectories $ExcludedDirectories
+        if ($sourceSummary.files -eq $existingSummary.files -and
+            $sourceSummary.bytes -eq $existingSummary.bytes -and
+            $sourceSummary.sha256 -eq $existingSummary.sha256) {
+            return $existingSummary
+        }
+        throw "目标目录已存在且内容不一致，不能无损迁移：$Target"
+    }
     New-Item -ItemType Directory -Path $Target -Force | Out-Null
     foreach ($file in Get-TreeFiles -Root $Source -ExcludedDirectories $ExcludedDirectories) {
         $relative = Get-RelativePath -Root $Source -Path $file.FullName
@@ -288,6 +297,27 @@ function Backup-FileIfPresent {
     return $target
 }
 
+function Assert-NoLiveImmersiveProcesses {
+    param([switch]$Force)
+    # Checkpointing a live zhihu-packer.db or rewriting production settings while the
+    # app/sidecars run can tear data; refuse to apply unless -Force is explicit.
+    $query = "SELECT ProcessId, Name, CommandLine FROM Win32_Process " +
+        "WHERE Name='immersive-reader.exe' OR Name='沉浸阅读.exe' OR Name='node.exe' OR Name='python.exe'"
+    $live = @(Get-CimInstance -Query $query -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -ieq 'immersive-reader.exe' -or
+        $_.Name -ieq '沉浸阅读.exe' -or
+        ($_.Name -ieq 'node.exe' -and [string]$_.CommandLine -match 'zhihu-packer') -or
+        ($_.Name -ieq 'python.exe' -and [string]$_.CommandLine -match 'transcribe_podcasts|transcribe_task')
+    })
+    if ($live.Count -eq 0) { return }
+    $list = ($live | ForEach-Object { "$($_.Name) (PID $($_.ProcessId))" }) -join ', '
+    if ($Force) {
+        Write-Warning "检测到正在运行的相关进程，但被 -Force 放行：$list"
+        return
+    }
+    throw "检测到正在运行的 ImmersiveReader/知乎/播客进程：$list。请先退出应用（含托盘）与相关工具，或确认风险后加 -Force。"
+}
+
 foreach ($required in @($LibraryRoot, $LegacyReaderRoot, $ReaderRoot, $LegacyPodcastRoot, $LegacyZhihuRoot)) {
     if (-not (Test-Path -LiteralPath $required -PathType Container)) {
         throw "迁移源不存在：$required"
@@ -350,6 +380,7 @@ if (-not $Apply) {
     return
 }
 if (Test-Path -LiteralPath $migrationRoot) { throw "迁移 RunId 已存在：$migrationRoot" }
+Assert-NoLiveImmersiveProcesses -Force:$Force
 $providedKey = [string]$env:IMMERSIVE_MIGRATION_DEEPSEEK_KEY
 if ([string]::IsNullOrWhiteSpace($providedKey)) {
     throw '应用迁移必须通过 IMMERSIVE_MIGRATION_DEEPSEEK_KEY 临时环境变量提供 DeepSeek Key。'
@@ -361,6 +392,23 @@ $rollbackRoot = Join-Path $migrationRoot 'rollback'
 $conflictRoot = Join-Path $migrationRoot 'conflicts'
 New-Item -ItemType Directory -Path $rollbackRoot, $conflictRoot -Force | Out-Null
 $rollbackActions = [System.Collections.Generic.List[object]]::new()
+$script:RollbackJournalPath = Join-Path $rollbackRoot 'actions.json'
+function Write-RollbackJournal {
+    # The journal is rewritten atomically after every recorded action so a throw
+    # mid-apply never leaves rollback payload without its index.
+    Write-JsonAtomic -Path $script:RollbackJournalPath -Value ([ordered]@{
+        schemaVersion = 1
+        generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+        note = 'Actions are ordered records for manual/approved rollback. They never restore a plaintext API key.'
+        actions = @($rollbackActions)
+    })
+}
+function Add-RollbackAction {
+    param([Parameter(Mandatory)]$Action)
+    $rollbackActions.Add($Action)
+    Write-RollbackJournal
+}
+Write-RollbackJournal
 
 # Reading state and settings.
 $readingCreated = [System.Collections.Generic.List[string]]::new()
@@ -371,7 +419,7 @@ foreach ($source in Get-ChildItem -LiteralPath $LegacyReaderRoot -File -Filter '
     if (-not (Test-Path -LiteralPath $target)) {
         Copy-Item -LiteralPath $source.FullName -Destination $target
         $readingCreated.Add($target)
-        $rollbackActions.Add([pscustomobject]@{ type = 'deleteFile'; target = $target })
+        Add-RollbackAction ([pscustomobject]@{ type = 'deleteFile'; target = $target })
     } elseif ((Get-Sha256 $source.FullName) -eq (Get-Sha256 $target)) {
         $readingExisting += 1
     } else {
@@ -384,15 +432,15 @@ foreach ($source in Get-ChildItem -LiteralPath $LegacyReaderRoot -File -Filter '
 $recentTarget = Join-Path $ReaderRoot 'recent-files.json'
 $recentLegacy = Join-Path $LegacyReaderRoot 'recent-files.json'
 $recentBackup = Backup-FileIfPresent -Path $recentTarget -BackupRoot $rollbackRoot -Name 'reader\recent-files.json'
-if ($recentBackup) { $rollbackActions.Add([pscustomobject]@{ type = 'restoreFile'; source = $recentBackup; target = $recentTarget }) }
+if ($recentBackup) { Add-RollbackAction ([pscustomobject]@{ type = 'restoreFile'; source = $recentBackup; target = $recentTarget }) }
 $currentRecent = if (Test-Path $recentTarget) { @(Read-JsonObject $recentTarget) } else { @() }
 $legacyRecent = if (Test-Path $recentLegacy) { @(Read-JsonObject $recentLegacy) } else { @() }
 Write-JsonAtomic -Path $recentTarget -Value @(Merge-RecentFiles -Current $currentRecent -Legacy $legacyRecent)
 $settingsBackup = Backup-FileIfPresent -Path $targetSettings -BackupRoot $rollbackRoot -Name 'reader\settings.json'
 if ($settingsBackup) {
-    $rollbackActions.Add([pscustomobject]@{ type = 'restoreFile'; source = $settingsBackup; target = $targetSettings })
+    Add-RollbackAction ([pscustomobject]@{ type = 'restoreFile'; source = $settingsBackup; target = $targetSettings })
 } else {
-    $rollbackActions.Add([pscustomobject]@{ type = 'deleteFile'; target = $targetSettings })
+    Add-RollbackAction ([pscustomobject]@{ type = 'deleteFile'; target = $targetSettings })
 }
 Write-JsonAtomic -Path $targetSettings -Value ([ordered]@{ schemaVersion = 3; libraryRoot = [System.IO.Path]::GetFullPath($LibraryRoot) })
 $libraryReadingStates = @(Get-ChildItem -LiteralPath $LibraryRoot -File -Recurse -Filter '.reading.json')
@@ -416,7 +464,7 @@ foreach ($target in $CredentialTargets) {
     if ($null -eq $existing) {
         [ImmersiveReaderCredential]::Write($target, $providedKey)
         $credentialCreated.Add($target)
-        $rollbackActions.Add([pscustomobject]@{ type = 'deleteCredential'; target = $target })
+        Add-RollbackAction ([pscustomobject]@{ type = 'deleteCredential'; target = $target })
     }
     if ([ImmersiveReaderCredential]::Read($target) -ne $providedKey) { throw "凭据读回校验失败：$target" }
 }
@@ -428,10 +476,23 @@ Remove-SecretProperties -Value $legacyConfigObject
 Write-JsonAtomic -Path $sanitizedLegacyBackup -Value $legacyConfigObject
 Write-JsonAtomic -Path $legacyPodcastConfig -Value $legacyConfigObject
 if (Get-DeepSeekValue -Config (Read-JsonObject $legacyPodcastConfig)) { throw '旧 Podcast 配置仍包含明文 Key。' }
-if (Test-Path -LiteralPath $targetPodcast) { throw "Podcast 数据目标已存在：$targetPodcast" }
-New-Item -ItemType Directory -Path $targetPodcast -Force | Out-Null
-$rollbackActions.Add([pscustomobject]@{ type = 'deleteDirectory'; target = $targetPodcast })
 $targetConfig = Join-Path $targetPodcast 'config.json'
+$podcastTargetCreated = -not (Test-Path -LiteralPath $targetPodcast)
+if (-not $podcastTargetCreated) {
+    # Re-entrant apply: only tolerate a directory left by an earlier run of this
+    # migration (identical sanitized config); foreign content still stops the run.
+    if (-not (Test-Path -LiteralPath $targetConfig -PathType Leaf)) {
+        throw "Podcast 数据目标已存在且缺少 config.json，无法判定归属：$targetPodcast"
+    }
+    $existingConfigJson = (Read-JsonObject -Path $targetConfig) | ConvertTo-Json -Depth 30 -Compress
+    $expectedConfigJson = $legacyConfigObject | ConvertTo-Json -Depth 30 -Compress
+    if ($existingConfigJson -cne $expectedConfigJson) {
+        throw "Podcast 数据目标已存在且配置不同：$targetPodcast"
+    }
+} else {
+    New-Item -ItemType Directory -Path $targetPodcast -Force | Out-Null
+    Add-RollbackAction ([pscustomobject]@{ type = 'deleteDirectory'; target = $targetPodcast })
+}
 Write-JsonAtomic -Path $targetConfig -Value $legacyConfigObject
 if ((Get-Content -LiteralPath $targetConfig -Raw) -match '(?i)"(?:api_?key|deepseek_?api_?key)"') {
     throw '新 Podcast 配置仍包含 Key 字段。'
@@ -476,6 +537,7 @@ $markdownBefore = Get-TreeSummary -Root $zhihuLibrary -Filter '*.md' -ExcludedFi
 $provenanceBefore = @(Get-ChildItem -LiteralPath $zhihuLibrary -File -Recurse -Filter 'provenance.json' | ForEach-Object FullName)
 $temporaryDatabase = Join-Path $migrationRoot 'working\zhihu-packer.db'
 New-Item -ItemType Directory -Path (Split-Path -Parent $temporaryDatabase) -Force | Out-Null
+if (Test-Path -LiteralPath $temporaryDatabase) { Remove-Item -LiteralPath $temporaryDatabase -Force }
 $escapedTarget = $temporaryDatabase.Replace("'", "''")
 $null = Invoke-SqliteScalar $sqlite $legacyDatabase "VACUUM INTO '$escapedTarget';"
 & $npm --prefix (Join-Path $repoRoot 'tools\zhihu-packer') run migrate-legacy -- --database $temporaryDatabase --output $zhihuLibrary
@@ -484,9 +546,9 @@ if ((Invoke-SqliteScalar $sqlite $temporaryDatabase 'PRAGMA integrity_check;') -
 if ((Invoke-SqliteScalar $sqlite $temporaryDatabase 'PRAGMA foreign_key_check;')) { throw '新知乎数据库外键校验失败。' }
 $targetDatabaseBackup = Backup-FileIfPresent -Path $targetDatabase -BackupRoot $rollbackRoot -Name 'zhihu\target-db\zhihu-packer.db'
 if ($targetDatabaseBackup) {
-    $rollbackActions.Add([pscustomobject]@{ type = 'restoreFile'; source = $targetDatabaseBackup; target = $targetDatabase })
+    Add-RollbackAction ([pscustomobject]@{ type = 'restoreFile'; source = $targetDatabaseBackup; target = $targetDatabase })
 } else {
-    $rollbackActions.Add([pscustomobject]@{ type = 'deleteFile'; target = $targetDatabase })
+    Add-RollbackAction ([pscustomobject]@{ type = 'deleteFile'; target = $targetDatabase })
 }
 New-Item -ItemType Directory -Path (Split-Path -Parent $targetDatabase) -Force | Out-Null
 Copy-Item -LiteralPath $temporaryDatabase -Destination $targetDatabase -Force
@@ -495,7 +557,7 @@ $markdownAfter = Get-TreeSummary -Root $zhihuLibrary -Filter '*.md' -ExcludedFil
 if ($markdownBefore.sha256 -ne $markdownAfter.sha256) { throw '知乎 Markdown 在迁移期间发生变化。' }
 $provenanceAfter = @(Get-ChildItem -LiteralPath $zhihuLibrary -File -Recurse -Filter 'provenance.json' | ForEach-Object FullName)
 $provenanceCreated = @($provenanceAfter | Where-Object { $provenanceBefore -notcontains $_ })
-foreach ($path in $provenanceCreated) { $rollbackActions.Add([pscustomobject]@{ type = 'deleteFile'; target = $path }) }
+foreach ($path in $provenanceCreated) { Add-RollbackAction ([pscustomobject]@{ type = 'deleteFile'; target = $path }) }
 $targetDbCounts = [ordered]@{
     userVersion = [int](Invoke-SqliteScalar $sqlite $targetDatabase 'PRAGMA user_version;')
     items = [int64](Invoke-SqliteScalar $sqlite $targetDatabase 'SELECT COUNT(*) FROM items;')
@@ -511,7 +573,7 @@ if ($targetDbCounts.userVersion -ne 2 -or $targetDbCounts.archiveRevisions -ne $
 
 # Browser profile remains private; disposable Chromium caches are intentionally excluded.
 $profileSummary = Copy-TreeVerified -Source $legacyProfile -Target $targetProfile -ExcludedDirectories $ExcludedProfileDirectories
-$rollbackActions.Add([pscustomobject]@{ type = 'deleteDirectory'; target = $targetProfile })
+Add-RollbackAction ([pscustomobject]@{ type = 'deleteDirectory'; target = $targetProfile })
 
 # Reconcile every archive path against the catalog.
 $archivePathsJson = & $sqlite -batch -json $targetDatabase 'SELECT output_path FROM archive_revisions ORDER BY output_path;'
@@ -618,12 +680,7 @@ $receipt = [ordered]@{
         }
     }
 }
-Write-JsonAtomic -Path (Join-Path $rollbackRoot 'actions.json') -Value ([ordered]@{
-    schemaVersion = 1
-    generatedAt = (Get-Date).ToUniversalTime().ToString('o')
-    note = 'Actions are ordered records for manual/approved rollback. They never restore a plaintext API key.'
-    actions = @($rollbackActions)
-})
+Write-RollbackJournal
 Write-JsonAtomic -Path (Join-Path $migrationRoot 'receipt.json') -Value $receipt
 $providedKey = $null
 $env:IMMERSIVE_MIGRATION_DEEPSEEK_KEY = $null

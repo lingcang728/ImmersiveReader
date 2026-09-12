@@ -78,29 +78,54 @@ function Copy-TreeSafely {
     }
 }
 
-function Copy-SingleFileSafely {
+function Invoke-SqliteScalar {
+    param(
+        [Parameter(Mandatory)][string]$Sqlite,
+        [Parameter(Mandatory)][string]$Database,
+        [Parameter(Mandatory)][string]$Sql
+    )
+    $result = & $Sqlite -batch -noheader $Database $Sql
+    if ($LASTEXITCODE -ne 0) { throw "SQLite 命令失败，退出码 $LASTEXITCODE" }
+    return ([string]($result -join "`n")).Trim()
+}
+
+function Copy-SqliteDatabaseSafely {
     param(
         [Parameter(Mandatory)][string]$Source,
         [Parameter(Mandatory)][string]$Destination,
-        [Parameter(Mandatory)][bool]$Preview
+        [Parameter(Mandatory)][bool]$Preview,
+        [Parameter(Mandatory)][string]$Sqlite
     )
-    if (-not (Test-Path -LiteralPath $Source)) {
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
         throw "源文件不存在：$Source"
     }
-    if (Test-Path -LiteralPath $Destination) {
-        if ((Get-Hash -Path $Source) -ne (Get-Hash -Path $Destination)) {
-            throw "目标文件已存在且内容不同：$Destination"
+    # A plain file copy of a live WAL database can tear: committed rows may still sit
+    # in the -wal sidecar. VACUUM INTO reads through a transaction and emits one
+    # consistent main-file snapshot (same recipe as migration/sqlite.rs).
+    $snapshot = Join-Path ([IO.Path]::GetTempPath()) ("immersive-zhihu-db-{0}.db" -f [guid]::NewGuid().ToString('N'))
+    try {
+        $escapedSnapshot = $snapshot.Replace("'", "''")
+        $null = Invoke-SqliteScalar -Sqlite $Sqlite -Database $Source -Sql "VACUUM INTO '$escapedSnapshot';"
+        if ((Invoke-SqliteScalar -Sqlite $Sqlite -Database $snapshot -Sql 'PRAGMA integrity_check;') -ne 'ok') {
+            throw "数据库快照完整性校验失败：$Source"
         }
-        return 'existing'
-    }
-    if (-not $Preview) {
-        New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
-        Copy-Item -LiteralPath $Source -Destination $Destination
-        if ((Get-Hash -Path $Source) -ne (Get-Hash -Path $Destination)) {
-            throw "复制后哈希不一致：$Destination"
+        if (Test-Path -LiteralPath $Destination) {
+            if ((Get-Hash -Path $snapshot) -eq (Get-Hash -Path $Destination)) {
+                return 'existing'
+            }
+            throw "目标数据库已存在且内容不同：$Destination"
         }
+        if (-not $Preview) {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
+            Copy-Item -LiteralPath $snapshot -Destination $Destination
+            if ((Get-Hash -Path $snapshot) -ne (Get-Hash -Path $Destination)) {
+                throw "复制后哈希不一致：$Destination"
+            }
+        }
+        return 'pending'
+    } finally {
+        if (Test-Path -LiteralPath $snapshot) { Remove-Item -LiteralPath $snapshot -Force }
     }
-    return 'pending'
 }
 
 if (-not (Test-Path -LiteralPath $SourceRoot)) {
@@ -119,7 +144,9 @@ foreach ($book in Get-ChildItem -LiteralPath $sourceOutput -Directory) {
     $reports.Add((Copy-TreeSafely -Source $book.FullName -Destination (Join-Path $targetOutput $book.Name) -Preview $DryRun.IsPresent))
 }
 
-$dbState = Copy-SingleFileSafely -Source $sourceDb -Destination $targetDb -Preview $DryRun.IsPresent
+$sqlite = (Get-Command sqlite3.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+if (-not $sqlite) { throw '未找到已安装的 sqlite3.exe；按仓库规则不会自动安装第二份。' }
+$dbState = Copy-SqliteDatabaseSafely -Source $sourceDb -Destination $targetDb -Preview $DryRun.IsPresent -Sqlite $sqlite
 if (Test-Path -LiteralPath $sourceProfile) {
     $reports.Add((Copy-TreeSafely -Source $sourceProfile -Destination $targetProfile -Preview $DryRun.IsPresent))
 }

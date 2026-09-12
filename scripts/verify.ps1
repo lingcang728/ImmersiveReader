@@ -22,14 +22,17 @@ function Assert-NoLegacyRuntimeReferences {
         'C:\Users\15pro\Desktop\MyProject\Zhihu_packer',
         'C:\Users\15pro\Desktop\MyProject\PodcastTranscriber'
     )
-    $sourceFiles = & git -C $root ls-files -- apps packages tools |
+    $sourceFiles = @(& git -C $root ls-files -- apps packages tools |
         Where-Object { $_ -match '\.(rs|ts|svelte|py|ps1)$' } |
-        ForEach-Object { Join-Path $root $_ }
+        ForEach-Object { Join-Path $root $_ } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     if ($LASTEXITCODE -ne 0) {
         throw "无法读取 Git 源文件清单，退出码 $LASTEXITCODE"
     }
     foreach ($legacy in $legacyRoots) {
-        $matches = $sourceFiles | Select-String -SimpleMatch -Pattern $legacy
+        # -LiteralPath makes Select-String open each file and scan its contents;
+        # piping the path strings would only search the paths themselves.
+        $matches = Select-String -LiteralPath $sourceFiles -SimpleMatch -Pattern $legacy
         if ($matches) {
             throw "产品源码仍引用旧项目路径：$legacy"
         }
