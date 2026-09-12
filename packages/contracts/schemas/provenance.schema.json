@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://immersive-reader.local/schemas/provenance-v1.json",
+  "title": "Immersive Reader Book Provenance v1",
+  "description": "provenance.json written next to manifest.json by the publish paths: Rust podcast/publish.rs::write_book_metadata and zhihu-packer publish.ts::writeMetadata. Mirrors the BookProvenance struct in apps/desktop/src-tauri/src/library.rs. Absent file means no provenance (manual imports); when present every field is emitted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "bookId", "sourceId", "sourceKind", "createdByTaskId", "lastSuccessfulTaskId", "revision", "manifestSha256", "engineVersion", "updatedAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "bookId": { "type": "string", "minLength": 1 },
+    "sourceId": { "type": "string", "minLength": 1 },
+    "sourceKind": { "enum": ["zhihu", "podcast"] },
+    "createdByTaskId": { "type": "string", "minLength": 1 },
+    "lastSuccessfulTaskId": { "type": "string", "minLength": 1 },
+    "revision": { "type": "integer", "minimum": 0 },
+    "manifestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "engineVersion": { "type": "string", "minLength": 1 },
+    "updatedAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$" }
+  }
+}

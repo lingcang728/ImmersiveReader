@@ -1,0 +1,24 @@
+{
+  // Typecheck-only config covering the test files. `tsconfig.json` stays the
+  // emit config (rootDir src → dist/index.js) so `tsc -p tsconfig.json` keeps
+  // producing the artifact zhihu-packer and the parity fallback import.
+  // Run: `tsc -p tsconfig.test.json` (or `npm run typecheck`).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "declaration": false,
+    // The tests import `../src/index.ts` with an explicit extension — legal
+    // here only because this config never emits.
+    "allowImportingTsExtensions": true,
+    // Contracts has no node_modules of its own; resolve node:test/fs/assert
+    // typings from the always-installed desktop dependencies.
+    "types": ["node"],
+    "typeRoots": [
+      "./node_modules/@types",
+      "../../apps/desktop/node_modules/@types",
+      "../../tools/zhihu-packer/node_modules/@types"
+    ]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

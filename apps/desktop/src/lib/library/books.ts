@@ -7,7 +7,7 @@ export interface BookChapter {
 	id: string;
 	path: string;
 	title: string;
-	date?: string;
+	date?: string | null;
 	voteCount: number;
 	wordCount: number;
 }

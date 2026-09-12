@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://immersive-reader.local/schemas/publish-transaction-v1.json",
+  "title": "Immersive Reader Publish Transaction Journal v1",
+  "description": ".transactions/<transactionId>.json journal written by Rust publish/transaction.rs (PublishTransaction). The three relative paths are Library-root-relative and must satisfy the shared safe-relative-path rules.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "transactionId", "taskId", "bookId", "incomingRelativePath", "finalRelativePath", "rollbackRelativePath", "manifestSha256", "provenanceSha256", "revision", "phase", "createdAt", "updatedAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "transactionId": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+    "taskId": { "type": "string", "minLength": 1 },
+    "bookId": { "type": "string", "minLength": 1 },
+    "incomingRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?=[\\s\\S]*\\S)(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ](?:/(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ])*$"
+    },
+    "finalRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?=[\\s\\S]*\\S)(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ](?:/(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ])*$"
+    },
+    "rollbackRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?=[\\s\\S]*\\S)(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ](?:/(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ])*$"
+    },
+    "manifestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "provenanceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "revision": { "type": "integer", "minimum": 0 },
+    "phase": { "enum": ["prepared", "old_moved", "new_moved", "committed", "rolled_back"] },
+    "createdAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$" },
+    "updatedAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$" }
+  }
+}

@@ -22,11 +22,16 @@
         "required": ["id", "path", "title", "voteCount", "wordCount"],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
-          "path": { "type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*\\u0000)(?=.*\\S).+$" },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Forward-slash relative path; every segment must be non-empty, not . or .., free of \\ NUL : < > | ? *, not a reserved device basename (CON/PRN/AUX/NUL/COM1-9/LPT1-9 case-insensitively, before the first .), and not end in . or space. Mirrors isSafeRelativePath (TS) and is_safe_relative_path (Rust).",
+            "pattern": "^(?!/)(?![A-Za-z]:)(?=[\\s\\S]*\\S)(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ](?:/(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ])*$"
+          },
           "title": { "type": "string", "minLength": 1 },
           "date": { "type": "string", "format": "date", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
           "voteCount": { "type": "integer", "minimum": 0 },
-          "wordCount": { "type": "integer", "minimum": 0 },
+          "wordCount": { "type": "integer", "minimum": 0, "description": "Non-whitespace Unicode scalar value (code point) count, not UTF-16 code units." },
           "metadataStatus": { "enum": ["complete", "inferred"] }
         }
       }
