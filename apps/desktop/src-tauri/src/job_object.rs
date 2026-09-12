@@ -11,8 +11,8 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenThread, ResumeThread, SuspendThread, TerminateProcess, CREATE_NO_WINDOW,
-    CREATE_SUSPENDED, PROCESS_TERMINATE, THREAD_SUSPEND_RESUME,
+    GetProcessId, OpenThread, ResumeThread, SuspendThread, TerminateProcess, CREATE_NO_WINDOW,
+    CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
 };
 
 fn for_each_process_thread(
@@ -61,7 +61,30 @@ fn for_each_process_thread(
     Ok(count)
 }
 
-pub fn suspend_process(process_id: u32) -> Result<(), String> {
+/// P1-3: verify that `process` — a handle captured while the child was
+/// known-live — still resolves to `expected_pid`. Acting on a bare PID can hit
+/// a recycled, unrelated process; the open handle pins the process object so
+/// `GetProcessId` proves identity before any suspend/resume/terminate.
+fn verify_process_identity(process: HANDLE, expected_pid: u32) -> Result<(), String> {
+    // SAFETY: callers pass a live process handle (duplicated at spawn); it must
+    // carry PROCESS_QUERY_LIMITED_INFORMATION, which std's spawn handle has.
+    let actual = unsafe { GetProcessId(process) };
+    if actual == 0 {
+        return Err(format!(
+            "GetProcessId failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if actual != expected_pid {
+        return Err(format!(
+            "PROCESS_IDENTITY_MISMATCH: handle owns pid {actual}, expected {expected_pid}"
+        ));
+    }
+    Ok(())
+}
+
+pub fn suspend_process(process: HANDLE, process_id: u32) -> Result<(), String> {
+    verify_process_identity(process, process_id)?;
     for_each_process_thread(process_id, |thread| {
         let previous = unsafe { SuspendThread(thread) };
         if previous == u32::MAX {
@@ -75,7 +98,8 @@ pub fn suspend_process(process_id: u32) -> Result<(), String> {
     Ok(())
 }
 
-pub fn resume_process(process_id: u32) -> Result<(), String> {
+pub fn resume_process(process: HANDLE, process_id: u32) -> Result<(), String> {
+    verify_process_identity(process, process_id)?;
     for_each_process_thread(process_id, |thread| {
         let previous = unsafe { ResumeThread(thread) };
         if previous == u32::MAX {
@@ -89,16 +113,11 @@ pub fn resume_process(process_id: u32) -> Result<(), String> {
     Ok(())
 }
 
-pub fn terminate_process(process_id: u32) -> Result<(), String> {
-    let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, process_id) };
-    if process.is_null() {
-        return Err(format!(
-            "OpenProcess failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let process = unsafe { OwnedHandle::from_raw_handle(process) };
-    if unsafe { TerminateProcess(process.as_raw_handle() as HANDLE, 1) } == 0 {
+/// Terminate via a pinned process handle — no PID is involved, so this can
+/// never kill an unrelated process that recycled the PID (P1-3).
+pub fn terminate_process(process: HANDLE) -> Result<(), String> {
+    // SAFETY: caller passes a live process handle with PROCESS_TERMINATE.
+    if unsafe { TerminateProcess(process, 1) } == 0 {
         return Err(format!(
             "TerminateProcess failed: {}",
             std::io::Error::last_os_error()
@@ -248,11 +267,13 @@ impl JobObject {
 
 #[cfg(test)]
 mod tests {
-    use super::JobObject;
+    use super::{resume_process, suspend_process, terminate_process, JobObject};
+    use std::os::windows::io::{AsRawHandle, BorrowedHandle};
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::HANDLE;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -291,5 +312,43 @@ mod tests {
         drop(job);
 
         assert!(status.success());
+    }
+
+    #[test]
+    fn process_actions_verify_handle_pid_identity() {
+        // P1-3: suspend/resume/terminate must refuse a handle↔PID mismatch —
+        // the pinned handle proves the target, the PID alone never can.
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -t 127.0.0.1 >NUL"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("test child must start");
+        // SAFETY: child is live; borrow ends with try_clone_to_owned.
+        let borrowed = unsafe { BorrowedHandle::borrow_raw(child.as_raw_handle()) };
+        let process = borrowed
+            .try_clone_to_owned()
+            .expect("process handle must duplicate");
+        let handle = process.as_raw_handle() as HANDLE;
+        let pid = child.id();
+
+        let wrong_pid = pid.wrapping_add(1);
+        let error = suspend_process(handle, wrong_pid)
+            .expect_err("mismatched pid must be rejected before touching threads");
+        assert!(error.contains("PROCESS_IDENTITY_MISMATCH"));
+
+        suspend_process(handle, pid).expect("suspend own worker by verified handle");
+        resume_process(handle, pid).expect("resume own worker by verified handle");
+        terminate_process(handle).expect("terminate own worker by pinned handle");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if child.try_wait().expect("child status must load").is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("pinned-handle TerminateProcess did not kill the child");
     }
 }

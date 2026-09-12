@@ -1,34 +1,98 @@
 use crate::control::ControlDb;
 use crate::settings::AppSettings;
 use crate::storage::StorageLocations;
-use crate::tasks::TaskEvent;
+use crate::tasks::{LifecycleState, TaskEvent, TaskKind};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
 use crate::job_object::JobObject;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, BorrowedHandle, OwnedHandle};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HANDLE;
 
 #[cfg(windows)]
 type WorkerJob = JobObject;
 #[cfg(not(windows))]
 type WorkerJob = ();
 
+/// P1-5: each worker loads a multi-GB Whisper model — run at most one at a
+/// time. Additional tasks stay Queued and are pulled up when the slot frees.
+const MAX_CONCURRENT_WORKERS: usize = 1;
+/// P1-5: bound the pull-next loop so a permanently failing task cannot spin it.
+const MAX_QUEUE_DRAIN_ATTEMPTS: usize = 16;
+/// P1-2: once the worker has exited, drain its pipes at most this long. A
+/// grandchild (e.g. ffmpeg spawned by python) that inherited the pipe write
+/// end otherwise keeps EOF — and the pump loop — from ever arriving.
+const POST_EXIT_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 type ChildHandle = Arc<Mutex<Option<Child>>>;
 struct WorkerEntry {
+    /// Kept for the non-Windows terminate path (`child.kill()`); on Windows
+    /// all control ops go through `process`, so the field is unread there.
+    #[cfg_attr(windows, allow(dead_code))]
     child: ChildHandle,
+    /// Process handle duplicated at spawn time (P1-3). While it stays open the
+    /// OS cannot recycle the PID, so suspend/resume/terminate always land on
+    /// our worker and never on an unrelated process that reused the PID.
+    #[cfg(windows)]
+    process: OwnedHandle,
     pid: u32,
+    /// Pairing truth for P1-4: true while this process's threads are suspended
+    /// by `pause_task`. Mutated only under the `workers()` mutex so a double
+    /// pause can never stack a second suspend count.
+    suspended: bool,
 }
 
 static ACTIVE_WORKERS: OnceLock<Mutex<HashMap<String, WorkerEntry>>> = OnceLock::new();
 
 fn workers() -> &'static Mutex<HashMap<String, WorkerEntry>> {
     ACTIVE_WORKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Agreed accessor added to `control.rs` by a parallel change:
+/// `pub fn task_lifecycle_state(&self, task_id: &str) -> Result<Option<String>, String>`
+/// returning the serde snake_case `LifecycleState` name. This local trait
+/// supplies the identical signature until that inherent method lands; inherent
+/// methods shadow trait methods, so the real implementation then takes over
+/// with no further edit needed here.
+#[allow(dead_code)]
+trait ControlDbLifecycleState {
+    fn task_lifecycle_state(&self, task_id: &str) -> Result<Option<String>, String>;
+}
+
+#[allow(dead_code)]
+impl ControlDbLifecycleState for ControlDb {
+    fn task_lifecycle_state(&self, task_id: &str) -> Result<Option<String>, String> {
+        Ok(self.task_snapshot(task_id)?.map(|snapshot| {
+            serde_json::to_value(&snapshot.lifecycle_state)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default()
+        }))
+    }
+}
+
+/// DB lifecycle for `task_id` (None when the DB or row is unreadable/absent).
+fn worker_lifecycle_state(task_id: &str) -> Option<String> {
+    ControlDb::open_current()
+        .ok()
+        .and_then(|control| control.task_lifecycle_state(task_id).ok().flatten())
+}
+
+fn is_paused_state(state: &str) -> bool {
+    state.eq_ignore_ascii_case("paused") || state.eq_ignore_ascii_case("pausing")
+}
+
+fn is_terminal_state(state: &str) -> bool {
+    state.eq_ignore_ascii_case("terminal") || state.eq_ignore_ascii_case("stopping")
 }
 
 fn emit_task(app: &AppHandle, event: &TaskEvent) {
@@ -80,6 +144,10 @@ fn podcast_worker_command(
         // decoding always sees valid UTF-8 bytes.
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
+        // Models are vendored under runtime\podcast\models; faster-whisper must
+        // fail fast on an unresolvable model reference instead of attempting a
+        // ~1.6GB HF download from a machine that may be offline (P1-27).
+        .env("HF_HUB_OFFLINE", "1")
         .env("IMMERSIVE_PODCAST_DATA_ROOT", data_root)
         .env("IMMERSIVE_PODCAST_CACHE_ROOT", cache_root)
         .env("IMMERSIVE_LIBRARY_ROOT", &settings.library_root)
@@ -122,6 +190,21 @@ fn spawn_worker(command: &mut Command) -> Result<(Child, Option<WorkerJob>), Str
     Ok((command.spawn().map_err(|error| error.to_string())?, None))
 }
 
+/// P1-3: duplicate the child's process handle so the worker entry can pin the
+/// exact process object. While any handle to a process is open the OS cannot
+/// recycle its PID — a stored bare PID can otherwise name a stranger process.
+#[cfg(windows)]
+fn duplicate_process_handle(child: &Child) -> Result<OwnedHandle, String> {
+    // SAFETY: `child` is alive here and its process handle is valid; the
+    // borrow lasts only for the duration of the DuplicateHandle call inside
+    // try_clone_to_owned (DUPLICATE_SAME_ACCESS — std's spawn handle carries
+    // PROCESS_ALL_ACCESS, covering TERMINATE / QUERY_LIMITED_INFORMATION).
+    let borrowed = unsafe { BorrowedHandle::borrow_raw(child.as_raw_handle()) };
+    borrowed
+        .try_clone_to_owned()
+        .map_err(|error| format!("DuplicateHandle failed: {error}"))
+}
+
 fn read_stream<R: std::io::Read + Send + 'static>(
     stream: R,
     name: &'static str,
@@ -160,15 +243,27 @@ fn read_stream<R: std::io::Read + Send + 'static>(
     });
 }
 
+/// P1-28: the worker's structured `{"type":"fatal",...}` NDJSON line is the
+/// authoritative failure reason (contract channel: stdout; stderr accepted too
+/// for robustness). Returns the line when it is a fatal record.
+fn worker_fatal_line(line: &str) -> Option<String> {
+    let value = parse_worker_json(line)?;
+    (value.get("type").and_then(Value::as_str) == Some("fatal")).then(|| line.to_string())
+}
+
 fn apply_worker_line(
     task_id: &str,
     app: &AppHandle,
     stream: &str,
     line: &str,
-    last_error: &mut Option<String>,
+    stderr_tail: &mut Option<String>,
+    fatal_error: &mut Option<String>,
 ) {
     if stream == "stderr" && !line.trim().is_empty() {
-        *last_error = Some(line.to_string());
+        *stderr_tail = Some(line.to_string());
+    }
+    if let Some(fatal) = worker_fatal_line(line) {
+        *fatal_error = Some(fatal);
     }
     if let Ok(mut control) = ControlDb::open_current() {
         if let Ok(Some(event)) = control.record_worker_line(task_id, stream, line) {
@@ -182,9 +277,15 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
     let mut child = match child_handle.lock() {
         Ok(mut slot) => match slot.take() {
             Some(child) => child,
-            None => return,
+            None => {
+                release_worker_entry(&task_id);
+                return;
+            }
         },
-        Err(_) => return,
+        Err(_) => {
+            release_worker_entry(&task_id);
+            return;
+        }
     };
     if let Some(stdout) = child.stdout.take() {
         read_stream(stdout, "stdout", sender.clone());
@@ -196,17 +297,35 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
     drop(sender);
 
     // Consume stdout/stderr live while the worker runs — never wait for exit first.
-    let mut last_error = None;
+    let mut stderr_tail = None;
+    let mut fatal_error = None;
     let mut exit_status: Option<Result<ExitStatus, std::io::Error>> = None;
+    // P1-2: a grandchild (e.g. ffmpeg spawned by python) inherits the pipe
+    // write end, so reader threads may never see EOF and the channel may never
+    // disconnect. Once the worker's exit is observed, drain queued lines for a
+    // bounded grace only — dropping the Job Object below then kills the
+    // lingering grandchildren (child processes of a job member join the job
+    // automatically because no BREAKAWAY flag is allowed on it).
+    let mut drain_deadline: Option<Instant> = None;
     loop {
         match receiver.recv_timeout(Duration::from_millis(150)) {
             Ok((stream, line)) => {
-                apply_worker_line(&task_id, &app, &stream, &line, &mut last_error);
+                apply_worker_line(
+                    &task_id,
+                    &app,
+                    &stream,
+                    &line,
+                    &mut stderr_tail,
+                    &mut fatal_error,
+                );
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if exit_status.is_none() {
                     match child.try_wait() {
-                        Ok(Some(status)) => exit_status = Some(Ok(status)),
+                        Ok(Some(status)) => {
+                            exit_status = Some(Ok(status));
+                            drain_deadline = Some(Instant::now() + POST_EXIT_DRAIN_GRACE);
+                        }
                         Ok(None) => {}
                         Err(error) => {
                             exit_status = Some(Err(error));
@@ -222,10 +341,21 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
                 break;
             }
         }
-        // Once the process has exited, keep draining until readers disconnect.
+        // Once the process has exited, keep draining until readers disconnect —
+        // but never longer than the post-exit grace window.
         if exit_status.is_some() {
             while let Ok((stream, line)) = receiver.try_recv() {
-                apply_worker_line(&task_id, &app, &stream, &line, &mut last_error);
+                apply_worker_line(
+                    &task_id,
+                    &app,
+                    &stream,
+                    &line,
+                    &mut stderr_tail,
+                    &mut fatal_error,
+                );
+            }
+            if drain_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break;
             }
         }
     }
@@ -233,6 +363,9 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
         Some(value) => value,
         None => child.wait(),
     };
+    // P1-28: the structured fatal NDJSON line is the real failure reason; only
+    // fall back to the stderr tail when no fatal record was seen.
+    let resolved_error = fatal_error.or(stderr_tail);
     let (success, status_message) = match status {
         Ok(value) if value.success() => {
             // Must honor settings.libraryRoot — bare StorageLocations::current() points at the
@@ -248,7 +381,7 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
                     })?;
                 Ok(())
             }) {
-                Ok(()) => (true, last_error),
+                Ok(()) => (true, resolved_error),
                 Err(error) => (
                     false,
                     Some(
@@ -262,7 +395,7 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
                 ),
             }
         }
-        Ok(value) => (value.success(), last_error),
+        Ok(value) => (value.success(), resolved_error),
         Err(error) => (false, Some(error.to_string())),
     };
     if let Ok(mut control) = ControlDb::open_current() {
@@ -273,26 +406,90 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
         }
     }
     drop(job);
+    release_worker_entry(&task_id);
+    // P1-5: the concurrency slot is free — promote the next queued podcast
+    // task so a batch drains one worker at a time.
+    start_next_queued_worker(&app);
+}
+
+fn release_worker_entry(task_id: &str) {
     if let Ok(mut active) = workers().lock() {
-        active.remove(&task_id);
+        active.remove(task_id);
+    }
+}
+
+/// P1-1/P1-15: task ids that currently have a live in-process worker —
+/// startup recovery (`recover_interrupted_tasks`) uses this set to tell a
+/// dead-Running row apart from a task a live worker is still driving.
+/// Consumed as `podcast::active_podcast_task_ids` — the `pub use` re-export
+/// lives in podcast.rs (owned by the recovery-path change).
+#[allow(dead_code)]
+pub fn active_podcast_task_ids() -> Result<Vec<String>, String> {
+    let active = workers()
+        .lock()
+        .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
+    Ok(active.keys().cloned().collect())
+}
+
+/// P1-5: with the concurrency slot free, promote the oldest Queued podcast
+/// task. Composed over the existing `task_snapshots` control-db API (a
+/// dedicated `next_queued_podcast_task` accessor could replace it later —
+/// flagged for the control.rs owner).
+fn start_next_queued_worker(app: &AppHandle) {
+    let mut tried: HashSet<String> = HashSet::new();
+    loop {
+        if tried.len() >= MAX_QUEUE_DRAIN_ATTEMPTS {
+            break;
+        }
+        let next = ControlDb::open_current()
+            .ok()
+            .and_then(|control| control.task_snapshots(Some(TaskKind::Podcast)).ok())
+            .and_then(|snapshots| {
+                snapshots
+                    .into_iter()
+                    .filter(|snapshot| {
+                        snapshot.lifecycle_state == LifecycleState::Queued
+                            && !tried.contains(&snapshot.id)
+                    })
+                    .min_by(|a, b| a.created_at.cmp(&b.created_at))
+                    .map(|snapshot| snapshot.id)
+            });
+        let Some(task_id) = next else {
+            break;
+        };
+        tried.insert(task_id.clone());
+        match start_task(task_id, app.clone()) {
+            // Either the slot is now consumed, or a concurrent start won it and
+            // this task stayed Queued — its runner will pull it up later.
+            Ok(()) => break,
+            // Start failed (task terminated or spawn error recorded) — try the
+            // next queued task instead of stalling the whole queue.
+            Err(_) => continue,
+        }
     }
 }
 
 pub fn start_task(task_id: String, app: AppHandle) -> Result<(), String> {
     crate::cache::validate_task_id(&task_id)?;
-    {
-        let active = workers()
-            .lock()
-            .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
-        if active.contains_key(&task_id) {
-            return Err("WORKER_ALREADY_RUNNING".to_string());
-        }
+    // P1-5: hold the workers lock across admission + spawn so the single-slot
+    // cap is atomic — two concurrent starts can never both see a free slot.
+    let mut active = workers()
+        .lock()
+        .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
+    if active.contains_key(&task_id) {
+        return Err("WORKER_ALREADY_RUNNING".to_string());
+    }
+    if active.len() >= MAX_CONCURRENT_WORKERS {
+        // Leave the task Queued; run_worker pulls the next queued task when
+        // this slot frees, so the batch drains one worker at a time.
+        return Ok(());
     }
     let locations = StorageLocations::current()?;
     let settings = crate::settings::load_settings()?;
     let mut command = podcast_worker_command(&locations, &settings, &task_id)?;
     persist_starting(&app, &task_id)?;
-    let (child, job) = match spawn_worker(&mut command) {
+    #[allow(unused_mut)] // `mut` only used by the Windows handle-dup failure path.
+    let (mut child, job) = match spawn_worker(&mut command) {
         Ok(value) => value,
         Err(error) => {
             let mut control = ControlDb::open_current()?;
@@ -303,19 +500,34 @@ pub fn start_task(task_id: String, app: AppHandle) -> Result<(), String> {
         }
     };
     let pid = child.id();
+    #[cfg(windows)]
+    let process = match duplicate_process_handle(&child) {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Ok(mut control) = ControlDb::open_current() {
+                if let Ok(Some(event)) =
+                    control.finish_worker_task(&task_id, false, Some(&error))
+                {
+                    emit_task(&app, &event);
+                }
+            }
+            return Err(error);
+        }
+    };
     let child_handle = Arc::new(Mutex::new(Some(child)));
-    {
-        let mut active = workers()
-            .lock()
-            .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
-        active.insert(
-            task_id.clone(),
-            WorkerEntry {
-                child: Arc::clone(&child_handle),
-                pid,
-            },
-        );
-    }
+    active.insert(
+        task_id.clone(),
+        WorkerEntry {
+            child: Arc::clone(&child_handle),
+            #[cfg(windows)]
+            process,
+            pid,
+            suspended: false,
+        },
+    );
+    drop(active);
     thread::spawn({
         let task_id = task_id.clone();
         let app = app.clone();
@@ -329,19 +541,24 @@ pub fn stop_all() -> Result<(), String> {
         .lock()
         .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
     for entry in active.values() {
-        let _ = terminate_task(entry.pid, &entry.child);
+        let _ = terminate_task(entry);
     }
     Ok(())
 }
 
-fn terminate_task(pid: u32, _child: &ChildHandle) -> Result<(), String> {
+fn terminate_task(entry: &WorkerEntry) -> Result<(), String> {
     #[cfg(windows)]
     {
-        crate::job_object::terminate_process(pid)
+        let _ = entry.pid;
+        // The pinned process handle identifies our worker even if its PID was
+        // somehow recycled — never a bare OpenProcess(pid) (P1-3).
+        crate::job_object::terminate_process(entry.process.as_raw_handle() as HANDLE)
     }
     #[cfg(not(windows))]
     {
-        let mut slot = _child
+        let _ = entry.pid;
+        let mut slot = entry
+            .child
             .lock()
             .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
         let process = slot
@@ -352,15 +569,30 @@ fn terminate_task(pid: u32, _child: &ChildHandle) -> Result<(), String> {
 }
 
 pub fn pause_task(task_id: &str) -> Result<(), String> {
-    let active = workers()
+    let mut active = workers()
         .lock()
         .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
     let entry = active
-        .get(task_id)
+        .get_mut(task_id)
         .ok_or_else(|| "WORKER_NOT_RUNNING".to_string())?;
+    // P1-4: suspend must be idempotent. Two guards:
+    //  1. `entry.suspended` — the pairing flag; survives the DB being flipped
+    //     Paused->Running when buffered worker lines are replayed through
+    //     record_worker_line.
+    //  2. DB lifecycle — if the host already recorded Paused, never stack a
+    //     second suspend count on the process.
+    let lifecycle = worker_lifecycle_state(task_id);
+    if entry.suspended
+        || lifecycle.as_deref().is_some_and(is_paused_state)
+        || lifecycle.as_deref().is_some_and(is_terminal_state)
+    {
+        return Ok(());
+    }
     #[cfg(windows)]
     {
-        crate::job_object::suspend_process(entry.pid)
+        crate::job_object::suspend_process(entry.process.as_raw_handle() as HANDLE, entry.pid)?;
+        entry.suspended = true;
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -376,19 +608,30 @@ pub fn cancel_task(task_id: &str) -> Result<(), String> {
     let entry = active
         .get(task_id)
         .ok_or_else(|| "WORKER_NOT_RUNNING".to_string())?;
-    terminate_task(entry.pid, &entry.child)
+    terminate_task(entry)
 }
 
 pub fn resume_task(task_id: &str) -> Result<(), String> {
-    let active = workers()
+    let mut active = workers()
         .lock()
         .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
     let entry = active
-        .get(task_id)
+        .get_mut(task_id)
         .ok_or_else(|| "WORKER_NOT_RUNNING".to_string())?;
+    // P1-4: `entry.suspended` is the pairing truth — only resume when WE still
+    // hold a live suspend, so ResumeThread can never underflow a stranger's
+    // count. When the flag is set but the DB was flipped back to Running by
+    // buffered worker lines, resuming is still the repair: leaving the process
+    // frozen while the UI shows Running is exactly the deadlock being fixed.
+    let lifecycle = worker_lifecycle_state(task_id);
+    if lifecycle.as_deref().is_some_and(is_terminal_state) || !entry.suspended {
+        return Ok(());
+    }
     #[cfg(windows)]
     {
-        crate::job_object::resume_process(entry.pid)
+        crate::job_object::resume_process(entry.process.as_raw_handle() as HANDLE, entry.pid)?;
+        entry.suspended = false;
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -397,14 +640,13 @@ pub fn resume_task(task_id: &str) -> Result<(), String> {
     }
 }
 
-#[allow(dead_code)]
 fn parse_worker_json(line: &str) -> Option<Value> {
     serde_json::from_str(line).ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_worker_json, read_stream};
+    use super::{parse_worker_json, read_stream, worker_fatal_line};
     use std::io::Cursor;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -443,5 +685,18 @@ mod tests {
             Some(42)
         );
         assert!(parse_worker_json("plain worker log").is_none());
+    }
+
+    #[test]
+    fn fatal_ndjson_line_is_detected_and_ignored_when_absent() {
+        // P1-28: only a structured type=fatal record beats the stderr tail.
+        assert!(worker_fatal_line("ctranslate2 warning noise").is_none());
+        assert!(worker_fatal_line(r#"{"type":"progress","percent":1}"#).is_none());
+        assert!(worker_fatal_line(r#"{"type":"completed"}"#).is_none());
+        let fatal = r#"{"type":"fatal","errorCode":"MODEL_INCOMPATIBLE","message":"模型不兼容"}"#;
+        assert_eq!(worker_fatal_line(fatal).as_deref(), Some(fatal));
+        // A fatal record on stderr counts too — the tail-line fallback would
+        // otherwise miss a fatal followed by more stderr noise.
+        assert!(worker_fatal_line("{not json").is_none());
     }
 }
