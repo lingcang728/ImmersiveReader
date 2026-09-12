@@ -202,17 +202,29 @@ mod tests {
         assert!(error.contains("QA run id"));
     }
 
+    /// Serializes tests that mutate `IMMERSIVE_QA_RUN_ID`; env vars are
+    /// process-global, so two tests writing different run ids concurrently
+    /// otherwise observe each other's value mid-assertion.
+    static QA_RUN_ID_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Restores `IMMERSIVE_QA_RUN_ID` even when the test panics so the env
     /// mutation cannot leak into parallel tests.
     struct QaRunIdEnvGuard {
         previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl QaRunIdEnvGuard {
         fn set(value: &str) -> Self {
+            let lock = QA_RUN_ID_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let previous = std::env::var_os("IMMERSIVE_QA_RUN_ID");
             std::env::set_var("IMMERSIVE_QA_RUN_ID", value);
-            Self { previous }
+            Self {
+                previous,
+                _lock: lock,
+            }
         }
     }
 
