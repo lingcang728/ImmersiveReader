@@ -36,13 +36,15 @@ struct SuccessRow {
 }
 
 fn success_rows(executable: &Path, database: &Path) -> Result<Vec<SuccessRow>, String> {
-    let archive_check = Command::new(executable)
+    // P3-26: sqlite3 invocations go through the bounded runner — a hung
+    // child can no longer block reconciliation forever.
+    let mut archive_check_command = Command::new(executable);
+    archive_check_command
         .arg("-batch")
         .arg("-noheader")
         .arg(database)
-        .arg("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='archive_revisions';")
-        .output()
-        .map_err(|error| format!("SQLite executable failed to start: {error}"))?;
+        .arg("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='archive_revisions';");
+    let archive_check = super::sqlite::run_bounded(&mut archive_check_command)?;
     if !archive_check.status.success() {
         return Err(format!(
             "SQLite catalog check failed: {}",
@@ -55,13 +57,13 @@ fn success_rows(executable: &Path, database: &Path) -> Result<Vec<SuccessRow>, S
     } else {
         "SELECT ti.item_id, i.url, ti.output_path FROM task_items ti JOIN items i ON i.id = ti.item_id WHERE ti.status = 'success' ORDER BY ti.item_id, ti.updated_at;"
     };
-    let result = Command::new(executable)
+    let mut query_command = Command::new(executable);
+    query_command
         .arg("-batch")
         .arg("-json")
         .arg(database)
-        .arg(sql)
-        .output()
-        .map_err(|error| format!("SQLite executable failed to start: {error}"))?;
+        .arg(sql);
+    let result = super::sqlite::run_bounded(&mut query_command)?;
     if !result.status.success() {
         return Err(format!(
             "SQLite reconciliation query failed: {}",
@@ -75,7 +77,15 @@ fn success_rows(executable: &Path, database: &Path) -> Result<Vec<SuccessRow>, S
     serde_json::from_str(&raw).map_err(|error| error.to_string())
 }
 
-fn markdown_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+/// P3-22: bound the archive walk the same way importer.rs's
+/// MAX_IMPORT_DEPTH does — a junction-looped or pathological output tree
+/// must not recurse without limit.
+const MAX_RECONCILE_DEPTH: usize = 64;
+
+fn markdown_files(root: &Path, files: &mut Vec<PathBuf>, depth: usize) -> Result<(), String> {
+    if depth > MAX_RECONCILE_DEPTH {
+        return Ok(());
+    }
     if !root.exists() {
         return Ok(());
     }
@@ -98,7 +108,11 @@ fn markdown_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
         return Ok(());
     }
     for entry in fs::read_dir(root).map_err(|error| error.to_string())? {
-        markdown_files(&entry.map_err(|error| error.to_string())?.path(), files)?;
+        markdown_files(
+            &entry.map_err(|error| error.to_string())?.path(),
+            files,
+            depth + 1,
+        )?;
     }
     Ok(())
 }
@@ -158,7 +172,7 @@ pub fn reconcile_zhihu_archive(
 ) -> Result<ReconciliationReport, String> {
     let rows = success_rows(executable, database)?;
     let mut files = Vec::new();
-    markdown_files(output_root, &mut files)?;
+    markdown_files(output_root, &mut files, 0)?;
     files.sort();
     let mut issues = Vec::new();
     let mut referenced = BTreeSet::new();

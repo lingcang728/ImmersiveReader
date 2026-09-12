@@ -3,7 +3,8 @@ use std::os::windows::process::CommandExt;
 use std::process::{Child, Command};
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next,
+    PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -15,10 +16,11 @@ use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
 };
 
-fn for_each_process_thread(
-    process_id: u32,
-    mut action: impl FnMut(HANDLE) -> Result<(), String>,
-) -> Result<u32, String> {
+/// P3-26: enumerate the target's threads fully first, then act on the
+/// collected handles. The previous shape acted *during* enumeration, so a
+/// `Thread32Next`/`SuspendThread` failure mid-pass left the process
+/// half-suspended with no record of which threads were frozen.
+fn process_thread_handles(process_id: u32) -> Result<Vec<OwnedHandle>, String> {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return Err(format!(
@@ -38,14 +40,12 @@ fn for_each_process_thread(
             std::ptr::from_mut(&mut entry),
         )
     };
-    let mut count = 0;
+    let mut threads = Vec::new();
     while found != 0 {
         if entry.th32OwnerProcessID == process_id {
             let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
             if !thread.is_null() {
-                let thread = unsafe { OwnedHandle::from_raw_handle(thread) };
-                action(thread.as_raw_handle() as HANDLE)?;
-                count += 1;
+                threads.push(unsafe { OwnedHandle::from_raw_handle(thread) });
             }
         }
         found = unsafe {
@@ -55,10 +55,23 @@ fn for_each_process_thread(
             )
         };
     }
-    if count == 0 {
+    if threads.is_empty() {
         return Err("PROCESS_THREADS_NOT_FOUND".to_string());
     }
-    Ok(count)
+    Ok(threads)
+}
+
+fn resume_thread_handles(threads: &[OwnedHandle]) -> Result<(), String> {
+    for thread in threads {
+        let previous = unsafe { ResumeThread(thread.as_raw_handle() as HANDLE) };
+        if previous == u32::MAX {
+            return Err(format!(
+                "ResumeThread failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// P1-3: verify that `process` — a handle captured while the child was
@@ -85,32 +98,139 @@ fn verify_process_identity(process: HANDLE, expected_pid: u32) -> Result<(), Str
 
 pub fn suspend_process(process: HANDLE, process_id: u32) -> Result<(), String> {
     verify_process_identity(process, process_id)?;
-    for_each_process_thread(process_id, |thread| {
-        let previous = unsafe { SuspendThread(thread) };
+    // P3-26: a mid-apply failure must not leave the process half-suspended —
+    // resume exactly the threads this call froze before reporting the error.
+    // A failed enumeration suspends nothing, so retrying the snapshot once is
+    // always safe.
+    let threads = match process_thread_handles(process_id) {
+        Ok(threads) => threads,
+        Err(first) => process_thread_handles(process_id).map_err(|_| first)?,
+    };
+    let mut suspended = 0_usize;
+    for thread in &threads {
+        let previous = unsafe { SuspendThread(thread.as_raw_handle() as HANDLE) };
         if previous == u32::MAX {
-            return Err(format!(
+            let error = format!(
                 "SuspendThread failed: {}",
                 std::io::Error::last_os_error()
-            ));
+            );
+            for frozen in threads.iter().take(suspended) {
+                unsafe { ResumeThread(frozen.as_raw_handle() as HANDLE) };
+            }
+            return Err(error);
         }
-        Ok(())
-    })?;
+        suspended += 1;
+    }
     Ok(())
 }
 
 pub fn resume_process(process: HANDLE, process_id: u32) -> Result<(), String> {
     verify_process_identity(process, process_id)?;
-    for_each_process_thread(process_id, |thread| {
-        let previous = unsafe { ResumeThread(thread) };
-        if previous == u32::MAX {
-            return Err(format!(
-                "ResumeThread failed: {}",
-                std::io::Error::last_os_error()
-            ));
+    // P3-26: re-resuming an already-running thread is a harmless no-op
+    // (previous suspend count 0), so a mid-apply failure just retries the
+    // whole enumeration+apply once — the process can never be stranded
+    // half-resumed by a single flaky call.
+    let mut last_error = String::new();
+    for _ in 0..2 {
+        match process_thread_handles(process_id).and_then(|threads| resume_thread_handles(&threads))
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = error,
         }
-        Ok(())
-    })?;
+    }
+    Err(last_error)
+}
+
+/// All live descendants of `root_pid` from one ToolHelp process snapshot,
+/// breadth-first over the parent→child edges (P3-27). A snapshot failure
+/// degrades to "no descendants" — the caller still acts on the root.
+fn descendant_process_ids(root_pid: u32) -> Vec<u32> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
+    // SAFETY: [Category 8 - FFI boundary] TH32CS_SNAPPROCESS returns an owned
+    // read-only system process snapshot handle.
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..PROCESSENTRY32W::default()
+    };
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let mut found = unsafe {
+        Process32FirstW(
+            snapshot.as_raw_handle() as HANDLE,
+            std::ptr::from_mut(&mut entry),
+        )
+    };
+    while found != 0 {
+        children
+            .entry(entry.th32ParentProcessID)
+            .or_default()
+            .push(entry.th32ProcessID);
+        // SAFETY: [Category 8 - FFI boundary] same live snapshot and valid
+        // PROCESSENTRY32W storage reused for the next enumeration result.
+        found = unsafe {
+            Process32NextW(
+                snapshot.as_raw_handle() as HANDLE,
+                std::ptr::from_mut(&mut entry),
+            )
+        };
+    }
+    let mut descendants = Vec::new();
+    let mut seen = std::collections::HashSet::from([root_pid]);
+    let mut queue = std::collections::VecDeque::from([root_pid]);
+    while let Some(pid) = queue.pop_front() {
+        for child in children.get(&pid).into_iter().flatten() {
+            if seen.insert(*child) {
+                descendants.push(*child);
+                queue.push_back(*child);
+            }
+        }
+    }
+    descendants
+}
+
+fn suspend_process_by_pid(process_id: u32) {
+    // Best-effort per descendant: a process that exited mid-walk simply has
+    // no threads to collect.
+    if let Ok(threads) = process_thread_handles(process_id) {
+        for thread in &threads {
+            unsafe { SuspendThread(thread.as_raw_handle() as HANDLE) };
+        }
+    }
+}
+
+/// P3-27: suspending only the worker's own threads left grandchildren
+/// (e.g. ffmpeg spawned by python.exe) running while the UI claimed Paused —
+/// Job Objects have no suspend verb, so walk the ToolHelp parent chain and
+/// suspend every live descendant's threads too.
+///
+/// Caveats: the root is suspended first so it cannot spawn new children, but
+/// a grandchild created between the root suspend and the snapshot can still
+/// slip through (single-snapshot TOCTOU); a descendant that exits mid-walk
+/// is skipped. Descendant pids come from the fresh snapshot — a recycled
+/// grandchild pid could in principle pause a stranger process, but the
+/// matching `resume_process_tree` releases it again, and the root's pinned
+/// handle keeps its own identity check intact.
+pub fn suspend_process_tree(process: HANDLE, process_id: u32) -> Result<(), String> {
+    suspend_process(process, process_id)?;
+    for descendant in descendant_process_ids(process_id) {
+        suspend_process_by_pid(descendant);
+    }
     Ok(())
+}
+
+/// P3-27: resume counterpart of [`suspend_process_tree`] — descendants first
+/// so the root never wakes to observe still-frozen children. Descendants
+/// that already exited are skipped; resume is a no-op on running threads.
+pub fn resume_process_tree(process: HANDLE, process_id: u32) -> Result<(), String> {
+    for descendant in descendant_process_ids(process_id) {
+        if let Ok(threads) = process_thread_handles(descendant) {
+            let _ = resume_thread_handles(&threads);
+        }
+    }
+    resume_process(process, process_id)
 }
 
 /// Terminate via a pinned process handle — no PID is involved, so this can

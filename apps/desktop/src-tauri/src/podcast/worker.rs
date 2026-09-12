@@ -35,10 +35,9 @@ const POST_EXIT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 type ChildHandle = Arc<Mutex<Option<Child>>>;
 struct WorkerEntry {
-    /// Kept for the non-Windows terminate path (`child.kill()`); on Windows
-    /// all control ops go through `process`, so the field is unread there.
-    #[cfg_attr(windows, allow(dead_code))]
-    child: ChildHandle,
+    // P3-26: no `Child` slot — `run_worker` owns the Child and the
+    // non-Windows terminate path signals the pinned `pid` instead, so a
+    // stored Option<Child> would be write-only.
     /// Process handle duplicated at spawn time (P1-3). While it stays open the
     /// OS cannot recycle the PID, so suspend/resume/terminate always land on
     /// our worker and never on an unrelated process that reused the PID.
@@ -155,10 +154,8 @@ fn podcast_worker_command(
             "IMMERSIVE_PODCAST_MODEL_ROOT",
             locations.runtime_root.join("podcast/models"),
         )
-        .env(
-            "IMMERSIVE_PODCAST_PYTHON",
-            locations.runtime_root.join("podcast/python/python.exe"),
-        )
+        // P3-24: IMMERSIVE_PODCAST_PYTHON was injected but nothing in
+        // tools/podcast-transcriber ever read it — removed.
         .env(
             "PATH",
             std::env::join_paths(path_parts).map_err(|error| error.to_string())?,
@@ -497,11 +494,9 @@ fn release_worker_entry(task_id: &str) {
 }
 
 /// P1-1/P1-15: task ids that currently have a live in-process worker —
-/// startup recovery (`recover_interrupted_tasks`) uses this set to tell a
-/// dead-Running row apart from a task a live worker is still driving.
-/// Consumed as `podcast::active_podcast_task_ids` — the `pub use` re-export
-/// lives in podcast.rs (owned by the recovery-path change).
-#[allow(dead_code)]
+/// startup recovery (`recover_interrupted_tasks`, called from the lib.rs
+/// setup sweep) uses this set to tell a dead-Running row apart from a task
+/// a live worker is still driving. No frontend command exposes it.
 pub fn active_podcast_task_ids() -> Result<Vec<String>, String> {
     let active = workers()
         .lock()
@@ -593,7 +588,6 @@ pub fn start_task(task_id: String, app: AppHandle) -> Result<(), String> {
     active.insert(
         task_id.clone(),
         WorkerEntry {
-            child: Arc::clone(&child_handle),
             #[cfg(windows)]
             process,
             pid,
@@ -630,15 +624,26 @@ fn terminate_task(entry: &WorkerEntry) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = entry.pid;
-        let mut slot = entry
-            .child
-            .lock()
-            .map_err(|_| "WORKER_STATE_UNAVAILABLE".to_string())?;
-        let process = slot
-            .as_mut()
-            .ok_or_else(|| "WORKER_NOT_RUNNING".to_string())?;
-        process.kill().map_err(|error| error.to_string())
+        // P3-26: `run_worker` takes the Child out of the shared slot at
+        // startup, so the old `slot.as_mut().kill()` always hit `None` and
+        // reported WORKER_NOT_RUNNING for a live worker. Only the pinned pid
+        // remains — signal it through kill(1). The pid cannot be recycled
+        // while this entry is registered: `run_worker` only releases the
+        // entry after wait() reaps the child, so the (possibly zombie)
+        // process still owns it until then.
+        let status = Command::new("kill")
+            .arg("-KILL")
+            .arg(entry.pid.to_string())
+            .status()
+            .map_err(|error| error.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "WORKER_KILL_FAILED: kill -KILL {} exited with {status}",
+                entry.pid
+            ))
+        }
     }
 }
 
@@ -664,7 +669,12 @@ pub fn pause_task(task_id: &str) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        crate::job_object::suspend_process(entry.process.as_raw_handle() as HANDLE, entry.pid)?;
+        // P3-27: tree suspend — a bare suspend_process only froze python.exe
+        // while ffmpeg grandchildren kept running under a "Paused" UI.
+        crate::job_object::suspend_process_tree(
+            entry.process.as_raw_handle() as HANDLE,
+            entry.pid,
+        )?;
         entry.suspended = true;
         Ok(())
     }
@@ -703,7 +713,10 @@ pub fn resume_task(task_id: &str) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        crate::job_object::resume_process(entry.process.as_raw_handle() as HANDLE, entry.pid)?;
+        crate::job_object::resume_process_tree(
+            entry.process.as_raw_handle() as HANDLE,
+            entry.pid,
+        )?;
         entry.suspended = false;
         Ok(())
     }

@@ -1,8 +1,71 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+/// P3-26: bound one external sqlite3 invocation — `.output()` had no
+/// timeout, so a hung child blocked the whole migration forever. On timeout
+/// the child is killed and reaped.
+const SQLITE_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// Pipe drains stop after this many bytes — a runaway child spamming stdout
+/// can never grow the buffer without bound.
+const SQLITE_OUTPUT_CAP: u64 = 4 * 1024 * 1024;
+
+fn spawn_drain(stream: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(stream) = stream {
+            let _ = stream.take(SQLITE_OUTPUT_CAP).read_to_end(&mut buffer);
+        }
+        buffer
+    })
+}
+
+/// Spawn `command` with piped stdout/stderr, drain both on threads (a child
+/// writing past the pipe buffer cannot deadlock the exit poll), and bound
+/// the wait by [`SQLITE_COMMAND_TIMEOUT`]. `pub(super)` so
+/// `reconciliation.rs` shares the same bound for its sqlite3 calls.
+pub(super) fn run_bounded(command: &mut Command) -> Result<Output, String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("SQLite executable failed to start: {error}"))?;
+    let stdout_reader = spawn_drain(child.stdout.take());
+    let stderr_reader = spawn_drain(child.stderr.take());
+    let deadline = Instant::now() + SQLITE_COMMAND_TIMEOUT;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                timed_out = true;
+                let _ = child.kill();
+                break child.wait().map_err(|error| error.to_string());
+            }
+            Err(error) => break Err(format!("SQLite wait failed: {error}")),
+        }
+    };
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if timed_out {
+        return Err("SQLITE_COMMAND_TIMEOUT".to_string());
+    }
+    let status = status?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,13 +88,13 @@ pub struct MigrationReceipt {
 }
 
 fn sqlite(executable: &Path, database: &Path, sql: &str) -> Result<String, String> {
-    let output = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("-batch")
         .arg("-noheader")
         .arg(database)
-        .arg(sql)
-        .output()
-        .map_err(|error| format!("SQLite executable failed to start: {error}"))?;
+        .arg(sql);
+    let output = run_bounded(&mut command)?;
     if !output.status.success() {
         return Err(format!(
             "SQLite command failed: {}",
@@ -179,10 +242,9 @@ fn execute(
             .insert("sourceDatabaseSha256".to_string(), hash);
     }
     write_receipt(receipt_path, receipt)?;
-    let checkpoint = sqlite(executable, source, "PRAGMA wal_checkpoint(TRUNCATE);")?;
-    if !checkpoint.starts_with("0|") {
-        return Err(format!("SQLite WAL checkpoint failed: {checkpoint}"));
-    }
+    // P3-26: no wal_checkpoint on the source — TRUNCATE mutates the very
+    // database this migration is only supposed to read. integrity_check and
+    // VACUUM INTO already see through the WAL, so the source stays read-only.
     integrity(executable, source)?;
     receipt.source_schema_version = schema_version(executable, source)?;
     receipt.table_counts_before = table_counts(executable, source)?;

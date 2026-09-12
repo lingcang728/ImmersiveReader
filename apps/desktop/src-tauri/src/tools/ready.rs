@@ -7,6 +7,13 @@ use std::time::{Duration, Instant};
 
 const PROTOCOL_VERSION: u32 = 1;
 
+/// P3-23: bound engine-stdout forwarding to the app log — after READY the
+/// receiver is dropped but the reader keeps draining for the process's whole
+/// lifetime, so a chatty sidecar may emit at most this many lines per
+/// window; overflow is counted and reported once per window.
+const ENGINE_LOG_MAX_LINES_PER_WINDOW: u32 = 120;
+const ENGINE_LOG_WINDOW: Duration = Duration::from_secs(60);
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ReadyMessage {
@@ -81,18 +88,49 @@ pub(super) fn wait_for_ready(
         .ok_or_else(|| "ENGINE_READY_STDOUT_MISSING".to_string())?;
     let expected_pid = child.id();
     let (sender, receiver) = mpsc::sync_channel(1);
+    // P3-23: engine stdout used to be dropped on the floor after READY —
+    // forward each drained line to the app log (rate-limited) so release
+    // builds keep engine diagnostics somewhere reachable.
+    let engine = expected_engine.to_string();
     let reader = thread::spawn(move || {
         // Read raw byte lines: sidecar warnings/logs may arrive in a non-UTF-8
         // code page (e.g. GBK on zh-CN Windows), so decode each line lossily
         // instead of aborting on the first invalid byte.
         let mut stdout = BufReader::new(stdout);
         let mut buffer = Vec::new();
+        let mut window_start = Instant::now();
+        let mut logged_in_window = 0_u32;
+        let mut suppressed = 0_u64;
         loop {
             buffer.clear();
             match stdout.read_until(b'\n', &mut buffer) {
                 Ok(0) => break,
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buffer).into_owned();
+                    if !line.trim().is_empty() {
+                        if window_start.elapsed() >= ENGINE_LOG_WINDOW {
+                            if suppressed > 0 {
+                                crate::storage::app_log(
+                                    &engine,
+                                    &format!(
+                                        "stdout: … {suppressed} line(s) suppressed (rate limit)"
+                                    ),
+                                );
+                                suppressed = 0;
+                            }
+                            window_start = Instant::now();
+                            logged_in_window = 0;
+                        }
+                        if logged_in_window < ENGINE_LOG_MAX_LINES_PER_WINDOW {
+                            crate::storage::app_log(
+                                &engine,
+                                &format!("stdout: {}", line.trim_end()),
+                            );
+                            logged_in_window += 1;
+                        } else {
+                            suppressed += 1;
+                        }
+                    }
                     // Once READY is consumed the receiver is dropped; keep
                     // draining stdout so the child never blocks on a full pipe.
                     let _ = sender.send(Ok(line));
@@ -102,6 +140,12 @@ pub(super) fn wait_for_ready(
                     break;
                 }
             }
+        }
+        if suppressed > 0 {
+            crate::storage::app_log(
+                &engine,
+                &format!("stdout: … {suppressed} line(s) suppressed (rate limit)"),
+            );
         }
     });
     let ready = receive_ready(&receiver, expected_engine, expected_pid, timeout)?;

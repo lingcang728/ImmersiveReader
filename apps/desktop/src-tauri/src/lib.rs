@@ -5,7 +5,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{ErrorKind, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -458,6 +458,16 @@ fn initial_markdown_path(args: &[String]) -> Option<String> {
     None
 }
 
+/// P3-23: the bootstrap `window.__INITIAL_FILE__` injection. The path goes
+/// through `serde_json::to_string` so quotes/backslashes can never break out
+/// of the JS string literal — interpolating the raw path into eval'd script
+/// would be an injection hole.
+fn initial_file_eval_script(file_path: &str) -> Option<String> {
+    serde_json::to_string(file_path)
+        .ok()
+        .map(|encoded| format!("window.__INITIAL_FILE__ = {encoded};"))
+}
+
 /// File mtime in milliseconds since epoch — the frontend polls this to
 /// auto-reload when the file is changed by an external editor.
 #[tauri::command]
@@ -573,15 +583,6 @@ async fn save_reading_state(path: String, state: ReadingState) -> Result<(), Str
     .map_err(|error| error.to_string())?
 }
 
-fn delete_reading_state_for_path(path: &str) -> Result<(), String> {
-    let sp = state_path_for(path);
-    match fs::remove_file(sp) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.to_string()),
-    }
-}
-
 fn path_exists(path: &str) -> bool {
     !path.is_empty() && Path::new(path).exists()
 }
@@ -689,24 +690,6 @@ async fn save_reader_preferences(
     tauri::async_runtime::spawn_blocking(move || reader_preferences::save(&preferences))
         .await
         .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-async fn delete_reading_state(path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || delete_reading_state_for_path(&path))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-async fn markdown_file_exists(path: String) -> bool {
-    tauri::async_runtime::spawn_blocking(move || {
-        markdown_path_allowed(&path)
-            .map(|path| path.exists())
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -1208,19 +1191,6 @@ fn reconcile_cancel_and_discard(
 }
 
 #[tauri::command]
-async fn get_task_events(
-    task_id: String,
-    after_sequence: u64,
-    limit: u32,
-) -> Result<Vec<tasks::TaskEvent>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        control::ControlDb::open_current()?.task_events(&task_id, after_sequence, limit)
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
 async fn preview_podcast_files(
     paths: Vec<String>,
     options: podcast::PodcastPreviewOptions,
@@ -1439,6 +1409,9 @@ async fn list_temporary_content() -> Result<Vec<temporary_content::TemporaryItem
         .map_err(|error| error.to_string())?
 }
 
+// P3-24: diagnostics surface, intentionally registered — no frontend caller
+// today; `tools::status` documents why the command stays wired (health-gate
+// visibility for support).
 #[tauri::command]
 async fn get_companion_status(tool: String) -> Result<tools::ToolStatus, String> {
     // Locks TOOL_MANAGER + touches the control DB — never on the IPC thread.
@@ -1570,16 +1543,76 @@ async fn create_zhihu_task(
 ) -> Result<tasks::TaskSnapshot, String> {
     tauri::async_runtime::spawn_blocking(
         move || -> Result<tasks::TaskSnapshot, String> {
-            let settings = settings::load_settings()?;
-            let snapshot = zhihu::create_task(&settings, &request)?;
-            let event = control::ControlDb::open_current()?
-                .task_events(&snapshot.id, 0, 1)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| "TASK_EVENT_MISSING".to_string())?;
-            app.emit("acquisition://task-event", event)
-                .map_err(|error| error.to_string())?;
-            Ok(snapshot)
+            // P3-26: this command had no idempotency claim — a retried click
+            // or relaunch could ask the sidecar for a second archive task.
+            // No request_id reaches us from the frontend, so the claim key is
+            // derived from the request itself: an identical retry replays the
+            // stored snapshot instead of creating a duplicate task.
+            let input_hash = format!(
+                "{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&request).map_err(|error| error.to_string())?
+                )
+            );
+            let request_id = format!("create-zhihu-task-{input_hash}");
+            let control = control::ControlDb::open_current()?;
+            match control.claim_command(&request_id, "create_zhihu_task", &input_hash)? {
+                control::CommandClaim::Existing(record) => {
+                    if let Some(error) = record.error_code {
+                        return Err(error);
+                    }
+                    serde_json::from_str(
+                        record
+                            .result_json
+                            .as_deref()
+                            .ok_or_else(|| "COMMAND_RESULT_MISSING".to_string())?,
+                    )
+                    .map_err(|error| error.to_string())
+                }
+                control::CommandClaim::New => {
+                    let result = (|| -> Result<tasks::TaskSnapshot, String> {
+                        let settings = settings::load_settings()?;
+                        let snapshot = zhihu::create_task(&settings, &request)?;
+                        let event = control
+                            .task_events(&snapshot.id, 0, 1)?
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| "TASK_EVENT_MISSING".to_string())?;
+                        app.emit("acquisition://task-event", event)
+                            .map_err(|error| error.to_string())?;
+                        Ok(snapshot)
+                    })();
+                    match result {
+                        Ok(snapshot) => {
+                            let json = serde_json::to_string(&snapshot)
+                                .map_err(|error| error.to_string())?;
+                            control.complete_command(
+                                &request_id,
+                                &json,
+                                None,
+                                i64::try_from(snapshot.revision).ok(),
+                            )?;
+                            Ok(snapshot)
+                        }
+                        Err(error) => {
+                            // Mirror zhihu::control_task: transient persist
+                            // conflicts are races, not terminal results — the
+                            // claim stays open so the abandoned-claim window
+                            // can re-seize it for a real retry instead of
+                            // replaying a cached failure forever.
+                            if !zhihu::is_transient_persist_conflict(&error) {
+                                control.complete_command(
+                                    &request_id,
+                                    "{}",
+                                    Some(&error),
+                                    None,
+                                )?;
+                            }
+                            Err(error)
+                        }
+                    }
+                }
+            }
         },
     )
     .await
@@ -1925,8 +1958,6 @@ pub fn run() {
             save_recent_files,
             load_reader_preferences,
             save_reader_preferences,
-            delete_reading_state,
-            markdown_file_exists,
             get_app_settings,
             get_storage_locations,
             get_storage_usage,
@@ -1945,7 +1976,6 @@ pub fn run() {
             migrate_sqlite_verified,
             reconcile_zhihu_archive,
             get_acquisition_snapshot,
-            get_task_events,
             preview_podcast_files,
             add_podcast_files,
             scan_library,
@@ -1979,6 +2009,10 @@ pub fn run() {
             reader_server::ReaderServiceState::default(),
         ))
         .setup(|app| {
+            storage::app_log(
+                "app",
+                &format!("immersive-reader v{} starting", env!("CARGO_PKG_VERSION")),
+            );
             // P1-1: Job Objects kill podcast workers when the app exits, but
             // their tasks stayed Running forever with no recovery path. At
             // startup every still-active task whose worker is gone gets marked
@@ -2000,14 +2034,15 @@ pub fn run() {
                 }
             });
             // Windows: file path passed as CLI argument
-            let window = app.get_webview_window("main").unwrap();
+            let Some(window) = app.get_webview_window("main") else {
+                return Err(std::io::Error::other("main webview window missing").into());
+            };
             let args: Vec<String> = std::env::args().collect();
             if let Some(file_path) = initial_markdown_path(&args) {
                 register_opened_markdown(Path::new(&file_path));
-                let _ = window.eval(format!(
-                    "window.__INITIAL_FILE__ = {};",
-                    serde_json::to_string(&file_path).unwrap()
-                ));
+                if let Some(script) = initial_file_eval_script(&file_path) {
+                    let _ = window.eval(script);
+                }
             }
             #[cfg(desktop)]
             {
@@ -2200,7 +2235,8 @@ mod recent_file_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        book_asset_root, initial_markdown_path, is_markdown_path, reconcile_discard_markers,
+        book_asset_root, initial_file_eval_script, initial_markdown_path, is_markdown_path,
+        reconcile_discard_markers,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2317,5 +2353,24 @@ mod tests {
         let args = vec!["mmbook.exe".to_string(), "C:\\docs\\README.txt".to_string()];
 
         assert_eq!(initial_markdown_path(&args), None);
+    }
+
+    #[test]
+    fn initial_file_eval_script_stays_a_json_string_literal() {
+        // P3-23 regression: `window.__INITIAL_FILE__` must be injected as a
+        // serde_json string literal — a path with quotes/backslashes would
+        // break out of a naive `"{path}"` interpolation inside eval'd JS.
+        let hostile = r#"C:\weird "quoted"\backslash\file.md"#;
+        let script = initial_file_eval_script(hostile)
+            .expect("path serialization must succeed");
+        assert!(script.contains(r#""quoted\""#));
+        // The injected literal decodes back to exactly the original path.
+        let literal = script
+            .trim_start_matches("window.__INITIAL_FILE__ = ")
+            .trim_end_matches(';');
+        let decoded: String =
+            serde_json::from_str(literal).expect("injected literal must be valid JSON");
+        assert_eq!(decoded, hostile);
+        assert!(initial_file_eval_script("plain.md").is_some());
     }
 }

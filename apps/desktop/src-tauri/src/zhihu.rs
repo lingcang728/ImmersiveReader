@@ -420,8 +420,9 @@ pub fn control_task(
 /// Conflicts produced by a concurrent writer (poller heartbeat, reconcile,
 /// another control call) landing between the pre-flight revision check and
 /// the local persist. They describe a race, not a final outcome — the caller
-/// must never cache them as the command's terminal result.
-fn is_transient_persist_conflict(error: &str) -> bool {
+/// must never cache them as the command's terminal result. `pub(crate)`:
+/// the `create_zhihu_task` claim wrapper in lib.rs applies the same rule.
+pub(crate) fn is_transient_persist_conflict(error: &str) -> bool {
     matches!(error, "REVISION_CONFLICT" | "EVENT_SEQUENCE_CONFLICT")
 }
 
