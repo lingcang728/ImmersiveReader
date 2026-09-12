@@ -168,11 +168,74 @@ fn set_phase(
     save_transaction(root, transaction)
 }
 
-fn inject_stop(stop_after: Option<PublishPhase>, phase: PublishPhase) -> Result<(), String> {
-    if stop_after == Some(phase) {
-        return Err(format!("Injected crash after {phase:?}"));
+/// Test-only crash injection points. `AfterPhase` dies right after a phase
+/// journal write persisted (the classic "mid-flight" case). The
+/// `*BeforeJournal` variants die in the window between the filesystem rename
+/// and the journal write that records it — P2-13 showed this window was real:
+/// a kill there used to leave recovery deadlocked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CrashPoint {
+    /// `phase` was journaled, then the process died.
+    AfterPhase(PublishPhase),
+    /// final→rollback rename completed but the OldMoved journal write did not.
+    /// On disk: journal Prepared, rollback occupied, final missing.
+    OldMoveBeforeJournal,
+    /// incoming→final rename completed but the NewMoved journal write did not.
+    /// On disk: journal OldMoved, final holds the new book, incoming gone.
+    NewMoveBeforeJournal,
+}
+
+fn inject_crash(crash: Option<CrashPoint>, point: CrashPoint) -> Result<(), String> {
+    if crash == Some(point) {
+        return Err(format!("Injected crash at {point:?}"));
     }
     Ok(())
+}
+
+/// Move unvalidated content at the final path into `.incoming/failed-<tx>` so
+/// rollback never destroys data — the quarantined copy stays recoverable.
+fn quarantine_final(
+    root: &Path,
+    transaction: &PublishTransaction,
+    final_path: &Path,
+) -> Result<(), String> {
+    if !final_path.exists() {
+        return Ok(());
+    }
+    let failed = root
+        .join(".incoming")
+        .join(format!("failed-{}", transaction.transaction_id));
+    if failed.exists() {
+        return Err("Failed publication quarantine already exists".to_string());
+    }
+    fs::create_dir_all(
+        failed
+            .parent()
+            .ok_or_else(|| "Invalid failed publication path".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::rename(final_path, failed).map_err(|error| error.to_string())
+}
+
+/// Restore the archived previous version to the final path. A missing rollback
+/// path is not an error: first publishes (and externally cleaned roots) have
+/// nothing to restore, and erroring here used to deadlock recovery forever.
+fn restore_rollback(
+    transaction: &PublishTransaction,
+    rollback_path: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
+    if !rollback_path.exists() {
+        eprintln!(
+            "publish transaction {} has no rollback copy to restore",
+            transaction.transaction_id
+        );
+        return Ok(());
+    }
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::rename(rollback_path, final_path).map_err(|error| error.to_string())
 }
 
 fn rollback(root: &Path, transaction: &mut PublishTransaction) -> Result<(), String> {
@@ -181,41 +244,18 @@ fn rollback(root: &Path, transaction: &mut PublishTransaction) -> Result<(), Str
     match transaction.phase {
         PublishPhase::Prepared => set_phase(root, transaction, PublishPhase::RolledBack),
         PublishPhase::OldMoved => {
-            if final_path.exists() {
-                return Err("OldMoved transaction unexpectedly has a final path".to_string());
-            }
-            if !rollback_path.exists() {
-                return Err("OldMoved transaction is missing its rollback path".to_string());
-            }
-            if let Some(parent) = final_path.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
-            fs::rename(rollback_path, final_path).map_err(|error| error.to_string())?;
+            // Anything left at final here failed validation (a valid final
+            // short-circuits to NewMoved inside `advance`), so quarantine it
+            // exactly like the NewMoved path instead of deadlocking on the
+            // old "unexpectedly has a final path" hard error.
+            quarantine_final(root, transaction, &final_path)?;
+            // A first publish has no rollback copy — nothing to restore.
+            restore_rollback(transaction, &rollback_path, &final_path)?;
             set_phase(root, transaction, PublishPhase::RolledBack)
         }
         PublishPhase::NewMoved => {
-            if final_path.exists() {
-                let failed = root
-                    .join(".incoming")
-                    .join(format!("failed-{}", transaction.transaction_id));
-                if failed.exists() {
-                    return Err("Failed publication quarantine already exists".to_string());
-                }
-                fs::create_dir_all(
-                    failed
-                        .parent()
-                        .ok_or_else(|| "Invalid failed publication path".to_string())?,
-                )
-                .map_err(|error| error.to_string())?;
-                fs::rename(&final_path, failed).map_err(|error| error.to_string())?;
-            }
-            if !rollback_path.exists() {
-                return Err("NewMoved transaction is missing its rollback path".to_string());
-            }
-            if let Some(parent) = final_path.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
-            fs::rename(rollback_path, final_path).map_err(|error| error.to_string())?;
+            quarantine_final(root, transaction, &final_path)?;
+            restore_rollback(transaction, &rollback_path, &final_path)?;
             set_phase(root, transaction, PublishPhase::RolledBack)
         }
         PublishPhase::Committed => Err("Committed transaction cannot be rolled back".to_string()),
@@ -226,7 +266,7 @@ fn rollback(root: &Path, transaction: &mut PublishTransaction) -> Result<(), Str
 fn advance(
     root: &Path,
     transaction: &mut PublishTransaction,
-    stop_after: Option<PublishPhase>,
+    crash: Option<CrashPoint>,
 ) -> Result<(), String> {
     loop {
         match transaction.phase {
@@ -245,12 +285,23 @@ fn advance(
                         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                     }
                     fs::rename(&final_path, &rollback_path).map_err(|error| error.to_string())?;
+                    inject_crash(crash, CrashPoint::OldMoveBeforeJournal)?;
                 }
                 set_phase(root, transaction, PublishPhase::OldMoved)?;
-                inject_stop(stop_after, PublishPhase::OldMoved)?;
+                inject_crash(crash, CrashPoint::AfterPhase(PublishPhase::OldMoved))?;
             }
             PublishPhase::OldMoved => {
                 if validate_book(root, &transaction.incoming_relative_path, transaction).is_err() {
+                    // P2-13: a kill between `rename(incoming, final)` and the
+                    // NewMoved journal write leaves incoming gone while final
+                    // already holds this transaction's verified book. The move
+                    // finished — journal it and continue forward instead of
+                    // rolling back into a live final path (that deadlocked).
+                    if validate_book(root, &transaction.final_relative_path, transaction).is_ok() {
+                        set_phase(root, transaction, PublishPhase::NewMoved)?;
+                        inject_crash(crash, CrashPoint::AfterPhase(PublishPhase::NewMoved))?;
+                        continue;
+                    }
                     rollback(root, transaction)?;
                     return Ok(());
                 }
@@ -260,8 +311,9 @@ fn advance(
                     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                 }
                 fs::rename(incoming, final_path).map_err(|error| error.to_string())?;
+                inject_crash(crash, CrashPoint::NewMoveBeforeJournal)?;
                 set_phase(root, transaction, PublishPhase::NewMoved)?;
-                inject_stop(stop_after, PublishPhase::NewMoved)?;
+                inject_crash(crash, CrashPoint::AfterPhase(PublishPhase::NewMoved))?;
             }
             PublishPhase::NewMoved => {
                 if validate_book(root, &transaction.final_relative_path, transaction).is_ok() {
@@ -313,12 +365,12 @@ pub fn commit_transaction(
 pub(crate) fn commit_transaction_until(
     root: &Path,
     transaction: &PublishTransaction,
-    stop_after: Option<PublishPhase>,
+    crash: Option<CrashPoint>,
 ) -> Result<PublishTransaction, String> {
     let mut current = transaction.clone();
     save_transaction(root, &current)?;
-    inject_stop(stop_after, PublishPhase::Prepared)?;
-    advance(root, &mut current, stop_after)?;
+    inject_crash(crash, CrashPoint::AfterPhase(PublishPhase::Prepared))?;
+    advance(root, &mut current, crash)?;
     Ok(current)
 }
 

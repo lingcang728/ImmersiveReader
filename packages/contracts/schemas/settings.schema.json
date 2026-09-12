@@ -7,6 +7,11 @@
   "required": ["schemaVersion", "libraryRoot"],
   "properties": {
     "schemaVersion": { "const": 3 },
-    "libraryRoot": { "type": "string", "minLength": 1 }
+    "libraryRoot": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^([A-Za-z]:[\\\\/]|\\\\\\\\)",
+      "description": "Absolute Windows path (drive-rooted or UNC), matching the Rust loader's Path::is_absolute requirement"
+    }
   }
 }

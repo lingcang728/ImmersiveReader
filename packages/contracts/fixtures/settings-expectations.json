@@ -1,0 +1,8 @@
+[
+  { "fixture": "settings.v3.valid.json", "schema": "settings.schema.json", "expect": "valid" },
+  { "fixture": "settings.legacy-v1.valid.json", "schema": "settings-legacy-v1.schema.json", "expect": "valid" },
+  { "fixture": "settings.legacy-v1.minimal.valid.json", "schema": "settings-legacy-v1.schema.json", "expect": "valid" },
+  { "fixture": "settings.legacy-v2.valid.json", "schema": "settings-legacy-v2.schema.json", "expect": "valid" },
+  { "fixture": "settings.invalid.relative-library-root.json", "schema": "settings.schema.json", "expect": "invalid" },
+  { "fixture": "settings.invalid.unknown-field.json", "schema": "settings.schema.json", "expect": "invalid" }
+]

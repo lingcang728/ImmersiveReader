@@ -6,6 +6,7 @@ pub use transaction::{
     PublishTransaction,
 };
 pub use validation::hash_file;
+pub(crate) use validation::managed_relative;
 
 #[cfg(test)]
 pub(crate) use transaction::commit_transaction_until;

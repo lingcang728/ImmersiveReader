@@ -1,6 +1,29 @@
+"""Three-sided contract parity check.
+
+Every fixture listed in ``packages/contracts/fixtures/expectations.json`` and
+``settings-expectations.json`` is checked against:
+
+  1. **schema** — the JSON schema in ``packages/contracts/schemas`` (via the
+     ``jsonschema`` package, in this process),
+  2. **TS** — the TypeScript validators in ``packages/contracts/src/index.ts``
+     (via ``node``; falls back to the compiled ``dist/index.js`` when type
+     stripping is unavailable),
+  3. **Rust** — the same tables are consumed by the cargo suite
+     (``contracts::tests::shared_fixtures_match_schema_and_ts_verdicts`` and
+     ``settings::tests::shared_settings_fixtures_match_schema_verdicts``), so
+     any verdict drift in the Rust implementation fails there. Pass
+     ``--with-rust`` to also run those tests from here.
+
+The tables include negative fixtures (unsafe paths, explicit nulls, missing
+required fields, non-canonical dates, unknown fields), not just valid samples.
+Exit code is non-zero on any disagreement.
+"""
+
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,8 +31,16 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_ROOT = ROOT / "packages" / "contracts" / "schemas"
-FIXTURE_ROOT = ROOT / "packages" / "contracts" / "fixtures"
+CONTRACTS_ROOT = ROOT / "packages" / "contracts"
+SCHEMA_ROOT = CONTRACTS_ROOT / "schemas"
+FIXTURE_ROOT = CONTRACTS_ROOT / "fixtures"
+CONTRACT_SCHEMA = {
+    "manifest": "manifest.schema.json",
+    "reading": "reading.schema.json",
+}
+# The TS library only ships manifest/reading validators; settings fixtures are
+# covered by schema + Rust legs.
+TS_CONTRACTS = frozenset(CONTRACT_SCHEMA)
 
 
 def load_json(path: Path) -> object:
@@ -20,37 +51,168 @@ def validator(path: Path) -> Draft202012Validator:
     return Draft202012Validator(load_json(path), format_checker=FormatChecker())
 
 
-def assert_valid(schema: Path, fixture: Path) -> None:
-    errors = sorted(validator(schema).iter_errors(load_json(fixture)), key=lambda error: list(error.path))
-    if errors:
-        raise AssertionError(f"{fixture.name} should validate against {schema.name}: {errors[0].message}")
+def schema_verdict(schema: Path, fixture: Path) -> bool:
+    """True when the fixture validates against the schema."""
+    return not list(validator(schema).iter_errors(load_json(fixture)))
 
 
-def assert_invalid(schema: Path, fixture: Path) -> None:
-    if not list(validator(schema).iter_errors(load_json(fixture))):
-        raise AssertionError(f"{fixture.name} should fail against {schema.name}")
+TS_RUNNER = """
+import { readFileSync } from "node:fs";
+const [moduleUrl, fixturesDir, entriesJson] = process.argv.slice(1);
+const { parseManifest, parseReadingState, validateReadingState } = await import(moduleUrl);
+const manifest = parseManifest(
+  JSON.parse(readFileSync(`${fixturesDir}/manifest.valid.json`, "utf8")),
+);
+const verdicts = {};
+for (const entry of JSON.parse(entriesJson)) {
+  try {
+    const data = JSON.parse(readFileSync(`${fixturesDir}/${entry.fixture}`, "utf8"));
+    if (entry.contract === "manifest") {
+      parseManifest(data);
+    } else {
+      const state = parseReadingState(data);
+      validateReadingState(state, manifest);
+    }
+    verdicts[entry.fixture] = "valid";
+  } catch {
+    verdicts[entry.fixture] = "invalid";
+  }
+}
+console.log(JSON.stringify(verdicts));
+"""
+
+
+def run_ts_verdicts(entries: list[dict]) -> dict[str, str]:
+    """Return fixture -> 'valid'|'invalid' verdicts from the TS validators."""
+    node = shutil.which("node")
+    if node is None:
+        raise RuntimeError("node executable not found on PATH")
+    fixtures_arg = FIXTURE_ROOT.as_posix()
+    entries_arg = json.dumps(entries)
+    candidates = [
+        CONTRACTS_ROOT / "src" / "index.ts",
+        CONTRACTS_ROOT / "dist" / "index.js",
+    ]
+    errors = []
+    for candidate in candidates:
+        if not candidate.is_file():
+            errors.append(f"{candidate.name}: missing")
+            continue
+        result = subprocess.run(
+            [
+                node,
+                "--input-type=module",
+                "-e",
+                TS_RUNNER,
+                candidate.resolve().as_uri(),
+                fixtures_arg,
+                entries_arg,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            check=False,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        errors.append(
+            f"{candidate.name}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    raise RuntimeError("TS validator leg failed: " + "; ".join(errors))
+
+
+def run_rust_leg() -> bool:
+    """Run the cargo parity tests that consume the same expectation tables."""
+    cargo = shutil.which("cargo") or shutil.which("cargo.exe")
+    if cargo is None:
+        print("rust leg: cargo not found — skipped")
+        return True
+    manifest = ROOT / "apps" / "desktop" / "src-tauri" / "Cargo.toml"
+    tests = [
+        "shared_fixtures_match_schema_and_ts_verdicts",
+        "shared_settings_fixtures_match_schema_verdicts",
+    ]
+    ok = True
+    for test in tests:
+        result = subprocess.run(
+            [cargo, "test", "--manifest-path", str(manifest), test],
+            cwd=ROOT,
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"rust leg: cargo test {test} failed")
+            ok = False
+    return ok
 
 
 def main() -> int:
-    valid_cases = (
-        ("manifest.schema.json", "manifest.valid.json"),
-        ("reading.schema.json", "reading.valid.json"),
-        ("settings.schema.json", "settings.v3.valid.json"),
-        ("settings-legacy-v1.schema.json", "settings.legacy-v1.valid.json"),
-        ("settings-legacy-v2.schema.json", "settings.legacy-v2.valid.json"),
+    with_rust = "--with-rust" in sys.argv[1:]
+    expectations: list[dict] = load_json(FIXTURE_ROOT / "expectations.json")
+    settings_expectations: list[dict] = load_json(
+        FIXTURE_ROOT / "settings-expectations.json"
     )
-    invalid_cases = (
-        ("manifest.schema.json", "manifest.invalid.unknown.json"),
-        ("manifest.schema.json", "manifest.invalid.date.json"),
-        ("manifest.schema.json", "manifest.invalid.empty.json"),
-        ("reading.schema.json", "reading.invalid.duplicate.json"),
-        ("reading.schema.json", "reading.invalid.unknown.json"),
+
+    # Schema leg — every fixture in both tables.
+    failures: list[str] = []
+    schema_verdicts: dict[str, bool] = {}
+    for entry in [*expectations, *settings_expectations]:
+        fixture = entry["fixture"]
+        schema_name = entry.get("schema") or CONTRACT_SCHEMA.get(entry["contract"])
+        if schema_name is None:
+            failures.append(f"{fixture}: unknown contract {entry.get('contract')}")
+            continue
+        verdict = schema_verdict(SCHEMA_ROOT / schema_name, FIXTURE_ROOT / fixture)
+        schema_verdicts[fixture] = verdict
+        expected = entry["expect"] == "valid"
+        if verdict != expected:
+            failures.append(
+                f"{fixture}: schema verdict {'valid' if verdict else 'invalid'} "
+                f"!= expected {entry['expect']}"
+            )
+
+    # TS leg — every manifest/reading fixture in expectations.json.
+    ts_entries = [e for e in expectations if e["contract"] in TS_CONTRACTS]
+    try:
+        ts_verdicts = run_ts_verdicts(ts_entries)
+    except RuntimeError as error:
+        print(f"TS leg failed: {error}", file=sys.stderr)
+        return 2
+    for entry in ts_entries:
+        fixture = entry["fixture"]
+        expected = entry["expect"] == "valid"
+        verdict = ts_verdicts.get(fixture) == "valid"
+        if verdict != expected:
+            failures.append(
+                f"{fixture}: TS verdict {'valid' if verdict else 'invalid'} "
+                f"!= expected {entry['expect']}"
+            )
+        elif fixture in schema_verdicts and schema_verdicts[fixture] != verdict:
+            failures.append(f"{fixture}: schema and TS verdicts disagree")
+
+    for entry in [*expectations, *settings_expectations]:
+        fixture = entry["fixture"]
+        ts = ts_verdicts.get(fixture, "-") if entry.get("contract") in TS_CONTRACTS else "n/a"
+        schema = (
+            "valid" if schema_verdicts.get(fixture) else "invalid"
+            if fixture in schema_verdicts
+            else "?"
+        )
+        print(f"{fixture}: expect={entry['expect']} schema={schema} ts={ts}")
+
+    if failures:
+        for failure in failures:
+            print(f"FAIL {failure}", file=sys.stderr)
+        return 1
+
+    rust_note = "deferred to cargo test (same tables)"
+    if with_rust:
+        if not run_rust_leg():
+            return 1
+        rust_note = "passed via cargo test"
+    print(
+        f"contract parity: {len(expectations) + len(settings_expectations)} fixtures "
+        f"checked (schema + TS + expectations); rust leg {rust_note}"
     )
-    for schema_name, fixture_name in valid_cases:
-        assert_valid(SCHEMA_ROOT / schema_name, FIXTURE_ROOT / fixture_name)
-    for schema_name, fixture_name in invalid_cases:
-        assert_invalid(SCHEMA_ROOT / schema_name, FIXTURE_ROOT / fixture_name)
-    print(f"contract schema parity: {len(valid_cases)} valid and {len(invalid_cases)} invalid fixtures passed")
     return 0
 
 

@@ -70,6 +70,24 @@ fn podcast_library_relative_path(display_name: &str, source_id: &str) -> String 
     format!("播客/{}-{}", sanitize_podcast_folder_name(display_name), suffix)
 }
 
+/// `.revisions/{source}/{revision}` archives the pre-publish final copy. A
+/// crashed attempt can leave that slot occupied even after its journal was
+/// cleared, so retries take the first free slot instead of failing forever.
+fn free_rollback_relative_path(
+    library_root: &Path,
+    source_id: &str,
+    revision: u64,
+) -> Result<String, String> {
+    let mut candidate = format!(".revisions/{source_id}/{revision}");
+    for attempt in 1..=32_u32 {
+        if !publish::managed_relative(library_root, &candidate)?.exists() {
+            return Ok(candidate);
+        }
+        candidate = format!(".revisions/{source_id}/{revision}-retry{attempt}");
+    }
+    Err("PUBLISH_FAILED: no free rollback path remains".to_string())
+}
+
 fn collect_markdown(
     root: &Path,
     dir: &Path,
@@ -304,10 +322,18 @@ pub fn publish_task_result_at(
         .get("revision")
         .and_then(Value::as_u64)
         .ok_or_else(|| "PUBLISH_FAILED: publish revision is missing".to_string())?;
-    if !safe_segment(&source_id) || !incoming_relative_path.starts_with(".incoming/") {
+    // P2-16: validate before ANY filesystem mutation. The old order ran
+    // `remove_dir_all` on a path checked only for a ".incoming/" prefix, so a
+    // crafted task.json like ".incoming/../Library" could delete outside the
+    // managed incoming area. `managed_relative` enforces the shared contract:
+    // forward-slash relative, no `..`/`.`/empty segments, no `\`/drive/NUL.
+    let incoming = publish::managed_relative(&locations.library_root, &incoming_relative_path)
+        .ok()
+        .filter(|_| incoming_relative_path.starts_with(".incoming/"))
+        .ok_or_else(|| "PUBLISH_FAILED: publish path is unsafe".to_string())?;
+    if !safe_segment(&source_id) {
         return Err("PUBLISH_FAILED: publish path is unsafe".to_string());
     }
-    let incoming = locations.library_root.join(&incoming_relative_path);
     let input_name = spec
         .get("input")
         .and_then(|value| value.get("relativePath"))
@@ -318,7 +344,12 @@ pub fn publish_task_result_at(
         .to_string();
     // Human-readable shelf path: 播客/{文件名}/  (not Cache, not hash folders).
     let final_relative_path = podcast_library_relative_path(&input_name, &source_id);
-    let rollback_relative_path = format!(".revisions/{source_id}/{revision}");
+    // P2-13: a crashed attempt can leave .revisions/{source}/{revision}
+    // occupied (the previous final was already archived) while its journal is
+    // cleared for a retry below. Pick the first free archive slot so re-publish
+    // never deadlocks on "rollback path already exists".
+    let rollback_relative_path =
+        free_rollback_relative_path(&locations.library_root, &source_id, revision)?;
     let existing = load_transaction(&locations.library_root, task_id).ok();
     if let Some(committed) = existing
         .as_ref()

@@ -44,8 +44,10 @@ export type AppSettings = {
 export type LegacyAppSettingsV1 = {
   readonly schemaVersion: 1;
   readonly libraryRoot: string;
-  readonly companionRoot: string;
-  readonly temporaryRoots: readonly TemporaryRoot[];
+  // Optional since P2-29: the current Rust loader migrates v1 files by
+  // `libraryRoot` alone, so the schema no longer requires these legacy keys.
+  readonly companionRoot?: string;
+  readonly temporaryRoots?: readonly TemporaryRoot[];
 };
 
 export type LegacyAppSettingsV2 = {

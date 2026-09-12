@@ -91,40 +91,69 @@ fn failed_receipt(
     }
 }
 
-pub fn execute_settings_migration(
+/// P2-14 conflict gate: a target that already holds exactly what this
+/// migration would write is an idempotent replay, not a conflict. Without it
+/// the migration could never run on a previously-used install — the app
+/// creates settings.json on first launch, so the `target.exists()` conflict
+/// flag would fire forever.
+fn settings_already_migrated(legacy: &LegacyLocations, target: &StorageLocations) -> bool {
+    if legacy.settings == target.settings_path {
+        return false;
+    }
+    let Ok(expected) = crate::settings::load_compatible_from(&legacy.settings) else {
+        return false;
+    };
+    let Ok(actual) = crate::settings::load_compatible_from(&target.settings_path) else {
+        return false;
+    };
+    expected == actual
+}
+
+/// The claimed body of `execute_settings_migration`. Returns either the
+/// success result or `(error_code, detail)`; the caller settles the command
+/// claim exactly once for every outcome — a `?` after `claim_command` used to
+/// leak the claim and leave the request_id in-progress forever.
+fn execute_claimed_settings_migration(
+    control: &ControlDb,
     legacy: &LegacyLocations,
     target: &StorageLocations,
     preview_id: &str,
-    request_id: &str,
-) -> Result<MigrationExecutionResult, String> {
-    let control = ControlDb::open(&target.data_root.join(r"App\control.db"))?;
-    match control.claim_command(request_id, COMMAND_NAME, &command_input_hash(preview_id))? {
-        CommandClaim::Existing(record) => return replay(record),
-        CommandClaim::New => {}
-    }
+) -> Result<MigrationExecutionResult, (String, String)> {
+    let fail = |code: &str, detail: String| (code.to_string(), detail);
 
-    let fresh = preview_for(legacy, target, MigrationScope::Settings)?;
+    let fresh = preview_for(legacy, target, MigrationScope::Settings)
+        .map_err(|error| fail("MIGRATION_FAILED", error))?;
     if fresh.preview_id != preview_id {
-        control.complete_command(request_id, "{}", Some("MIGRATION_PREVIEW_STALE"), None)?;
-        return Err("MIGRATION_PREVIEW_STALE".to_string());
+        return Err(fail(
+            "MIGRATION_PREVIEW_STALE",
+            "Migration preview is stale".to_string(),
+        ));
     }
-    if fresh.conflict_count > 0 {
-        control.complete_command(request_id, "{}", Some("MIGRATION_CONFLICT"), None)?;
-        return Err("MIGRATION_CONFLICT".to_string());
+    if fresh.conflict_count > 0 && !settings_already_migrated(legacy, target) {
+        return Err(fail(
+            "MIGRATION_CONFLICT",
+            "Migration target already exists".to_string(),
+        ));
     }
     if !legacy.settings.is_file() {
-        control.complete_command(request_id, "{}", Some("MIGRATION_SOURCE_MISSING"), None)?;
-        return Err("MIGRATION_SOURCE_MISSING".to_string());
+        return Err(fail(
+            "MIGRATION_SOURCE_MISSING",
+            "Legacy settings source is missing".to_string(),
+        ));
     }
 
     let migration_id = format!("settings-{}", uuid::Uuid::new_v4());
     let migration_root = target.data_root.join("Migrations").join(&migration_id);
     let rollback = migration_root.join(r"rollback\settings.json");
     let receipt_path = migration_root.join("receipt.json");
-    fs::create_dir_all(rollback.parent().unwrap()).map_err(|error| error.to_string())?;
-    let original = fs::read(&legacy.settings).map_err(|error| error.to_string())?;
-    fs::write(&rollback, &original).map_err(|error| error.to_string())?;
-    let source_version = source_schema(&legacy.settings)?;
+    fs::create_dir_all(rollback.parent().unwrap())
+        .map_err(|error| fail("MIGRATION_FAILED", error.to_string()))?;
+    let original =
+        fs::read(&legacy.settings).map_err(|error| fail("MIGRATION_FAILED", error.to_string()))?;
+    fs::write(&rollback, &original)
+        .map_err(|error| fail("MIGRATION_FAILED", error.to_string()))?;
+    let source_version =
+        source_schema(&legacy.settings).map_err(|error| fail("MIGRATION_FAILED", error))?;
     let mut receipt = failed_receipt(
         &migration_id,
         &legacy.settings,
@@ -136,10 +165,12 @@ pub fn execute_settings_migration(
     receipt.started_at = chrono::Utc::now().to_rfc3339();
     receipt.non_sensitive_hashes.insert(
         "sourceSettingsSha256".to_string(),
-        sha256(&legacy.settings)?,
+        sha256(&legacy.settings).map_err(|error| fail("MIGRATION_FAILED", error))?,
     );
-    write_receipt(&receipt_path, &receipt)?;
-    control.begin_migration_run(&migration_id, preview_id, "settings")?;
+    write_receipt(&receipt_path, &receipt).map_err(|error| fail("MIGRATION_FAILED", error))?;
+    control
+        .begin_migration_run(&migration_id, preview_id, "settings")
+        .map_err(|error| fail("MIGRATION_FAILED", error))?;
 
     let migrated = (|| {
         let settings = crate::settings::load_compatible_from(&legacy.settings)?;
@@ -163,14 +194,15 @@ pub fn execute_settings_migration(
         receipt.completed_at = Some(chrono::Utc::now().to_rfc3339());
         let _ = write_receipt(&receipt_path, &receipt);
         let failure = serde_json::json!({ "error": error }).to_string();
-        control.complete_migration_run(
+        // A stuck 'running' migration_runs row is cosmetic; the claim tail
+        // still settles the command even if this bookkeeping write fails.
+        let _ = control.complete_migration_run(
             &migration_id,
             "failed",
             Some(&receipt_path.to_string_lossy()),
             &failure,
-        )?;
-        control.complete_command(request_id, &failure, Some("MIGRATION_FAILED"), None)?;
-        return Err("MIGRATION_FAILED".to_string());
+        );
+        return Err(fail("MIGRATION_FAILED", error));
     }
 
     let result = MigrationExecutionResult {
@@ -181,13 +213,45 @@ pub fn execute_settings_migration(
         receipt_path: receipt_path.to_string_lossy().into_owned(),
         completed_kinds: vec!["app_settings".to_string()],
     };
-    let result_json = serde_json::to_string(&result).map_err(|error| error.to_string())?;
-    control.complete_migration_run(
-        &migration_id,
-        "success",
-        Some(&result.receipt_path),
-        &result_json,
-    )?;
-    control.complete_command(request_id, &result_json, None, None)?;
+    let result_json =
+        serde_json::to_string(&result).map_err(|error| fail("MIGRATION_FAILED", error.to_string()))?;
+    control
+        .complete_migration_run(
+            &migration_id,
+            "success",
+            Some(&result.receipt_path),
+            &result_json,
+        )
+        .map_err(|error| fail("MIGRATION_FAILED", error))?;
     Ok(result)
+}
+
+pub fn execute_settings_migration(
+    legacy: &LegacyLocations,
+    target: &StorageLocations,
+    preview_id: &str,
+    request_id: &str,
+) -> Result<MigrationExecutionResult, String> {
+    let control = ControlDb::open(&target.data_root.join(r"App\control.db"))?;
+    match control.claim_command(request_id, COMMAND_NAME, &command_input_hash(preview_id))? {
+        CommandClaim::Existing(record) => return replay(record),
+        CommandClaim::New => {}
+    }
+
+    // P2-14: once claimed, every exit path must settle the claim via
+    // complete_command — otherwise the request_id stays in-progress forever
+    // and every retry replays COMMAND_IN_PROGRESS.
+    match execute_claimed_settings_migration(&control, legacy, target, preview_id) {
+        Ok(result) => {
+            let result_json =
+                serde_json::to_string(&result).map_err(|error| error.to_string())?;
+            control.complete_command(request_id, &result_json, None, None)?;
+            Ok(result)
+        }
+        Err((code, detail)) => {
+            let failure = serde_json::json!({ "error": detail }).to_string();
+            control.complete_command(request_id, &failure, Some(&code), None)?;
+            Err(code)
+        }
+    }
 }

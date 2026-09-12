@@ -3,7 +3,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 pub fn hash_file(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
@@ -19,19 +19,17 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Relative paths under managed roots must satisfy the shared contract
+/// (`contracts::is_safe_relative_path` / TS `requireRelativePath` /
+/// `trash::parse_relative`): forward-slash only — not blank, no leading `/`,
+/// no drive prefix, no `\`, no NUL, and no empty / `.` / `..` segments.
+/// `Path::components()` cannot enforce this: it silently normalizes `a/./b`
+/// and treats `\` as a separator on Windows, so the raw string is checked.
 pub fn managed_relative(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let relative_path = Path::new(relative);
-    if relative_path.is_absolute()
-        || relative_path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
+    if !crate::contracts::is_safe_relative_path(relative) {
         return Err("Publish path must be relative to the Library root".to_string());
     }
-    Ok(root.join(relative_path))
+    Ok(root.join(relative))
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {

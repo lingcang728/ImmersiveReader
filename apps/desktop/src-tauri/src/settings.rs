@@ -8,13 +8,19 @@ mod recovery;
 use recovery::load_status_from;
 pub use recovery::SettingsLoadState;
 
+// P2-29: `additionalProperties: false` in settings.schema.json — unknown keys
+// must fail here too instead of being silently dropped on load.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub schema_version: u32,
     pub library_root: String,
 }
 
+// Legacy v1/v2 files may carry fields the current app no longer reads
+// (companionRoot, temporaryRoots). Keep this struct permissive — migration
+// must not break on the extra keys real legacy installs contain.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacySettings {
@@ -319,6 +325,74 @@ mod tests {
 
         assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.library_root, r"C:\Users\reader\Documents\Library");
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    #[test]
+    fn v3_settings_reject_unknown_fields() {
+        // P2-29: mirrors `additionalProperties: false` in settings.schema.json —
+        // an unrecognized key must fail instead of being silently dropped.
+        let root = std::env::temp_dir().join(format!(
+            "immersive-settings-unknown-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp directory must be created");
+        let path = root.join("settings.json");
+        fs::write(
+            &path,
+            r#"{"schemaVersion":3,"libraryRoot":"C:\\Library","futureField":true}"#,
+        )
+        .expect("settings must write");
+
+        assert!(load_compatible_from(&path).is_err());
+        match load_status_from(&path) {
+            SettingsLoadState::Recovery(_) => {}
+            SettingsLoadState::Active(_) => panic!("unknown fields must not become active"),
+        }
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    /// P2-29: the settings fixtures are the shared contract — the Python
+    /// parity script (schema verdicts) and this test (Rust verdicts) consume
+    /// the same settings-expectations.json table.
+    #[derive(serde::Deserialize)]
+    struct SettingsExpectation {
+        fixture: String,
+        expect: String,
+    }
+
+    #[test]
+    fn shared_settings_fixtures_match_schema_verdicts() {
+        let fixtures_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../packages/contracts/fixtures");
+        let raw = std::fs::read_to_string(fixtures_dir.join("settings-expectations.json"))
+            .expect("fixtures/settings-expectations.json must exist");
+        let expectations: Vec<SettingsExpectation> =
+            serde_json::from_str(&raw).expect("settings-expectations.json must parse");
+        assert!(
+            !expectations.is_empty(),
+            "settings parity suite must cover fixtures"
+        );
+        let root = std::env::temp_dir().join(format!(
+            "immersive-settings-fixtures-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp directory must be created");
+        for entry in expectations {
+            let text = std::fs::read_to_string(fixtures_dir.join(&entry.fixture))
+                .unwrap_or_else(|error| panic!("{}: {error}", entry.fixture));
+            let path = root.join("settings.json");
+            fs::write(&path, &text).expect("fixture must write");
+            let accepted = load_compatible_from(&path).is_ok();
+            assert_eq!(
+                accepted,
+                entry.expect == "valid",
+                "fixture {}",
+                entry.fixture
+            );
+        }
         fs::remove_dir_all(root).expect("temp directory must be removed");
     }
 

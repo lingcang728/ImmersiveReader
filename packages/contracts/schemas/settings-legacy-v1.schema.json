@@ -4,10 +4,15 @@
   "title": "Immersive Reader Settings legacy v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "libraryRoot", "companionRoot", "temporaryRoots"],
+  "required": ["schemaVersion", "libraryRoot"],
   "properties": {
     "schemaVersion": { "const": 1 },
-    "libraryRoot": { "type": "string", "minLength": 1 },
+    "libraryRoot": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^([A-Za-z]:[\\\\/]|\\\\\\\\)",
+      "description": "Absolute Windows path (drive-rooted or UNC), matching the Rust loader's Path::is_absolute requirement"
+    },
     "companionRoot": { "type": "string", "minLength": 1 },
     "temporaryRoots": {
       "type": "array",
