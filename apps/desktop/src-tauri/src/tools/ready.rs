@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::process::Child;
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -44,13 +44,30 @@ fn receive_ready(
     expected_pid: u32,
     timeout: Duration,
 ) -> Result<ReadyMessage, String> {
-    let line = match receiver.recv_timeout(timeout) {
-        Ok(Ok(line)) => line,
-        Ok(Err(_)) => return Err("ENGINE_READY_STDOUT".to_string()),
-        Err(mpsc::RecvTimeoutError::Timeout) => return Err("ENGINE_READY_TIMEOUT".to_string()),
-        Err(mpsc::RecvTimeoutError::Disconnected) => return Err("ENGINE_READY_EOF".to_string()),
-    };
-    parse_ready_line(&line, expected_engine, expected_pid)
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("ENGINE_READY_TIMEOUT".to_string());
+        }
+        let line = match receiver.recv_timeout(remaining) {
+            Ok(Ok(line)) => line,
+            Ok(Err(_)) => return Err("ENGINE_READY_STDOUT".to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err("ENGINE_READY_TIMEOUT".to_string())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("ENGINE_READY_EOF".to_string())
+            }
+        };
+        match parse_ready_line(&line, expected_engine, expected_pid) {
+            Ok(ready) => return Ok(ready),
+            // Noise lines (lossy-decoded GBK warnings, log output) are skipped
+            // so the handshake keeps waiting for READY within the same timeout.
+            Err(error) if error == "ENGINE_READY_INVALID_JSON" => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 pub(super) fn wait_for_ready(
@@ -65,16 +82,25 @@ pub(super) fn wait_for_ready(
     let expected_pid = child.id();
     let (sender, receiver) = mpsc::sync_channel(1);
     let reader = thread::spawn(move || {
-        let mut lines = BufReader::new(stdout).lines();
-        let first = match lines.next() {
-            Some(Ok(line)) => Ok(line),
-            Some(Err(error)) => Err(error.to_string()),
-            None => Err("ENGINE_READY_EOF".to_string()),
-        };
-        let _ = sender.send(first);
-        for line in lines {
-            if line.is_err() {
-                break;
+        // Read raw byte lines: sidecar warnings/logs may arrive in a non-UTF-8
+        // code page (e.g. GBK on zh-CN Windows), so decode each line lossily
+        // instead of aborting on the first invalid byte.
+        let mut stdout = BufReader::new(stdout);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            match stdout.read_until(b'\n', &mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let line = String::from_utf8_lossy(&buffer).into_owned();
+                    // Once READY is consumed the receiver is dropped; keep
+                    // draining stdout so the child never blocks on a full pipe.
+                    let _ = sender.send(Ok(line));
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error.to_string()));
+                    break;
+                }
             }
         }
     });
@@ -160,6 +186,46 @@ mod tests {
         let expected_pid = child.id();
         let (ready, reader) = wait_for_ready(&mut child, "podcast", Duration::from_secs(5))
             .expect("live child READY line must be accepted");
+
+        assert_eq!(ready.pid, expected_pid);
+        assert_eq!(ready.port, 43210);
+        child.wait().expect("child must be reaped");
+        reader.join().expect("stdout reader must finish");
+    }
+
+    #[test]
+    fn skips_decoded_noise_lines_while_waiting_for_ready() {
+        let (sender, receiver) = mpsc::sync_channel::<Result<String, String>>(4);
+        sender
+            .send(Ok("warning: sidecar log noise".to_string()))
+            .expect("noise line must send");
+        sender
+            .send(Ok(
+                r#"{"engine":"podcast","protocolVersion":1,"pid":4242,"port":43210}"#
+                    .to_string(),
+            ))
+            .expect("READY line must send");
+        let ready = receive_ready(&receiver, "podcast", 4242, Duration::from_secs(1))
+            .expect("READY after noise lines must be accepted");
+        assert_eq!(ready.port, 43210);
+    }
+
+    #[test]
+    fn tolerates_non_utf8_noise_before_ready() {
+        // Emit raw GBK bytes ("中文\n") on stdout before the READY JSON line.
+        let mut child = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "$s=[Console]::OpenStandardOutput(); $b=[byte[]](0xD6,0xD0,0xCE,0xC4,0x0A); $s.Write($b,0,$b.Length); $s.Flush(); Write-Output ('{\"engine\":\"podcast\",\"protocolVersion\":1,\"pid\":' + $PID + ',\"port\":43210}')",
+            ])
+            .creation_flags(0x0800_0000)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("noisy PowerShell child must start");
+        let expected_pid = child.id();
+        let (ready, reader) = wait_for_ready(&mut child, "podcast", Duration::from_secs(5))
+            .expect("READY after non-UTF-8 noise must be accepted");
 
         assert_eq!(ready.pid, expected_pid);
         assert_eq!(ready.port, 43210);
