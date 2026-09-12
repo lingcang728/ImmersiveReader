@@ -7,6 +7,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 #[cfg(desktop)]
 use tauri::menu::{MenuBuilder, MenuItem};
@@ -211,6 +212,206 @@ fn is_markdown_path(path: &str) -> bool {
     lower.ends_with(".md") || lower.ends_with(".markdown")
 }
 
+/// P2-18: never slurp an unbounded file into the WebView — metadata pre-check.
+const MAX_MARKDOWN_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// P1-18 whitelist state: Markdown paths this process has actually served to
+/// the UI (successful reads, OS open-file hand-offs, recent-files entries).
+/// `save_markdown_file` may only write inside managed roots or to a path in
+/// this set — the renderer cannot mint a fresh writable target out of thin
+/// air without reading it first.
+fn opened_markdown_files() -> &'static Mutex<BTreeSet<String>> {
+    static OPENED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    OPENED.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+fn markdown_set_key(path: &Path) -> String {
+    path.canonicalize()
+        .map(|value| value.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|_| path.to_string_lossy().to_lowercase())
+}
+
+fn register_opened_markdown(path: &Path) {
+    let Ok(mut set) = opened_markdown_files().lock() else {
+        return;
+    };
+    set.insert(path.to_string_lossy().to_lowercase());
+    if let Ok(canonical) = path.canonicalize() {
+        set.insert(canonical.to_string_lossy().to_lowercase());
+    }
+}
+
+fn register_recent_markdown_paths(json: &str) {
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+        return;
+    };
+    for item in items {
+        if let Some(path) = item.get("path").and_then(|value| value.as_str()) {
+            if is_markdown_path(path) {
+                register_opened_markdown(Path::new(path));
+            }
+        }
+    }
+}
+
+/// Shared shape check for every Markdown-path command: absolute path with a
+/// `.md`/`.markdown` extension. Without this the renderer could point the
+/// commands at any file on disk (settings.json, *.db, keys...).
+fn markdown_path_allowed(path: &str) -> Result<PathBuf, String> {
+    if path.trim().is_empty() {
+        return Err("MARKDOWN_PATH_EMPTY".to_string());
+    }
+    if !is_markdown_path(path) {
+        return Err("MARKDOWN_PATH_TYPE_NOT_ALLOWED".to_string());
+    }
+    let candidate = PathBuf::from(path);
+    if !candidate.is_absolute() {
+        return Err("MARKDOWN_PATH_NOT_ABSOLUTE".to_string());
+    }
+    Ok(candidate)
+}
+
+/// Read-side whitelist: any absolute `.md`/`.markdown` file that exists and is
+/// small enough. The explicit-open cases this can't enumerate in lib.rs alone
+/// (file dialog selection, drag-drop) still flow through here — but they are
+/// bounded to Markdown files, and writes stay behind `markdown_write_permitted`.
+fn markdown_read_target(path: &str) -> Result<PathBuf, String> {
+    let candidate = markdown_path_allowed(path)?;
+    let metadata = fs::metadata(&candidate).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("MARKDOWN_PATH_NOT_FILE".to_string());
+    }
+    if metadata.len() > MAX_MARKDOWN_FILE_BYTES {
+        return Err("MARKDOWN_FILE_TOO_LARGE".to_string());
+    }
+    Ok(candidate)
+}
+
+/// Write-side whitelist: managed roots (Library/Data/Cache) always qualify;
+/// anything else must be a Markdown file this process already opened.
+fn markdown_write_permitted(path: &Path) -> Result<(), String> {
+    if let Ok(locations) = storage::StorageLocations::current_with_library_settings() {
+        if let Ok(canonical) = path.canonicalize() {
+            for root in [
+                &locations.library_root,
+                &locations.data_root,
+                &locations.cache_root,
+            ] {
+                if let Ok(root) = root.canonicalize() {
+                    if canonical.starts_with(root) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+    let key = markdown_set_key(path);
+    let raw = path.to_string_lossy().to_lowercase();
+    let opened = opened_markdown_files()
+        .lock()
+        .map(|set| set.contains(&key) || set.contains(&raw))
+        .unwrap_or(false);
+    if opened {
+        return Ok(());
+    }
+    Err("MARKDOWN_PATH_NOT_ALLOWED".to_string())
+}
+
+/// Chapter images resolve through `convertFileSrc`, which needs an asset://
+/// scope grant. The old code recursively granted the file's whole parent
+/// subtree — every read permanently widened the exfiltration surface. Now:
+/// the Markdown file itself always gets `allow_file`; inside the Library the
+/// owning book directory (the ancestor holding manifest.json) gets a
+/// recursive `allow_directory` so `assets/` siblings keep rendering. Trade-off:
+/// standalone `.md` files outside the Library lose relative-image loading —
+/// granting arbitrary user directories recursively is exactly what P1-18
+/// removes.
+fn grant_markdown_asset_scope(app: &tauri::AppHandle, path: &Path) {
+    let scope = app.asset_protocol_scope();
+    let _ = scope.allow_file(path);
+    let Ok(locations) = storage::StorageLocations::current_with_library_settings() else {
+        return;
+    };
+    let (Ok(canonical_file), Ok(canonical_library)) = (
+        path.canonicalize(),
+        locations.library_root.canonicalize(),
+    ) else {
+        return;
+    };
+    if !canonical_file.starts_with(&canonical_library) {
+        return;
+    }
+    let mut dir = canonical_file.parent();
+    while let Some(current) = dir {
+        if current == canonical_library {
+            break;
+        }
+        if current.join("manifest.json").is_file() {
+            let _ = scope.allow_directory(current, true);
+            return;
+        }
+        dir = current.parent();
+    }
+}
+
+/// P1-17: `fs::copy` on a live WAL database silently skips the -wal file, so
+/// the "backup" is a stale/torn snapshot. Same recipe as
+/// `migration/sqlite.rs::execute` (checkpoint → integrity_check → VACUUM INTO
+/// → verify the copy), but through bundled rusqlite instead of a sqlite3 CLI.
+fn backup_sqlite_verified(source: &Path, target: &Path) -> Result<(), String> {
+    use rusqlite::{Connection, OpenFlags};
+    // Read-write (without CREATE) because wal_checkpoint must fold the live
+    // WAL into the main file; VACUUM INTO itself is a consistent committed
+    // snapshot regardless of checkpoint busyness.
+    let db = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| error.to_string())?;
+    db.busy_timeout(Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+        .map_err(|error| error.to_string())?;
+    let source_integrity: String = db
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if source_integrity != "ok" {
+        return Err(format!(
+            "control.db integrity check failed: {source_integrity}"
+        ));
+    }
+    let source_version: u32 = db
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let temporary = target.with_extension(format!("backup.{}.db", uuid::Uuid::new_v4()));
+    let escaped = temporary.to_string_lossy().replace('\'', "''");
+    if let Err(error) = db.execute_batch(&format!("VACUUM INTO '{escaped}'")) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    drop(db);
+    let verified = (|| -> Result<(), String> {
+        let copy =
+            Connection::open_with_flags(&temporary, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| error.to_string())?;
+        let copy_integrity: String = copy
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if copy_integrity != "ok" {
+            return Err(format!("backup copy failed integrity check: {copy_integrity}"));
+        }
+        let copy_version: u32 = copy
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if copy_version != source_version {
+            return Err("backup copy user_version differs from source".to_string());
+        }
+        drop(copy);
+        fs::rename(&temporary, target).map_err(|error| error.to_string())
+    })();
+    if verified.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    verified
+}
+
 fn initial_markdown_path(args: &[String]) -> Option<String> {
     if args.len() <= 1 {
         return None;
@@ -236,6 +437,7 @@ fn initial_markdown_path(args: &[String]) -> Option<String> {
 #[tauri::command]
 async fn get_file_mtime(path: String) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<u64, String> {
+        let path = markdown_path_allowed(&path)?;
         let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
         let modified = meta.modified().map_err(|e| e.to_string())?;
         let ms = modified
@@ -254,13 +456,11 @@ async fn read_markdown_file(
     path: String,
 ) -> Result<ReadResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ReadResult, String> {
+        let path = markdown_read_target(&path)?;
         let bytes = fs::read(&path).map_err(|e| e.to_string())?;
         let (content, encoding) = decode_markdown_bytes(bytes)?;
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            app.asset_protocol_scope()
-                .allow_directory(parent, true)
-                .map_err(|e| e.to_string())?;
-        }
+        register_opened_markdown(&path);
+        grant_markdown_asset_scope(&app, &path);
         Ok(ReadResult { content, encoding })
     })
     .await
@@ -278,8 +478,13 @@ async fn save_markdown_file(
     encoding: String,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let path = markdown_path_allowed(&path)?;
+        markdown_write_permitted(&path)?;
         let bytes = encode_markdown(&content, &encoding)?;
-        atomic_write_file(std::path::Path::new(&path), &bytes)
+        if bytes.len() as u64 > MAX_MARKDOWN_FILE_BYTES {
+            return Err("MARKDOWN_FILE_TOO_LARGE".to_string());
+        }
+        atomic_write_file(&path, &bytes)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -380,6 +585,7 @@ async fn load_recent_files() -> Result<RecentFilesLoad, String> {
             if changed {
                 atomic_write_file(&path, json.as_bytes())?;
             }
+            register_recent_markdown_paths(&json);
             Ok(RecentFilesLoad {
                 json,
                 store_exists: true,
@@ -390,6 +596,7 @@ async fn load_recent_files() -> Result<RecentFilesLoad, String> {
                 let raw = fs::read_to_string(&legacy_path).map_err(|e| e.to_string())?;
                 let (json, _) = cleanup_recent_files_json(&raw, &dir);
                 atomic_write_file(&path, json.as_bytes())?;
+                register_recent_markdown_paths(&json);
                 return Ok(RecentFilesLoad {
                     json,
                     store_exists: true,
@@ -412,6 +619,7 @@ async fn save_recent_files(json: String) -> Result<String, String> {
         let path = dir.join("recent-files.json");
         let (cleaned, _) = cleanup_recent_files_json(&json, &dir);
         atomic_write_file(&path, cleaned.as_bytes())?;
+        register_recent_markdown_paths(&cleaned);
         Ok(cleaned)
     })
     .await
@@ -443,9 +651,13 @@ async fn delete_reading_state(path: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn markdown_file_exists(path: String) -> bool {
-    tauri::async_runtime::spawn_blocking(move || path_exists(&path))
-        .await
-        .unwrap_or(false)
+    tauri::async_runtime::spawn_blocking(move || {
+        markdown_path_allowed(&path)
+            .map(|path| path.exists())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -501,20 +713,24 @@ async fn create_state_backup() -> Result<StateBackupResult, String> {
             "credentials".to_string(),
             "browser_profiles".to_string(),
         ];
-        for (label, source, name) in [
-            ("settings", locations.settings_path, "settings.json"),
-            (
-                "control_db",
-                locations.data_root.join(r"App\control.db"),
-                "control.db",
-            ),
-        ] {
-            if source.is_file() {
-                fs::copy(&source, backup_root.join(name)).map_err(|error| error.to_string())?;
-                included.push(label.to_string());
-            } else {
-                skipped.push(label.to_string());
-            }
+        // settings.json is a plain file — a straight copy is fine.
+        let settings_source = locations.settings_path;
+        if settings_source.is_file() {
+            fs::copy(&settings_source, backup_root.join("settings.json"))
+                .map_err(|error| error.to_string())?;
+            included.push("settings".to_string());
+        } else {
+            skipped.push("settings".to_string());
+        }
+        // control.db is a live WAL database: fs::copy drops the -wal contents
+        // and can tear mid-write (P1-17). Snapshot it with the verified
+        // checkpoint + VACUUM INTO + integrity_check recipe instead.
+        let control_source = locations.data_root.join(r"App\control.db");
+        if control_source.is_file() {
+            backup_sqlite_verified(&control_source, &backup_root.join("control.db"))?;
+            included.push("control_db".to_string());
+        } else {
+            skipped.push("control_db".to_string());
         }
         skipped.sort();
         let manifest = serde_json::json!({
@@ -723,6 +939,20 @@ async fn get_acquisition_snapshot(
             control::repair_orphaned_podcast_tasks()?;
             let mut control = control::ControlDb::open_current()?;
             let locations = storage::StorageLocations::current_with_library_settings()?;
+            // P1-15 watchdog: the Python worker refreshes work/state/*.json
+            // heartbeats every ~15s; when that file goes silent the worker is
+            // wedged/killed/suspended and its task must not stay "Running"
+            // forever — mark it Interrupted so checkpoint resume can take over.
+            // work_root = Cache\Podcast\Tasks (each <task_id>\work\state lives
+            // underneath, per transcribe_task.py/common.py).
+            if matches!(kind, None | Some(tasks::TaskKind::Podcast)) {
+                let work_root = locations.cache_root.join("Podcast").join("Tasks");
+                if let Err(error) =
+                    control.reap_stale_workers(&work_root, Duration::from_secs(600))
+                {
+                    eprintln!("stale podcast worker reap failed: {error}");
+                }
+            }
             reconcile_cancel_and_discard(&locations, &control)?;
             // Keep the queue lean: drop terminal history older than a week.
             let _ = control.prune_terminal_tasks_older_than(7);
@@ -1394,6 +1624,7 @@ pub fn run() {
             let _ = window.set_focus();
         }
         if let Some(file_path) = initial_markdown_path(&args) {
+            register_opened_markdown(Path::new(&file_path));
             let _ = app.emit("open-file", file_path);
         }
     }));
@@ -1463,10 +1694,25 @@ pub fn run() {
             reader_server::ReaderServiceState::default(),
         ))
         .setup(|app| {
+            // P1-1: Job Objects kill podcast workers when the app exits, but
+            // their tasks stayed Running forever with no recovery path. At
+            // startup every still-active task whose worker is gone gets marked
+            // Interrupted (restartable); the live-worker id set comes from the
+            // worker registry so a just-started task is never clobbered.
+            std::thread::spawn(|| {
+                let Ok(control) = control::ControlDb::open_current() else {
+                    return;
+                };
+                let active_ids = podcast::active_podcast_task_ids().unwrap_or_default();
+                if let Err(error) = control.recover_interrupted_tasks(&active_ids) {
+                    eprintln!("interrupted podcast task recovery failed: {error}");
+                }
+            });
             // Windows: file path passed as CLI argument
             let window = app.get_webview_window("main").unwrap();
             let args: Vec<String> = std::env::args().collect();
             if let Some(file_path) = initial_markdown_path(&args) {
+                register_opened_markdown(Path::new(&file_path));
                 let _ = window.eval(format!(
                     "window.__INITIAL_FILE__ = {};",
                     serde_json::to_string(&file_path).unwrap()
@@ -1556,6 +1802,7 @@ pub fn run() {
                 if let Ok(path) = url.to_file_path() {
                     let path_str = path.to_string_lossy().to_string();
                     if is_markdown_path(&path_str) {
+                        register_opened_markdown(&path);
                         let _ = app_handle.emit("open-file", path_str);
                     }
                 }
