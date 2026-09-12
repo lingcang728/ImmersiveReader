@@ -82,8 +82,11 @@ def main() -> int:
     launcher = config.get("launcher") or {}
     if launcher.get("open_folder_after_run") is not True or launcher.get("open_folder") != "output":
         fail(errors, "config launcher must open output after runs by default")
-    if config.get("skip_processed_files") is not False or config.get("always_reprocess_inputs") is not True:
-        fail(errors, "config must disable processed-file memory and always reprocess input audio")
+    # P1-29: shipped config must keep processed-file memory and resumable
+    # chunk/state recovery enabled — disabling them makes multi-hour
+    # transcriptions restart from byte zero on any interruption.
+    if config.get("skip_processed_files") is not True or config.get("always_reprocess_inputs") is not False:
+        fail(errors, "config must keep processed-file memory and resumable chunk recovery enabled")
     translation = config.get("translation") or {}
     if translation.get("backend") == "ollama" and translation.get("auto_start_ollama") is not True:
         fail(errors, "Ollama translation should auto-start Ollama by default")

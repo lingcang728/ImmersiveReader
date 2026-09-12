@@ -142,6 +142,10 @@ TRANSLATION_SEMAPHORE_LOCK = threading.Lock()
 TRANSLATION_SEMAPHORES: dict[int, threading.Semaphore] = {}
 OLLAMA_PROCESS: subprocess.Popen[Any] | None = None
 RUN_LOCK_ACQUIRED = False
+# Compact machine-readable copy of the last write_run_summary call, kept so
+# transcribe_task.py can build a structured fatal line after main() returns
+# non-zero (P1-28). Populated on every terminal path that writes a summary.
+LAST_RUN_SUMMARY: dict[str, Any] | None = None
 
 
 def pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -1730,9 +1734,19 @@ def setup_file_logger(name: str) -> logging.Logger:
     handler = logging.FileHandler(log_path, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(handler)
+    # P1-28: stdout also carries the NDJSON protocol lines consumed by the
+    # desktop host, so keep INFO/WARNING there (plain text stays distinguishable
+    # from {"type": ...} JSON) but route ERROR+ to stderr — the host treats the
+    # last stderr line as the task's last_error, and real failures should land
+    # there instead of being buried under stdout chatter.
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(logging.Formatter("%(message)s"))
+    console.addFilter(lambda record: record.levelno < logging.ERROR)
     logger.addHandler(console)
+    errors = logging.StreamHandler(sys.stderr)
+    errors.setLevel(logging.ERROR)
+    errors.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(errors)
     return logger
 
 
@@ -3136,6 +3150,19 @@ def translate_existing_outputs(config: dict[str, Any], force: bool = False, no_o
 
 
 def write_run_summary(results: list[dict[str, Any]], runtime: dict[str, str] | None, failures: list[str]) -> Path:
+    global LAST_RUN_SUMMARY
+    LAST_RUN_SUMMARY = {
+        "results": [
+            {
+                "file": item.get("file"),
+                "status": item.get("status"),
+                "error": item.get("error"),
+            }
+            for item in results
+        ],
+        "runtime": dict(runtime) if runtime else None,
+        "failures": [str(failure) for failure in failures[-10:]],
+    }
     success = sum(1 for item in results if item["status"] == "success")
     skipped = sum(1 for item in results if item["status"] == "skipped")
     failed = sum(1 for item in results if item["status"] == "failed")

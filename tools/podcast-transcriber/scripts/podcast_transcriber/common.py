@@ -64,13 +64,74 @@ NORMALIZED_DIR = WORK / "audio_normalized"
 MODELS_DIR = Path(os.environ.get("IMMERSIVE_PODCAST_MODEL_ROOT", ROOT / "models")).resolve()
 
 
+def _ct2_model_dir(path: Path) -> bool:
+    """A directory faster-whisper can load directly must hold a top-level model.bin."""
+    return path.is_dir() and (path / "model.bin").is_file()
+
+
+def _canonical_model_dir_name(name: str) -> str:
+    """Strip the vendored ``faster-whisper-`` prefix / ``-local`` suffix."""
+    stem = name
+    if stem.startswith("faster-whisper-"):
+        stem = stem[len("faster-whisper-"):]
+    if stem.endswith("-local"):
+        stem = stem[: -len("-local")]
+    return stem
+
+
 def resolve_model_reference(value: Any) -> str:
+    """Resolve a configured ASR model name against the managed model root.
+
+    Order (P1-27): exact ``MODELS_DIR/<basename>`` wins; then a loadable
+    vendored ``<name>-local`` dir or one whose canonical name matches
+    (``large-v3-turbo`` → ``faster-whisper-large-v3-turbo-local``); then a
+    vendored HF cache ``models--<org>--<name>`` resolved to the snapshot dir
+    that actually holds ``model.bin`` (the cache root itself is NOT loadable);
+    finally any loadable vendored dir embedding the name. Unresolvable names
+    pass through so faster-whisper can still handle well-known HF model ids.
+    """
     reference = str(value or "").strip()
     if not reference or not os.environ.get("IMMERSIVE_PODCAST_MODEL_ROOT"):
         return reference
-    path = Path(reference)
-    candidate = MODELS_DIR / path.name
-    return str(candidate) if candidate.is_dir() else reference
+    name = Path(reference).name
+    if not name:
+        return reference
+    candidate = MODELS_DIR / name
+    if candidate.is_dir():
+        return str(candidate)
+    try:
+        children = sorted(child for child in MODELS_DIR.iterdir() if child.is_dir())
+    except OSError:
+        return reference
+    vendored = [
+        child
+        for child in children
+        if not child.name.startswith("models--") and _ct2_model_dir(child)
+    ]
+    wanted = _canonical_model_dir_name(name)
+    for child in vendored:
+        if child.name == f"{name}-local" or _canonical_model_dir_name(child.name) == wanted:
+            return str(child)
+    for child in children:
+        # HF cache layout is "models--<org>--<repo>" (e.g.
+        # models--Systran--faster-whisper-large-v3); compare the repo
+        # component canonically so "large-v3" reaches the real large-v3
+        # snapshot instead of fuzzy-matching an unrelated vendored dir.
+        if not child.name.startswith("models--"):
+            continue
+        repo = child.name.split("--")[-1]
+        if repo == name or _canonical_model_dir_name(repo) == wanted:
+            snapshots = sorted(
+                (snap for snap in (child / "snapshots").glob("*") if _ct2_model_dir(snap)),
+                key=lambda snap: snap.name,
+                reverse=True,
+            )
+            if snapshots:
+                return str(snapshots[0])
+    for child in vendored:
+        if name in child.name:
+            return str(child)
+    return reference
 
 
 CONFIG_PATH = ROOT / "config.json"

@@ -21,8 +21,8 @@
   },
   "asr": {
     "backend": "faster-whisper",
-    "model": "large-v3-turbo",
-    "fallback_models": ["medium", "small"],
+    "model": "faster-whisper-large-v3-turbo-local",
+    "fallback_models": ["large-v3"],
     "language": "auto",
     "device_preference": "auto",
     "compute_type_preference": ["int8_float16", "float16", "int8"],
@@ -121,8 +121,8 @@
     },
     "fail_on_quality_errors": true
   },
-  "skip_processed_files": false,
-  "always_reprocess_inputs": true,
+  "skip_processed_files": true,
+  "always_reprocess_inputs": false,
   "launcher": {
     "open_folder_after_run": true,
     "open_folder": "output",

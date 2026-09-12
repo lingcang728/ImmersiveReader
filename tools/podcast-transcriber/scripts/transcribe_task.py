@@ -39,6 +39,33 @@ class TaskSpecError(RuntimeError):
         self.code = code
 
 
+# transcribe_podcasts.main() exit codes → structured fatal errorCode (P1-28).
+# The desktop host treats the last stderr line as the task's last_error and
+# maps a JSON {"errorCode": ...} onto TaskErrorCode, so every non-zero exit
+# must leave a fatal NDJSON line as the final stderr output.
+_EXIT_FATAL = {
+    1: ("TRANSCRIPTION_FAILED", "转写流水线存在失败项"),
+    2: ("ENGINE_UNAVAILABLE", "未找到 ffmpeg，转写引擎不可用"),
+    3: ("MODEL_LOAD_FAILED", "语音模型/推理运行时加载失败"),
+    4: ("ENGINE_BUSY", "检测到另一个转写进程仍持有运行锁"),
+}
+
+
+def _exit_fatal_payload(code: int, summary: dict[str, Any] | None) -> dict[str, Any]:
+    """Build the terminal fatal NDJSON for a non-zero pipeline exit code."""
+    error_code, base = _EXIT_FATAL.get(code, ("TRANSCRIPTION_FAILED", f"转写流水线退出码 {code}"))
+    details: list[str] = []
+    for item in (summary or {}).get("results", []):
+        if isinstance(item, dict) and item.get("status") == "failed":
+            detail = str(item.get("file") or "?")
+            if item.get("error"):
+                detail += f": {item['error']}"
+            details.append(detail)
+    details.extend(str(failure) for failure in (summary or {}).get("failures", [])[-3:])
+    message = base if not details else f"{base}；" + "；".join(details)
+    return {"type": "fatal", "errorCode": error_code, "message": message[:480]}
+
+
 def _managed_root(environment: dict[str, str], name: str) -> Path:
     value = environment.get(name, "").strip()
     if not value:
@@ -266,6 +293,15 @@ def main() -> int:
                     "percent": 100,
                     "message": "转写流水线完成",
                 }
+            )
+        else:
+            # Last stderr line wins as the host's last_error — emit the fatal
+            # line after the pipeline has gone quiet so it is not overwritten.
+            summary = getattr(transcribe_podcasts, "LAST_RUN_SUMMARY", None)
+            print(
+                json.dumps(_exit_fatal_payload(code, summary), ensure_ascii=False),
+                file=sys.stderr,
+                flush=True,
             )
         return code
     except Exception as error:

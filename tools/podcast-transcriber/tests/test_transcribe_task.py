@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from transcribe_task import TaskSpecError, load_task_spec  # noqa: E402
+from transcribe_task import TaskSpecError, _exit_fatal_payload, load_task_spec  # noqa: E402
 
 
 def fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
@@ -138,3 +139,95 @@ def test_task_spec_preserves_translate_option(tmp_path: Path) -> None:
     path.write_text(json.dumps(spec), encoding="utf-8")
     loaded = load_task_spec(path, environment)
     assert loaded["options"]["translate"] is True
+
+
+def _install_fake_pipeline(monkeypatch, exit_code: int, summary: dict | None = None) -> None:
+    """Stub the in-process pipeline + optional imports so main() is hermetic."""
+    fake_worker = types.ModuleType("transcribe_podcasts")
+    fake_worker.main = lambda: exit_code
+    fake_worker.LAST_RUN_SUMMARY = summary
+
+    fake_pricing = types.ModuleType("deepseek_pricing")
+
+    class _UpstreamError(Exception):
+        pass
+
+    class _BudgetExceededError(Exception):
+        pass
+
+    fake_pricing.PodcastUpstreamError = _UpstreamError
+    fake_pricing.PodcastBudgetExceededError = _BudgetExceededError
+    fake_pricing.classify_upstream_error = lambda error: None
+
+    fake_pim = types.ModuleType("polish_interview_markdown")
+
+    monkeypatch.setitem(sys.modules, "transcribe_podcasts", fake_worker)
+    monkeypatch.setitem(sys.modules, "deepseek_pricing", fake_pricing)
+    monkeypatch.setitem(sys.modules, "polish_interview_markdown", fake_pim)
+
+
+def test_exit_fatal_payload_maps_exit_codes() -> None:
+    expected = {
+        1: "TRANSCRIPTION_FAILED",
+        2: "ENGINE_UNAVAILABLE",
+        3: "MODEL_LOAD_FAILED",
+        4: "ENGINE_BUSY",
+        99: "TRANSCRIPTION_FAILED",
+    }
+    for code, error_code in expected.items():
+        payload = _exit_fatal_payload(code, None)
+        assert payload["type"] == "fatal"
+        assert payload["errorCode"] == error_code
+        assert payload["message"]
+
+    summary = {
+        "results": [{"file": "a.mp3", "status": "failed", "error": "boom"}],
+        "failures": ["model=x device=cpu: nope"],
+    }
+    payload = _exit_fatal_payload(1, summary)
+    assert "a.mp3" in payload["message"]
+    assert "boom" in payload["message"]
+    assert len(payload["message"]) <= 480
+
+
+def test_main_emits_fatal_ndjson_on_nonzero_exit(tmp_path: Path, monkeypatch, capsys) -> None:
+    path, environment = fixture(tmp_path)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, "argv", ["transcribe_task.py", "--task-spec", str(path)])
+    _install_fake_pipeline(
+        monkeypatch,
+        3,
+        {
+            "results": [{"file": "model", "status": "failed", "error": "no runtime"}],
+            "failures": [],
+        },
+    )
+
+    from transcribe_task import main
+
+    assert main() == 3
+    captured = capsys.readouterr()
+    stderr_lines = [line for line in captured.err.splitlines() if line.strip()]
+    assert stderr_lines, "non-zero exit must leave a fatal line on stderr"
+    fatal = json.loads(stderr_lines[-1])
+    assert fatal["type"] == "fatal"
+    assert fatal["errorCode"] == "MODEL_LOAD_FAILED"
+    assert "no runtime" in fatal["message"]
+
+
+def test_main_emits_completed_without_fatal_on_success(tmp_path: Path, monkeypatch, capsys) -> None:
+    path, environment = fixture(tmp_path)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, "argv", ["transcribe_task.py", "--task-spec", str(path)])
+    _install_fake_pipeline(monkeypatch, 0)
+
+    from transcribe_task import main
+
+    assert main() == 0
+    captured = capsys.readouterr()
+    stdout_lines = [line for line in captured.out.splitlines() if line.strip()]
+    last = json.loads(stdout_lines[-1])
+    assert last["type"] == "completed"
+    assert not any('"type": "fatal"' in line or '"type":"fatal"' in line for line in captured.err.splitlines())
