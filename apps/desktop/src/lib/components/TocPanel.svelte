@@ -128,6 +128,7 @@
 					bind:value={query}
 					on:keydown={handleKeydown}
 					placeholder="跳转到标题..."
+					aria-label="跳转到标题"
 					class="toc-input"
 				/>
 				<span class="toc-count">{filtered.length}</span>

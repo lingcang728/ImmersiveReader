@@ -26,7 +26,6 @@
 	.content.flow-active {
 		overflow: hidden;
 	}
-	:global(.app.focus-key-scroll-active) .content {
-		scroll-behavior: auto;
-	}
+	/* P3-12: removed a dead rule targeting `.focus-key-scroll-active` — the
+	   class is never set anywhere (the real one is `.focus-scroll-active`). */
 </style>

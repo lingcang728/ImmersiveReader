@@ -36,6 +36,7 @@
 				bind:value={$searchQuery}
 				on:input={onInput}
 				placeholder="搜索..."
+				aria-label="搜索正文"
 				class="search-input"
 			/>
 			{#if matchCount > 0}

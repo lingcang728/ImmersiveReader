@@ -14,7 +14,9 @@
 	export let loading = false;
 	export let writable = true;
 	export let libraryRoot = '';
-	export let onOpenBook: (bookId: string) => void;
+	// P3-12: chapterIndex opens the book at that chapter (details dialog
+	// chapter list); omitted = resume at saved progress.
+	export let onOpenBook: (bookId: string, chapterIndex?: number) => void;
 	export let onOpenDetails: (bookId: string) => void;
 	export let onOpenSource: (source: string, sourceId?: string | null) => void;
 	export let onCloseDetails: () => void;
@@ -77,16 +79,20 @@
 		return source === 'zhihu' ? '知乎' : source === 'podcast' ? '播客' : '手动';
 	}
 
+	// P3-8: Intl.DateTimeFormat construction is not cheap — one shared
+	// instance instead of a fresh formatter per book per render.
+	const lastReadFormatter = new Intl.DateTimeFormat('zh-CN', {
+		month: 'short',
+		day: 'numeric',
+		hour: '2-digit',
+		minute: '2-digit'
+	});
+
 	function lastReadLabel(value?: string): string {
 		if (!value) return '尚未开卷';
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) return '有阅读记录';
-		return new Intl.DateTimeFormat('zh-CN', {
-			month: 'short',
-			day: 'numeric',
-			hour: '2-digit',
-			minute: '2-digit'
-		}).format(date);
+		return lastReadFormatter.format(date);
 	}
 
 	$: recoverableBytes = tasks
@@ -504,8 +510,16 @@
 						<ol class="chapter-list">
 							{#each chapters.slice(0, detailChapterVisible) as chapter, index}
 								<li class:current={index === currentIdx || chapter.id === currentChapterId}>
-									<span>{chapter.title}</span>
-									<small>{chapter.date ?? ''}</small>
+									<!-- P3-12: chapters jump straight to that chapter. -->
+									<button
+										type="button"
+										class="chapter-jump"
+										title="阅读本章"
+										on:click={() => onOpenBook(selectedBookDetail.manifest.bookId, index)}
+									>
+										<span>{chapter.title}</span>
+										<small>{chapter.date ?? ''}</small>
+									</button>
 								</li>
 							{/each}
 						</ol>
@@ -566,5 +580,29 @@
 	}
 	.book-detail-dialog::backdrop {
 		background: rgba(0, 0, 0, 0.34);
+	}
+	/* P3-12: the detail-dialog chapter rows are buttons — reset UA chrome and
+	   keep the row layout (title left, date right) that li used to provide. */
+	.chapter-jump {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 10px;
+		width: 100%;
+		padding: 0;
+		border: 0;
+		background: none;
+		font: inherit;
+		color: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+	.chapter-jump:hover {
+		color: var(--link);
+	}
+	.chapter-jump:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: -2px;
+		border-radius: 4px;
 	}
 </style>

@@ -161,16 +161,22 @@ function lineContent(line: string): string {
 	return line.replace(/\r\n$|\n$|\r$/g, '');
 }
 
-export function stripYamlFrontMatterForRender(source: string): string {
+interface FrontMatterBlock {
+	lines: string[];
+	closingLineIndex: number;
+}
+
+// P3-7: the render path used to split the whole document twice (once per
+// front-matter helper). This is the single shared split, and the first-line
+// gate early-exits without a full-document match() when there is no `---`.
+function splitFrontMatter(source: string): FrontMatterBlock | null {
+	const firstBreak = source.search(/\r\n|\n|\r/);
+	const firstLine = (firstBreak === -1 ? source : source.slice(0, firstBreak)).replace(/^\ufeff/, '');
+	if (!/^---[ \t]*$/.test(firstLine)) return null;
+
 	const lines = source.match(/.*(?:\r\n|\n|\r|$)/g) ?? [];
 	if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-	if (lines.length < 2) return source;
-
-	const firstRawLine = lines[0];
-	if (firstRawLine === undefined) return source;
-
-	const firstLine = lineContent(firstRawLine).replace(/^\ufeff/, '');
-	if (!/^---[ \t]*$/.test(firstLine)) return source;
+	if (lines.length < 2) return null;
 
 	let closingLineIndex = -1;
 	for (let i = 1; i < lines.length; i += 1) {
@@ -180,12 +186,20 @@ export function stripYamlFrontMatterForRender(source: string): string {
 			break;
 		}
 	}
+	if (closingLineIndex === -1) return null;
 
-	if (closingLineIndex === -1) return source;
+	return { lines, closingLineIndex };
+}
 
-	return lines
-		.map((line, index) => (index <= closingLineIndex ? blankLineContent(line) : line))
+function blankFrontMatterBlock(frontMatter: FrontMatterBlock): string {
+	return frontMatter.lines
+		.map((line, index) => (index <= frontMatter.closingLineIndex ? blankLineContent(line) : line))
 		.join('');
+}
+
+export function stripYamlFrontMatterForRender(source: string): string {
+	const frontMatter = splitFrontMatter(source);
+	return frontMatter ? blankFrontMatterBlock(frontMatter) : source;
 }
 
 export interface TocItem {
@@ -207,22 +221,8 @@ export interface RenderedMarkdownDocument {
 
 // Line-based YAML-lite parser: `key: value`, inline `[a, b]` arrays and
 // simple `- item` lists. Nested structures are skipped, not mangled.
-export function extractYamlFrontMatterEntries(source: string): FrontMatterEntry[] {
-	const lines = source.match(/.*(?:\r\n|\n|\r|$)/g) ?? [];
-	if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-	if (lines.length < 2) return [];
-
-	const firstLine = lineContent(lines[0] ?? '').replace(/^﻿/, '');
-	if (!/^---[ \t]*$/.test(firstLine)) return [];
-
-	let closingLineIndex = -1;
-	for (let i = 1; i < lines.length; i += 1) {
-		if (/^(---|\.\.\.)[ \t]*$/.test(lineContent(lines[i] ?? ''))) {
-			closingLineIndex = i;
-			break;
-		}
-	}
-	if (closingLineIndex === -1) return [];
+function parseFrontMatterEntries(frontMatter: FrontMatterBlock): FrontMatterEntry[] {
+	const { lines, closingLineIndex } = frontMatter;
 
 	const cleanScalar = (raw: string) => raw.trim().replace(/^["']|["']$/g, '');
 	const entries: FrontMatterEntry[] = [];
@@ -271,6 +271,11 @@ export function extractYamlFrontMatterEntries(source: string): FrontMatterEntry[
 	flushPendingList();
 
 	return entries;
+}
+
+export function extractYamlFrontMatterEntries(source: string): FrontMatterEntry[] {
+	const frontMatter = splitFrontMatter(source);
+	return frontMatter ? parseFrontMatterEntries(frontMatter) : [];
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -537,39 +542,46 @@ function rehypeNormalizePodcastBilingual() {
 	};
 }
 
-function rehypeDocumentMetadata(toc: TocItem[]) {
+// P3-7: the processor is composed once and shared, so per-document state —
+// the toc sink and the heading-id counter — rides on the VFile (`process`
+// receives `{ value, data: { toc } }`) instead of `.use()` options.
+function rehypeDocumentMetadata() {
 	const blockTags = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'table', 'ul', 'ol', 'li', 'hr']);
-	const seenIds = new Map<string, number>();
 
-	function walk(node: any) {
-		if (node.type === 'element') {
-			if (!node.properties) node.properties = {};
+	return (tree: any, file: any) => {
+		const toc: TocItem[] = file?.data?.toc ?? [];
+		const seenIds = new Map<string, number>();
 
-			if (node.position && blockTags.has(node.tagName)) {
-				node.properties.dataSourceStart = node.position.start.line;
-				node.properties.dataSourceEnd = node.position.end.line;
-			}
+		function walk(node: any) {
+			if (node.type === 'element') {
+				if (!node.properties) node.properties = {};
 
-			const headingMatch = /^h([1-6])$/.exec(node.tagName);
-			if (headingMatch) {
-				const text = textFromHast(node);
-				if (!node.properties.id) {
-					node.properties.id = generateHeadingId(text, seenIds);
-				} else {
-					seenIds.set(String(node.properties.id), (seenIds.get(String(node.properties.id)) || 0) + 1);
+				if (node.position && blockTags.has(node.tagName)) {
+					node.properties.dataSourceStart = node.position.start.line;
+					node.properties.dataSourceEnd = node.position.end.line;
 				}
-				toc.push({
-					level: Number.parseInt(headingMatch[1], 10),
-					text,
-					id: String(node.properties.id)
-				});
+
+				const headingMatch = /^h([1-6])$/.exec(node.tagName);
+				if (headingMatch) {
+					const text = textFromHast(node);
+					if (!node.properties.id) {
+						node.properties.id = generateHeadingId(text, seenIds);
+					} else {
+						seenIds.set(String(node.properties.id), (seenIds.get(String(node.properties.id)) || 0) + 1);
+					}
+					toc.push({
+						level: Number.parseInt(headingMatch[1], 10),
+						text,
+						id: String(node.properties.id)
+					});
+				}
+			}
+			if (node.children) {
+				for (const child of node.children) walk(child);
 			}
 		}
-		if (node.children) {
-			for (const child of node.children) walk(child);
-		}
-	}
-	return (tree: any) => walk(tree);
+		walk(tree);
+	};
 }
 
 function collectCodeLanguages(html: string): string[] {
@@ -608,42 +620,74 @@ async function highlightCodeBlocks(html: string): Promise<string> {
 	);
 }
 
+// P3-7: the plugin list is static, so each processor is composed once and
+// reused — unified freezes it on the first `process()` call. Per-document
+// state (toc sink, heading-id counters) travels on the VFile via
+// `process({ value, data })`, keeping the shared processors stateless and
+// safe for concurrent renders.
+let baseProcessor: any = null;
+let mathProcessorPromise: Promise<any> | null = null;
+
+function baseMarkdownProcessor() {
+	if (!baseProcessor) {
+		baseProcessor = unified()
+			.use(remarkParse)
+			.use(remarkGfm)
+			.use(remarkRehype, { allowDangerousHtml: true })
+			.use(rehypeRaw)
+			.use(rehypeSanitize, sanitizeSchema)
+			.use(rehypeNormalizePodcastBilingual)
+			.use(rehypeDocumentMetadata)
+			.use(rehypeStringify);
+	}
+	return baseProcessor;
+}
+
+// Math support stays lazy behind a second processor: documents without $…$
+// never pay the remark-math/rehype-katex import cost.
+function mathMarkdownProcessor(): Promise<any> {
+	if (!mathProcessorPromise) {
+		mathProcessorPromise = Promise.all([
+			import('remark-math').then((m) => m.default),
+			import('rehype-katex').then((m) => m.default)
+		])
+			.then(([remarkMath, rehypeKatex]: [any, any]) =>
+				unified()
+					.use(remarkParse)
+					.use(remarkGfm)
+					.use(remarkMath)
+					.use(remarkRehype, { allowDangerousHtml: true })
+					.use(rehypeRaw)
+					.use(rehypeSanitize, sanitizeSchema)
+					.use(rehypeNormalizePodcastBilingual)
+					.use(rehypeKatex, { throwOnError: false })
+					.use(rehypeDocumentMetadata)
+					.use(rehypeStringify)
+			)
+			.catch(() => {
+				// A failed lazy import must not poison the cache — retry next render.
+				mathProcessorPromise = null;
+				return null;
+			});
+	}
+	return mathProcessorPromise;
+}
+
 export async function renderMarkdownDocument(source: string): Promise<RenderedMarkdownDocument> {
 	const toc: TocItem[] = [];
-	const renderSource = stripYamlFrontMatterForRender(source);
+	const frontMatterBlock = splitFrontMatter(source);
+	const renderSource = frontMatterBlock ? blankFrontMatterBlock(frontMatterBlock) : source;
 
-	// Math support is loaded lazily — documents without $…$ pay nothing.
-	const hasMath = /\$[^\s$]/.test(renderSource);
-	let remarkMath: any = null;
-	let rehypeKatex: any = null;
-	if (hasMath) {
-		try {
-			[remarkMath, rehypeKatex] = await Promise.all([
-				import('remark-math').then((m) => m.default),
-				import('rehype-katex').then((m) => m.default)
-			]);
-		} catch {
-			remarkMath = null;
-			rehypeKatex = null;
-		}
-	}
+	const pipeline = /\$[^\s$]/.test(renderSource)
+		? ((await mathMarkdownProcessor()) ?? baseMarkdownProcessor())
+		: baseMarkdownProcessor();
 
-	let pipeline: any = unified().use(remarkParse).use(remarkGfm);
-	if (remarkMath) pipeline = pipeline.use(remarkMath);
-	pipeline = pipeline
-		.use(remarkRehype, { allowDangerousHtml: true })
-		.use(rehypeRaw)
-		.use(rehypeSanitize, sanitizeSchema)
-		.use(rehypeNormalizePodcastBilingual);
-	if (rehypeKatex) pipeline = pipeline.use(rehypeKatex, { throwOnError: false });
-	pipeline = pipeline.use(rehypeDocumentMetadata, toc).use(rehypeStringify);
-
-	const result = await pipeline.process(renderSource);
+	const result = await pipeline.process({ value: renderSource, data: { toc } });
 
 	return {
 		html: await highlightCodeBlocks(String(result)),
 		toc,
-		frontMatter: extractYamlFrontMatterEntries(source)
+		frontMatter: frontMatterBlock ? parseFrontMatterEntries(frontMatterBlock) : []
 	};
 }
 

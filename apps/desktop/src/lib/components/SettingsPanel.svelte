@@ -16,6 +16,7 @@
 	} from "$lib/stores/app";
 	import { getThemePairs } from "$lib/theme/themes";
 	import { checkForDesktopUpdate, downloadAndInstallDesktopUpdate, updateState } from "$lib/update/service";
+	import WorkflowDialogShell from "./WorkflowDialogShell.svelte";
 
 	const themePairs = getThemePairs();
 
@@ -68,6 +69,9 @@
 	let actionBusy = false;
 	let panelNotice = "";
 	let apiKey = "";
+	// P3-12: themed confirm dialog shared by the destructive actions below —
+	// replaces unthemed window.confirm().
+	let confirmRequest: { message: string; proceed: () => void } | null = null;
 	let updateInstallArmed = false;
 	let stopSubscription: (() => void) | undefined;
 	let storageRows: Array<[string, string, string, number]> = [];
@@ -169,8 +173,15 @@
 		}
 	}
 
-	async function clearCache() {
-		if (actionBusy || !window.confirm("仅清理不受保护的可重建缓存，不会删除 Library、Data 或 Backups。继续？")) return;
+	async function clearCache(confirmed = false) {
+		if (actionBusy) return;
+		if (!confirmed) {
+			confirmRequest = {
+				message: "仅清理不受保护的可重建缓存，不会删除 Library、Data 或 Backups。继续？",
+				proceed: () => void clearCache(true)
+			};
+			return;
+		}
 		actionBusy = true;
 		try {
 			const result = await invoke<CacheClearResult>("clear_safe_cache", {
@@ -185,8 +196,15 @@
 		}
 	}
 
-	async function createStateBackup() {
-		if (actionBusy || !window.confirm("创建当前 channel 的状态备份？Library、Cache、Logs、凭据和浏览器 Profile 会被排除。")) return;
+	async function createStateBackup(confirmed = false) {
+		if (actionBusy) return;
+		if (!confirmed) {
+			confirmRequest = {
+				message: "创建当前 channel 的状态备份？Library、Cache、Logs、凭据和浏览器 Profile 会被排除。",
+				proceed: () => void createStateBackup(true)
+			};
+			return;
+		}
 		actionBusy = true;
 		try {
 			backupResult = await invoke<StateBackupResult>("create_state_backup");
@@ -215,8 +233,15 @@
 		}
 	}
 
-	async function deleteApiKey() {
-		if (actionBusy || !window.confirm("删除当前 channel 的 DeepSeek Key？")) return;
+	async function deleteApiKey(confirmed = false) {
+		if (actionBusy) return;
+		if (!confirmed) {
+			confirmRequest = {
+				message: "删除当前 channel 的 DeepSeek Key？",
+				proceed: () => void deleteApiKey(true)
+			};
+			return;
+		}
 		actionBusy = true;
 		try {
 			secretStatus = await invoke<SecretStatus>("delete_deepseek_api_key");
@@ -241,8 +266,15 @@
 		}
 	}
 
-	async function recoverPublish() {
-		if (actionBusy || !publishRecovery.length || !window.confirm("恢复所有未完成的发布事务？")) return;
+	async function recoverPublish(confirmed = false) {
+		if (actionBusy || !publishRecovery.length) return;
+		if (!confirmed) {
+			confirmRequest = {
+				message: "恢复所有未完成的发布事务？",
+				proceed: () => void recoverPublish(true)
+			};
+			return;
+		}
 		actionBusy = true;
 		try {
 			publishRecovery = await invoke<PublishTransaction[]>("recover_publish_transactions", { transactionIds: null });
@@ -260,7 +292,14 @@
 		$fontScale = clampFontScale($fontScale + direction * FONT_SCALE_STEP);
 	}
 
+	function runConfirmed() {
+		const request = confirmRequest;
+		confirmRequest = null;
+		request?.proceed();
+	}
+
 	function closePanel() {
+		confirmRequest = null;
 		settingsOpen.set(false);
 	}
 
@@ -567,6 +606,21 @@
 				</div>
 			{/if}
 		</div>
+		{#if confirmRequest}
+			<WorkflowDialogShell
+				titleId="settings-confirm-title"
+				descriptionId="settings-confirm-desc"
+				title="确认操作"
+				description={confirmRequest.message}
+				maxWidth="420px"
+				onClose={() => (confirmRequest = null)}
+			>
+				<div slot="footer" class="confirm-actions">
+					<button type="button" class="wf-quiet" on:click={() => (confirmRequest = null)}>取消</button>
+					<button type="button" class="wf-primary" on:click={runConfirmed}>确认</button>
+				</div>
+			</WorkflowDialogShell>
+		{/if}
 	</dialog>
 {/if}
 
@@ -713,7 +767,14 @@
 		opacity: 0.55;
 	}
 	.mini-btn.danger {
-		color: var(--danger, #a33);
+		/* P3-12: --danger never existed; converge on the app's single danger
+		   red (#d4a099 — same as .card-menu button.danger / TrashPanel). */
+		color: #d4a099;
+	}
+	.confirm-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
 	}
 	.action-grid {
 		display: grid;

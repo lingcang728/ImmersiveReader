@@ -630,7 +630,8 @@
 	}
 
 	.warning-copy {
-		color: #c9922e;
+		/* P3-12: was hardcoded gold #c9922e — palette rule: warnings reuse --link. */
+		color: var(--wf-accent, var(--link));
 	}
 
 	.approval-row {

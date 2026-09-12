@@ -77,13 +77,22 @@
 
 	onMount(() => {
 		void refreshMaximized();
+		// P3-11: onResized's unlisten resolves asynchronously — if the
+		// component is destroyed first, cleanup runs before `unlistenResize`
+		// is ever assigned and the listener leaks. The disposed flag makes
+		// teardown deterministic either way.
+		let disposed = false;
 		try {
 			void getCurrentWebviewWindow()
 				.onResized(() => {
 					scheduleRefreshMaximized();
 				})
 				.then((fn) => {
-					unlistenResize = fn;
+					if (disposed) {
+						fn();
+					} else {
+						unlistenResize = fn;
+					}
 				})
 				.catch(() => {
 					/* web preview */
@@ -92,8 +101,10 @@
 			/* Web preview without Tauri internals. */
 		}
 		return () => {
+			disposed = true;
 			if (resizeRaf) cancelAnimationFrame(resizeRaf);
 			unlistenResize?.();
+			unlistenResize = undefined;
 		};
 	});
 </script>

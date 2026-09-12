@@ -341,7 +341,9 @@
 
 	.workflow-panel :global(.wf-msg-error) {
 		margin: 0;
-		color: #e07070;
+		/* P3-12: converge on the app's single danger red (#d4a099 — same as
+		   .card-menu button.danger and TrashPanel's delete). */
+		color: #d4a099;
 		font-size: 12px;
 		line-height: 1.5;
 	}
@@ -354,7 +356,8 @@
 	}
 
 	.workflow-panel :global(.wf-status-warn) {
-		color: #c9922e;
+		/* P3-12: was hardcoded gold #c9922e — palette rule: warnings reuse --link. */
+		color: var(--link);
 	}
 
 	.workflow-panel :global(.wf-status-ok) {

@@ -2,6 +2,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import type { TaskSnapshot } from '$lib/tasks/sync';
 	import { displayTaskPercent, taskDisplayTitle } from '$lib/tasks/queueList';
+	import WorkflowDialogShell from './WorkflowDialogShell.svelte';
 
 	export let task: TaskSnapshot;
 	export let onStartTask: (taskId: string) => void;
@@ -221,6 +222,10 @@
 		if (actionTimer) clearTimeout(actionTimer);
 	});
 
+	// P3-12: themed confirm instead of window.confirm — the cancel only
+	// dispatches after the user confirms inside the dialog.
+	let pendingCancelAction: Action = null;
+
 	function runAction(action: Action) {
 		if (!action) return;
 		// 'open' is read-only navigation — no duplicate-submission risk, and a
@@ -230,7 +235,21 @@
 			return;
 		}
 		if (actionBusy) return;
-		if (action.kind === 'cancel' && !window.confirm('确定取消该任务？')) return;
+		if (action.kind === 'cancel') {
+			pendingCancelAction = action;
+			return;
+		}
+		dispatchAction(action);
+	}
+
+	function confirmCancelAction() {
+		const action = pendingCancelAction;
+		pendingCancelAction = null;
+		dispatchAction(action);
+	}
+
+	function dispatchAction(action: Action) {
+		if (!action) return;
 		actionBusy = true;
 		actionStamp = `${task.revision}:${task.lifecycleState}`;
 		actionTimer = setTimeout(() => {
@@ -341,4 +360,30 @@
 	{#if task.lifecycleState === 'terminal' && (task.outcome === 'failed' || task.outcome === 'interrupted') && friendlyError}
 		<p class="task-hint">{friendlyError}</p>
 	{/if}
+
+	{#if pendingCancelAction}
+		<WorkflowDialogShell
+			titleId={`task-cancel-title-${task.id}`}
+			descriptionId={`task-cancel-desc-${task.id}`}
+			title="取消任务"
+			description="确定取消该任务？"
+			maxWidth="420px"
+			onClose={() => (pendingCancelAction = null)}
+		>
+			<div slot="footer" class="task-confirm-actions">
+				<button type="button" class="wf-quiet" on:click={() => (pendingCancelAction = null)}
+					>暂不取消</button
+				>
+				<button type="button" class="wf-primary" on:click={confirmCancelAction}>取消任务</button>
+			</div>
+		</WorkflowDialogShell>
+	{/if}
 </article>
+
+<style>
+	.task-confirm-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+	}
+</style>
