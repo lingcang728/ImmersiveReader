@@ -27,6 +27,19 @@ export function resolveDatabasePath(input: RuntimePathInput): string {
   return resolveConfigured(input.cwd, input.environment.IMMERSIVE_ZHIHU_DB, "zhihu-packer.db");
 }
 
+/**
+ * 工具本地运行态目录名：由进程按需写入、内容随机器而异，
+ * 绝不进入 runtime 拷贝/发布 bundle，也不应提交进版本库。
+ * scripts/prepare-runtime.ps1 的 Copy-Tree -ExcludeDirectories 与
+ * 各级 .gitignore 必须与这份名单保持一致（P2-30⑨：.browser-cache 曾被漏排除，
+ * Chromium 磁盘缓存可被打进发布 bundle）。
+ */
+export const TOOL_LOCAL_STATE_DIRS: readonly string[] = [
+  ".browser-profile",
+  ".obscura-profile",
+  ".browser-cache",
+];
+
 export function resolveProfileDir(input: RuntimePathInput): string {
   return resolveConfigured(input.cwd, input.environment.IMMERSIVE_ZHIHU_PROFILE, ".browser-profile");
 }

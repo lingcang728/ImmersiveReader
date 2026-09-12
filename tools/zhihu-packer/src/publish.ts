@@ -69,6 +69,59 @@ export function taskIncomingRoot(outputRoot: string, taskId: string): string {
   return path.join(path.resolve(outputRoot), ".incoming", taskId);
 }
 
+/**
+ * P2-27①：发布临时产物的保留策略 —— 曾经三者都永不清，重归档一次整树翻一倍。
+ * - `.incoming/<taskId>` 壳：提交即被 rename 消耗，残留的只是空壳/杂散文件 → 删除；
+ *   （失败路径保留，供重试与排查。）
+ * - `.transactions/zhihu-<taskId>.json`：当前任务的 committed journal 必须保留
+ *   —— committedResult 幂等重发、重跑时「并入上次已发布树」都靠它；其他任务
+ *   rolled_back 的 journal 回滚已执行完，只剩死记录 → 顺手清掉。
+ * - `.revisions/<authorId>/<N>`：每次发布把旧版整树挪进新的 N 目录。只保留最新
+ *   一份（当前已发布树唯一需要的回滚副本），更早的删除。
+ */
+const RETAINED_ROLLBACK_REVISIONS = 1;
+
+function removeIncomingShell(root: string, taskId: string): void {
+  try {
+    fs.rmSync(taskIncomingRoot(root, taskId), { recursive: true, force: true });
+  } catch (err) {
+    logger.warn(`清理 .incoming 暂存壳失败（不影响已提交归档）: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+export function cleanupPublishArtifacts(root: string, taskId: string, authorId: string): void {
+  removeIncomingShell(root, taskId);
+  try {
+    const transactionsDir = path.join(root, ".transactions");
+    if (fs.existsSync(transactionsDir)) {
+      for (const entry of fs.readdirSync(transactionsDir, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+        const journalPath = path.join(transactionsDir, entry.name);
+        try {
+          const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as Partial<ZhihuPublishTransaction>;
+          if (journal?.schemaVersion === 1 && journal.phase === "rolled_back" && journal.taskId !== taskId) {
+            fs.rmSync(journalPath, { force: true });
+          }
+        } catch {
+          // 不可读的 journal 留给人工排查，不替它做删除决定。
+        }
+      }
+    }
+    const revisionsRoot = revisionDirectory(root, authorId);
+    if (fs.existsSync(revisionsRoot)) {
+      const numericDirs = fs.readdirSync(revisionsRoot, { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && /^\d+$/.test(entry.name))
+        .map(entry => Number(entry.name))
+        .sort((a, b) => b - a);
+      for (const stale of numericDirs.slice(RETAINED_ROLLBACK_REVISIONS)) {
+        fs.rmSync(path.join(revisionsRoot, String(stale)), { recursive: true, force: true });
+      }
+    }
+  } catch (err) {
+    logger.warn(`发布后清理 revisions/journal 失败（不影响已提交归档）: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
 export type ZhihuPublishMetadata = {
   readonly authorName: string;
   readonly items: readonly (TaskItem & {
@@ -407,6 +460,8 @@ export function publishTaskStage(
   const existingResult = committedResult(root, taskId, authorId, metadata);
   let authorDirectories = listAuthorDirectories(incomingRoot);
   if (authorDirectories.length === 0 && existingResult) {
+    // 幂等重发命中：暂存壳同样已无用，顺手清掉（P2-27①）。
+    removeIncomingShell(root, taskId);
     return existingResult;
   }
   if (authorDirectories.length > 1) {
@@ -471,6 +526,9 @@ export function publishTaskStage(
     setPhase(root, transaction, "new_moved");
     validateMetadata(root, transaction, transaction.finalRelativePath);
     setPhase(root, transaction, "committed");
+    // P2-27①：归档已 durable，再清理本次发布的暂存壳、过期回滚副本与死 journal。
+    // 清理函数内部逐段兜底，任何失败只记日志、绝不影响已提交的归档。
+    cleanupPublishArtifacts(root, taskId, authorId);
     return { transaction, finalRoot, authorDirectory };
   } catch (error) {
     try {

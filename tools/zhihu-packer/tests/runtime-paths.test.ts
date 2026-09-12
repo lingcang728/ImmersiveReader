@@ -7,6 +7,7 @@ import {
   resolveBrowserExecutable,
   resolveDatabasePath,
   resolveProfileDir,
+  TOOL_LOCAL_STATE_DIRS,
 } from "../src/runtime-paths.ts";
 
 test("prefers explicit archive output then environment configuration", () => {
@@ -49,6 +50,14 @@ test("keeps the managed profile and browser cache on their explicit roots", () =
     resolveBrowserCacheDir({ cwd: "C:/tool", environment: { IMMERSIVE_ZHIHU_BROWSER_CACHE: "D:/cache/Zhihu/BrowserCache" } }),
     "D:\\cache\\Zhihu\\BrowserCache",
   );
+});
+
+test("P2-30⑨: tool-local state dirs (incl .browser-cache) are excluded from packaging/VCS", () => {
+  // runtime 拷贝（prepare-runtime.ps1 的 -ExcludeDirectories）与 .gitignore 必须
+  // 覆盖这份名单；.browser-cache 曾被漏排除 → Chromium 缓存可被打进发布 bundle。
+  for (const dir of [".browser-profile", ".obscura-profile", ".browser-cache"]) {
+    assert.ok(TOOL_LOCAL_STATE_DIRS.includes(dir), `${dir} must be in the exclusion list`);
+  }
 });
 
 test("uses the managed Chromium executable when configured", () => {

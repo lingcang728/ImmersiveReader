@@ -1,5 +1,5 @@
 import express from 'express';
-import { getTasks, resetRunningTasks, getTask } from './db.js';
+import { ensureDbHealthy, getTasks, resetRunningTasks, getTask } from './db.js';
 import { cancelTask, createTask, pauseTask, queueTask } from './scheduler.js';
 import { logger } from './utils.js';
 import { getLoginStatus } from './browser.js';
@@ -65,7 +65,18 @@ function requireLocalToken(req: express.Request, res: express.Response, next: ex
 app.use('/api', requireLocalToken);
 
 app.get('/health', (_req, res) => {
-  res.json({ engine: 'zhihu', status: 'ok' });
+  // P2-27⑤：进程活着不等于能服务 —— DB 损坏时所有 /api 都会 500。
+  // ensureDbHealthy 做一次廉价 schema 探测（COUNT FROM tasks）；失败时先 close+重开
+  // 让正常迁移补齐缺失 schema，判定文件损坏则按宿主 control.db 自愈模式
+  // 隔离为 .corrupt-<ts> 并重建空库（P1-16 同类）。仍失败 → 503。
+  try {
+    if (!ensureDbHealthy()) {
+      return res.status(503).json({ engine: 'zhihu', status: 'error', error: '数据库不可用' });
+    }
+    res.json({ engine: 'zhihu', status: 'ok' });
+  } catch (e: any) {
+    res.status(503).json({ engine: 'zhihu', status: 'error', error: e?.message || 'health check failed' });
+  }
 });
 
 app.get('/api/status', requireLocalToken, (_req, res) => {
@@ -170,7 +181,8 @@ app.post('/api/tasks/:id/start', requireLocalToken, async (req, res) => {
 app.post('/api/tasks/:id/pause', requireLocalToken, async (req, res) => {
   const taskId = String(req.params.id);
   try {
-    // 走调度器 pauseTask：统一语义，不存在的任务不再被 saveTask 误插成行（P1-9）。
+    // P2-27③：不存在的任务 404、终态任务 409；pauseTask 内部走原子 UPDATE，
+    // db 层永远不会为幽灵任务插入 stub 行（旧实现曾用 saveTask 插行，P1-9/P2-27③）。
     if (!getTask(taskId)) {
       return res.status(404).json({ success: false, error: '任务不存在' });
     }

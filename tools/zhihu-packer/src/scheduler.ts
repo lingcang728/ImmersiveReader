@@ -14,10 +14,11 @@ import {
   saveIndexCheckpoint,
   readIndexCheckpoint,
   tryStartTask,
+  transitionTaskStatus,
   recordPublishedTaskItems,
   Task
 } from './db.js';
-import { logger, randomSleep, sleep, sanitizeFilename } from './utils.js';
+import { logger, sleep, sanitizeFilename } from './utils.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import { resolveArchiveOutputDir } from './runtime-paths.js';
@@ -111,8 +112,8 @@ export function cancelTask(taskId: string): boolean {
   }
   // cancelled 是真正的终态：运行循环会在下一个检查点停下，排队任务出队时被
   // tryStartTask（pending→running）拒绝，永不再被调度执行（P1-9）。
-  saveTask({ id: taskId, status: 'cancelled' });
-  return true;
+  // 用原子 UPDATE 而不是 saveTask：绝不插入幻影行（P2-27③）。
+  return transitionTaskStatus(taskId, 'cancelled', ['pending', 'running', 'paused']);
 }
 
 export function pauseTask(taskId: string): boolean {
@@ -123,15 +124,38 @@ export function pauseTask(taskId: string): boolean {
   if (task.status === 'paused') {
     return true; // 幂等
   }
-  if (task.status === 'running' || task.status === 'pending') {
-    saveTask({ id: taskId, status: 'paused' });
-    return true;
-  }
-  return false;
+  // P2-27③：原子 running/pending → paused。不存在/终态任务走不到这里；
+  // 即便竞态下状态刚变化，UPDATE 的状态门槛也只是不命中，绝不会插幻影行。
+  return transitionTaskStatus(taskId, 'paused', ['running', 'pending']);
 }
 
 function emitProgress(taskId: string, status: string, message: string) {
   logger.info(`[Task ${taskId}] Status: ${status} | ${message}`);
+}
+
+/**
+ * P2-27②：可中断等待 —— 把长 sleep 切成 <=500ms 的轮询片，
+ * 暂停/取消信号在半秒内生效；冷却/退避不再把控制面冻结 30-120s。
+ * 返回停止状态；未被打断返回 null。
+ */
+async function sleepUnlessStopped(taskId: string, ms: number): Promise<'paused' | 'cancelled' | null> {
+  const deadline = Date.now() + Math.max(0, ms);
+  for (;;) {
+    const stopped = checkTaskStopped(taskId);
+    if (stopped) return stopped;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return null;
+    await sleep(Math.min(500, remaining));
+  }
+}
+
+async function randomSleepUnlessStopped(taskId: string, min: number, max: number): Promise<'paused' | 'cancelled' | null> {
+  const ms = Math.floor(Math.random() * (max - min + 1) + min);
+  return sleepUnlessStopped(taskId, ms);
+}
+
+function reportStopped(taskId: string, stopped: 'paused' | 'cancelled', context: string) {
+  emitProgress(taskId, stopped, stopped === 'paused' ? `任务已被用户手动暂停（${context}）。` : `任务已被用户取消（${context}）。`);
 }
 
 /**
@@ -352,7 +376,9 @@ async function runTaskInternal(taskId: string) {
             // Keep articles if already scraped in this run — answers phase first so only answers here.
             scrapedIndexes.push(...progress.items);
             persistIndexProgress('answers', scrapedIndexes, progress.statusMessage, progress.paging);
-          }
+          },
+          // P2-27②：把任务停止信号传入索引滚动，暂停/取消在半秒内生效。
+          () => checkTaskStopped(taskId)
         );
         // Replace answers slice with final set
         const withoutAnswers = scrapedIndexes.filter((i) => i.type !== 'answer');
@@ -378,12 +404,21 @@ async function runTaskInternal(taskId: string) {
             const answersOnly = scrapedIndexes.filter((i) => i.type === 'answer');
             const merged = [...answersOnly, ...progress.items];
             persistIndexProgress('articles', merged, progress.statusMessage, progress.paging);
-          }
+          },
+          () => checkTaskStopped(taskId)
         );
         const answersOnly = scrapedIndexes.filter((i) => i.type === 'answer');
         scrapedIndexes.length = 0;
         scrapedIndexes.push(...answersOnly, ...articles);
         persistIndexProgress('articles', scrapedIndexes, `文章索引完成：${articles.length} 条`);
+      }
+
+      // P2-27②：文章索引也可能被暂停/取消中断 —— 必须在写入「索引完成」前检查，
+      // 否则部分索引会被 replaceTaskIndex 标成 complete。
+      const stoppedAfterArticles = checkTaskStopped(taskId);
+      if (stoppedAfterArticles) {
+        emitProgress(taskId, stoppedAfterArticles, stoppedAfterArticles === 'paused' ? '任务已被用户手动暂停。' : '任务已被用户取消。');
+        return;
       }
 
       if (scrapedIndexes.length === 0) {
@@ -474,13 +509,22 @@ async function runTaskInternal(taskId: string) {
         if (retryCount > 0) {
           const delay = Math.pow(2, retryCount) * 1000;
           logger.info(`抓取重试 [${retryCount}/${maxRetries}], 等待延时: ${delay}ms`);
-          await sleep(delay);
+          // P2-27②：退避等待也可被暂停/取消打断，不再等满整个 backoff。
+          const stoppedDuringBackoff = await sleepUnlessStopped(taskId, delay);
+          if (stoppedDuringBackoff) {
+            reportStopped(taskId, stoppedDuringBackoff, '重试退避');
+            return;
+          }
         }
 
         try {
-          // 每次抓取之间加入随机防爬延迟
+          // 每次抓取之间加入随机防爬延迟（同样可被打断，P2-27②）
           if (retryCount === 0) {
-            await randomSleep(2000, 5000);
+            const stoppedDuringDelay = await randomSleepUnlessStopped(taskId, 2000, 5000);
+            if (stoppedDuringDelay) {
+              reportStopped(taskId, stoppedDuringDelay, '抓取间隔');
+              return;
+            }
           }
 
           let extracted;
@@ -619,10 +663,19 @@ async function runTaskInternal(taskId: string) {
       const consecutiveFailures = countTrailingFailures(recentResults);
       if (consecutiveFailures >= 3) {
         emitProgress(taskId, 'running', `🛡️ 已连续失败 ${consecutiveFailures} 篇，进入风控冷却（60-120 秒）...`);
-        await randomSleep(60000, 120000);
+        // P2-27②：30-120s 冷却按半秒轮询片等待，暂停/取消立即生效。
+        const stoppedDuringCooldown = await randomSleepUnlessStopped(taskId, 60000, 120000);
+        if (stoppedDuringCooldown) {
+          reportStopped(taskId, stoppedDuringCooldown, '风控冷却');
+          return;
+        }
       } else if (consumedCount % 50 === 0 && i < pendingItems.length - 1) {
         emitProgress(taskId, 'running', `🛡️ 已连续抓取 ${consumedCount} 篇，休息 30-60 秒模拟人类阅读节奏...`);
-        await randomSleep(30000, 60000);
+        const stoppedDuringRest = await randomSleepUnlessStopped(taskId, 30000, 60000);
+        if (stoppedDuringRest) {
+          reportStopped(taskId, stoppedDuringRest, '节流休息');
+          return;
+        }
       }
     }
 

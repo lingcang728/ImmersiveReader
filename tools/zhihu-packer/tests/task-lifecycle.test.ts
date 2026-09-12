@@ -95,6 +95,8 @@ test('pause only applies to non-terminal tasks', () => {
   const root = freshDb();
   try {
     assert.equal(pauseTask('ghost'), false);
+    // P2-27③：暂停不存在的任务绝不能经 saveTask 的插入分支造出幻影行。
+    assert.equal(getTask('ghost'), null, 'pausing a missing task must not insert a stub row');
 
     seedTask('p-running', 'running');
     seedTask('p-pending', 'pending');

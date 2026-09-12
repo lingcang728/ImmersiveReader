@@ -30,12 +30,30 @@ export function randomSleep(min = 2000, max = 5000): Promise<void> {
 class Logger {
   private logFile: string;
 
+  /**
+   * P2-27④：日志写在 app 目录且永不轮转，长跑会让 zhihu-packer.log 无限膨胀。
+   * 保持在原位置（最小破坏），超过 10MB 时改名为 .1（仅保留一代）再写新文件。
+   */
+  private static readonly MAX_LOG_BYTES = 10 * 1024 * 1024;
+
   constructor() {
     this.logFile = path.resolve(process.cwd(), 'zhihu-packer.log');
   }
 
   setLogFile(filePath: string) {
     this.logFile = filePath;
+  }
+
+  private rotateIfOversized() {
+    try {
+      const stat = fs.statSync(this.logFile);
+      if (stat.size <= Logger.MAX_LOG_BYTES) return;
+      const rotated = `${this.logFile}.1`;
+      try { fs.rmSync(rotated, { force: true }); } catch {}
+      fs.renameSync(this.logFile, rotated);
+    } catch {
+      // 日志轮转失败绝不能影响主流程
+    }
   }
 
   log(message: string, level: 'info' | 'warn' | 'error' = 'info') {
@@ -51,6 +69,7 @@ class Logger {
     }
 
     try {
+      this.rotateIfOversized();
       fs.appendFileSync(this.logFile, formatted + '\n', 'utf-8');
     } catch (e) {
       // ignore

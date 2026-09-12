@@ -7,6 +7,8 @@ import { resolveDatabasePath } from './runtime-paths.js';
 const SCHEMA_VERSION = 4;
 let db: DatabaseSync | null = null;
 let transactionDepth = 0;
+/** 最近一次 initDb 解析出的库路径：供懒加载重开与损坏自愈沿用同一路径。 */
+let currentDbPath: string | null = null;
 
 function cleanParams(params: any[]): any[] {
   return params.map(p => p === undefined ? null : p);
@@ -26,11 +28,31 @@ function normalizeStoredPath(outputPath: string | null | undefined, outputDir = 
   return path.relative(process.cwd(), outputPath).replace(/\\/g, '/');
 }
 
-function backupDatabaseIfNeeded(dbPath: string, reason: string) {
+function backupDatabaseIfNeeded(database: DatabaseSync, dbPath: string, reason: string) {
   if (!fs.existsSync(dbPath)) return;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backupPath = `${dbPath}.backup-${stamp}`;
+  // P2-27⑤：WAL 模式下只拷主文件会得到静默陈旧/撕裂的备份（宿主 P1-17 同类）。
+  // 先 TRUNCATE checkpoint 把 -wal 折叠回主文件再拷贝；若 checkpoint 失败
+  // （例如文件被占用），则把 -wal/-shm 一并拷走，保证备份成对可恢复。
+  let checkpointed = false;
+  try {
+    database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    checkpointed = true;
+  } catch (err) {
+    logger.warn(`备份前 WAL checkpoint 失败，将连同 -wal/-shm 一起拷贝: ${err instanceof Error ? err.message : err}`);
+  }
   fs.copyFileSync(dbPath, backupPath);
+  if (!checkpointed) {
+    for (const suffix of ['-wal', '-shm']) {
+      const side = `${dbPath}${suffix}`;
+      try {
+        if (fs.existsSync(side)) fs.copyFileSync(side, `${backupPath}${suffix}`);
+      } catch (err) {
+        logger.warn(`拷贝 WAL 侧文件失败 ${side}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
   logger.info(`已在迁移前备份 SQLite 数据库 (${reason}): ${backupPath}`);
 }
 
@@ -178,7 +200,7 @@ function migrateToV1(database: DatabaseSync, absolutePath: string) {
   }
 
   if (hasLegacyTables) {
-    backupDatabaseIfNeeded(absolutePath, `schema-v${version}-to-v${SCHEMA_VERSION}`);
+    backupDatabaseIfNeeded(database, absolutePath, `schema-v${version}-to-v${SCHEMA_VERSION}`);
   }
 
   database.exec('BEGIN IMMEDIATE');
@@ -374,22 +396,106 @@ export interface IndexItemInput {
   questionUrl?: string;
 }
 
+function isProbablyCorruption(err: unknown): boolean {
+  const message = String(err instanceof Error ? err.message : err).toLowerCase();
+  return message.includes('not a database')
+    || message.includes('malformed')
+    || message.includes('corrupt')
+    || message.includes('notadb');
+}
+
+/**
+ * P2-27⑤：参照宿主 control.db 自愈模式（P1-16）——损坏的主库连同 WAL 侧文件
+ * 一起隔离为 .corrupt-<ts>，让随后的 openAndMigrate 能在干净路径上重建空 schema。
+ *
+ * 顺序要点：句柄还活着时 SQLite 把 -wal/-shm 锁住（rename 会 EBUSY），但 copyFileSync
+ * 仍能读 —— 先复制留证；随后 close 坏句柄（SQLite 会自动删掉侧文件并释放主库锁），
+ * 最后把还活着的文件 rename 走。构造函数就抛错（无句柄）的场景同样走这条路。
+ */
+function quarantineCorruptDatabase(absolutePath: string, handle?: DatabaseSync | null): void {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const quarantined = `${absolutePath}.corrupt-${stamp}`;
+  // 1) close 前复制 WAL 侧文件留证（close 时 SQLite 会删除它们，之后就没机会拷了）。
+  for (const suffix of ['-wal', '-shm', '-journal']) {
+    const from = `${absolutePath}${suffix}`;
+    if (!fs.existsSync(from)) continue;
+    try {
+      fs.copyFileSync(from, `${quarantined}${suffix}`);
+    } catch (err) {
+      logger.warn(`复制损坏数据库侧文件失败 ${from}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  // 2) 关闭坏句柄释放主库文件锁。
+  if (handle) {
+    try { handle.close(); } catch {}
+  }
+  // 3) 把仍在原位的文件移走：主库一定能 rename；侧文件若被 SQLite 删掉则跳过，
+  //    若目标已存在（步骤1已复制）则直接删除源文件，确保不污染随后重建的新库。
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    const from = `${absolutePath}${suffix}`;
+    if (!fs.existsSync(from)) continue;
+    try {
+      fs.renameSync(from, `${quarantined}${suffix}`);
+    } catch {
+      try {
+        fs.rmSync(from, { force: true });
+      } catch (err) {
+        logger.warn(`隔离损坏数据库文件失败 ${from}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
+  logger.error(`检测到 SQLite 数据库损坏，已隔离为 ${quarantined} 并重建空库（历史任务记录不再可见）。`);
+}
+
+function openAndMigrate(absolutePath: string): void {
+  const handle = new DatabaseSync(absolutePath);
+  // 必须先挂到模块级 db 再迁移：migrateToV1 → migrateAbsoluteOutputPaths →
+  // runInTransaction → getDb() 需要拿到这个句柄；若迁移末尾才赋值，getDb 会
+  // 递归 initDb 打开第二个连接并泄漏，导致 Windows 上 closeDb 后文件仍被锁。
+  db = handle;
+  try {
+    handle.exec('PRAGMA busy_timeout = 5000');
+    handle.exec('PRAGMA journal_mode = WAL');
+    handle.exec('PRAGMA foreign_keys = ON');
+    migrateToV1(handle, absolutePath);
+    migrateToV3(handle, absolutePath);
+    migrateToV4(handle, absolutePath);
+    handle.exec('PRAGMA foreign_keys = ON');
+  } catch (err) {
+    // 失败的句柄不能留在模块级 db（调用方拿到坏句柄会连环报错），
+    // 也不能留在半迁移状态占着文件。
+    db = null;
+    if (isProbablyCorruption(err)) {
+      // 句柄还开着：quarantine 先复制 -wal/-shm 留证再关句柄做改名。
+      quarantineCorruptDatabase(absolutePath, handle);
+    } else {
+      try { handle.close(); } catch {}
+    }
+    throw err;
+  }
+}
+
 export function initDb(dbPath?: string) {
   if (db) return;
 
   const absolutePath = dbPath
     ? path.resolve(process.cwd(), dbPath)
     : resolveDatabasePath({ cwd: process.cwd(), environment: process.env });
+  currentDbPath = absolutePath;
   logger.info(`正在初始化 SQLite 数据库: ${absolutePath}`);
 
-  db = new DatabaseSync(absolutePath);
-  db.exec('PRAGMA busy_timeout = 5000');
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA foreign_keys = ON');
-  migrateToV1(db, absolutePath);
-  migrateToV3(db, absolutePath);
-  migrateToV4(db, absolutePath);
-  db.exec('PRAGMA foreign_keys = ON');
+  try {
+    openAndMigrate(absolutePath);
+  } catch (err) {
+    // P2-27⑤：DB 损坏（file is not a database / malformed）不再是永久失败——
+    // 隔离坏文件后重建空 schema，sidecar 保持可用；非损坏类错误原样上抛。
+    if (!isProbablyCorruption(err)) throw err;
+    // openAndMigrate 的 exec/迁移期失败已在内部完成隔离+关句柄（主文件已改名，
+    // existsSync 为 false 时这里是幂等空操作）；new DatabaseSync 构造函数就
+    // 抛错的场景没有句柄可走，需要在这里兜底隔离。
+    if (fs.existsSync(absolutePath)) quarantineCorruptDatabase(absolutePath);
+    openAndMigrate(absolutePath);
+  }
 }
 
 /** Incremental columns for index checkpoints (v2 → v3). Idempotent by column presence. */
@@ -410,7 +516,7 @@ function migrateToV3(database: DatabaseSync, absolutePath: string) {
   }
   const versionRow = database.prepare('PRAGMA user_version').all()[0] as any;
   const version = Number(versionRow?.user_version || 0);
-  backupDatabaseIfNeeded(absolutePath, `schema-v${version}-to-v3-index-checkpoint`);
+  backupDatabaseIfNeeded(database, absolutePath, `schema-v${version}-to-v3-index-checkpoint`);
   if (!names.has('index_checkpoint_json')) {
     database.exec('ALTER TABLE tasks ADD COLUMN index_checkpoint_json TEXT');
   }
@@ -444,7 +550,7 @@ function migrateToV4(database: DatabaseSync, absolutePath: string) {
   }
 
   const versionRow = database.prepare('PRAGMA user_version').all()[0] as any;
-  backupDatabaseIfNeeded(absolutePath, `schema-v${Number(versionRow?.user_version || 0)}-to-v4-cancelled-status`);
+  backupDatabaseIfNeeded(database, absolutePath, `schema-v${Number(versionRow?.user_version || 0)}-to-v4-cancelled-status`);
 
   // legacy_alter_table=ON 防止 RENAME 重写 task_items 的外键指向旧表；
   // foreign_keys 必须在事务外关闭（事务内 PRAGMA 是 no-op）。
@@ -503,9 +609,35 @@ export function closeDb() {
 
 function getDb(): DatabaseSync {
   if (!db) {
-    initDb();
+    // 沿用最近一次的库路径（含测试注入路径）；从未初始化时才回退到环境解析。
+    initDb(currentDbPath ?? undefined);
   }
   return db!;
+}
+
+/**
+ * P2-27⑤：/health 的廉价 DB 探测 —— 真实触碰 schema（COUNT FROM tasks），
+ * 「进程活着但库已损坏/缺表」不再被误报为 ok。
+ */
+export function probeDb(): boolean {
+  try {
+    getDb().prepare('SELECT COUNT(*) AS c FROM tasks').all();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * P2-27⑤：DB 健康自愈入口。探测失败时先 close+重开：正常迁移会补齐缺失的
+ * schema（不丢数据）；若 initDb 判定为文件损坏，内部已按 .corrupt-<ts> 隔离重建。
+ * 返回 true 表示当前可以正常服务；false 交给 /health 报 503。
+ */
+export function ensureDbHealthy(): boolean {
+  if (probeDb()) return true;
+  try { closeDb(); } catch {}
+  try { initDb(currentDbPath ?? undefined); } catch {}
+  return probeDb();
 }
 
 export function runInTransaction<T>(fn: () => T): T {
@@ -592,6 +724,27 @@ export function tryStartTask(id: string): boolean {
     SET status = 'running', updated_at = ?
     WHERE id = ? AND status = 'pending'
   `).run(Date.now(), id) as any;
+  return Number(result?.changes || 0) > 0;
+}
+
+/**
+ * P2-27③：原子状态迁移 —— UPDATE 自带「当前状态 ∈ from」门槛，绝不 INSERT。
+ * pause/cancel 这类控制写走这里而不是 saveTask：saveTask 的「行不存在则插入」
+ * 分支会为不存在的任务造出幻影行（旧 /pause 就踩过这个坑）。
+ */
+export function transitionTaskStatus(
+  id: string,
+  to: Task['status'],
+  from: readonly Task['status'][],
+): boolean {
+  if (from.length === 0) return false;
+  const database = getDb();
+  const placeholders = from.map(() => '?').join(', ');
+  const result = database.prepare(`
+    UPDATE tasks
+    SET status = ?, updated_at = ?
+    WHERE id = ? AND status IN (${placeholders})
+  `).run(to, Date.now(), id, ...from) as any;
   return Number(result?.changes || 0) > 0;
 }
 

@@ -122,7 +122,8 @@ test('publish merges legacy split author directories into the canonical one', ()
     assert.equal(result.authorDirectory, canonicalDirName);
     assert.equal(fs.readFileSync(path.join(result.finalRoot, 'a.md'), 'utf8'), '内容A');
     assert.equal(fs.readFileSync(path.join(result.finalRoot, 'b.md'), 'utf8'), '内容B');
-    assert.deepEqual(topLevelDirs(incoming), [], 'incoming stage is consumed by the commit');
+    assert.deepEqual(fs.existsSync(incoming) ? topLevelDirs(incoming) : [], [], 'incoming stage is consumed by the commit');
+    assert.equal(fs.existsSync(incoming), false, 'P2-27①: incoming shell is removed after a successful commit');
     const manifest = JSON.parse(fs.readFileSync(path.join(result.finalRoot, 'manifest.json'), 'utf8'));
     assert.deepEqual(
       manifest.chapters.map((chapter: any) => chapter.path).sort(),
