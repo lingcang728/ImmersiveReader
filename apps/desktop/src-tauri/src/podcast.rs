@@ -102,6 +102,10 @@ fn task_cache_root(locations: &StorageLocations, task_id: &str) -> PathBuf {
         .join(task_id)
 }
 
+/// P2-24: `Command::output()` has no timeout — a wedged ffprobe would block
+/// the preview worker forever. Spawn + poll `try_wait` + kill instead.
+const FFPROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 fn probe_duration(ffprobe: &Path, source: &Path) -> Result<f64, String> {
     if !ffprobe.is_file() {
         return Err("RUNTIME_UNAVAILABLE".to_string());
@@ -118,15 +122,41 @@ fn probe_duration(ffprobe: &Path, source: &Path) -> Result<f64, String> {
         "default=noprint_wrappers=1:nokey=1",
     ]);
     command.arg(source);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
-    let output = command
-        .output()
+    let mut child = command
+        .spawn()
         .map_err(|_| "RUNTIME_UNAVAILABLE".to_string())?;
-    if !output.status.success() {
+    let deadline = std::time::Instant::now() + FFPROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err("PROBE_TIMEOUT".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => break Err(error.to_string()),
+        }
+    };
+    let status = status?;
+    if !status.success() {
         return Err("INVALID_ARGUMENT".to_string());
     }
-    let duration = String::from_utf8_lossy(&output.stdout)
+    // `-v error` + a single duration field keeps output far below the pipe
+    // buffer, so draining after exit cannot block.
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_end(&mut stdout);
+    }
+    let duration = String::from_utf8_lossy(&stdout)
         .trim()
         .parse::<f64>()
         .map_err(|_| "INVALID_ARGUMENT".to_string())?;
@@ -215,10 +245,14 @@ pub fn preview_podcast_files_at(
     if paths.is_empty() || !options.max_api_cost_cny.is_finite() || options.max_api_cost_cny < 0.0 {
         return Err("INVALID_ARGUMENT".to_string());
     }
-    let ffprobe = locations.runtime_root.join(r"podcast\ffmpeg\ffprobe.exe");
+    let ffprobe =
+        crate::atomic_file::long_path(&locations.runtime_root.join(r"podcast\ffmpeg\ffprobe.exe"));
     let mut files = Vec::new();
     for raw in paths {
-        let path = PathBuf::from(raw);
+        // P2-20: normalize before metadata/hash/ffprobe — a source past
+        // MAX_PATH must still preview; `raw` stays untouched for display and
+        // the later copy re-normalizes it.
+        let path = crate::atomic_file::long_path(&PathBuf::from(raw));
         let extension = path
             .extension()
             .and_then(|value| value.to_str())
@@ -298,6 +332,7 @@ pub fn copy_verified_input_with_progress(
 ) -> Result<VerifiedPodcastInput, String> {
     validate_task_id(task_id)?;
     let expected_sha256 = validate_sha256(expected_sha256)?;
+    let source = &crate::atomic_file::long_path(source);
     let before = fs::metadata(source).map_err(|_| "INPUT_CHANGED".to_string())?;
     if !before.is_file() || before.len() != expected_bytes {
         return Err("INPUT_CHANGED".to_string());
@@ -307,7 +342,9 @@ pub fn copy_verified_input_with_progress(
         .filter(|name| !name.is_empty())
         .ok_or_else(|| "INVALID_ARGUMENT".to_string())?;
     acquire_podcast_cache_lease(locations, task_id, "queued", expected_bytes)?;
-    let task_root = task_cache_root(locations, task_id);
+    // P2-20: normalize managed paths once — past MAX_PATH these fail without
+    // the `\\?\` spelling unless the app is longPathAware.
+    let task_root = crate::atomic_file::long_path(&task_cache_root(locations, task_id));
     let input_root = task_root.join("input");
     fs::create_dir_all(&input_root).map_err(|error| error.to_string())?;
     let partial = task_root.join("input.partial");
@@ -319,7 +356,8 @@ pub fn copy_verified_input_with_progress(
         return Err("CONFLICT".to_string());
     }
     let copied = (|| {
-        let mut reader = fs::File::open(source).map_err(|error| error.to_string())?;
+        let mut reader = fs::File::open(crate::atomic_file::long_path(source))
+            .map_err(|error| error.to_string())?;
         let mut writer = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -390,11 +428,13 @@ pub fn copy_verified_input_with_progress(
 }
 
 fn task_has_markdown_artifacts(locations: &StorageLocations, task_id: &str) -> bool {
-    let cache_root = locations
-        .cache_root
-        .join("Podcast")
-        .join("Tasks")
-        .join(task_id);
+    let cache_root = crate::atomic_file::long_path(
+        &locations
+            .cache_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(task_id),
+    );
     for relative in [
         "output",
         "work/internal/markdown_bilingual",
@@ -513,11 +553,13 @@ pub fn restart_incompatible_task_at(
     {
         return Err("TASK_NOT_RETRYABLE".to_string());
     }
-    let old_task_root = locations
-        .data_root
-        .join("Podcast")
-        .join("Tasks")
-        .join(task_id);
+    let old_task_root = crate::atomic_file::long_path(
+        &locations
+            .data_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(task_id),
+    );
     let old_spec_path = old_task_root.join("task.json");
     if !old_spec_path.is_file() {
         return Err(
@@ -544,11 +586,13 @@ pub fn restart_incompatible_task_at(
         .get("bytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?;
-    let old_cache_root = locations
-        .cache_root
-        .join("Podcast")
-        .join("Tasks")
-        .join(task_id);
+    let old_cache_root = crate::atomic_file::long_path(
+        &locations
+            .cache_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(task_id),
+    );
     let relative = Path::new(relative_path);
     // Accept both "input/foo.m4a" and nested Normal components (Unicode filenames).
     if relative.is_absolute()
@@ -618,11 +662,13 @@ pub fn restart_incompatible_task_at(
             publish_obj["incomingRelativePath"] =
                 Value::String(format!(".incoming/{new_task_id}"));
         }
-        let new_task_root = locations
-            .data_root
-            .join("Podcast")
-            .join("Tasks")
-            .join(&new_task_id);
+        let new_task_root = crate::atomic_file::long_path(
+            &locations
+                .data_root
+                .join("Podcast")
+                .join("Tasks")
+                .join(&new_task_id),
+        );
         fs::create_dir_all(&new_task_root).map_err(|error| error.to_string())?;
         let data = serde_json::to_vec_pretty(&new_spec).map_err(|error| error.to_string())?;
         crate::atomic_file::write(&new_task_root.join("task.json"), &data)?;
@@ -650,11 +696,13 @@ pub fn restart_incompatible_task_at(
     })();
     if result.is_err() {
         let _ = discard_podcast_task_at(locations, &new_task_id);
-        let new_task_root = locations
-            .data_root
-            .join("Podcast")
-            .join("Tasks")
-            .join(&new_task_id);
+        let new_task_root = crate::atomic_file::long_path(
+            &locations
+                .data_root
+                .join("Podcast")
+                .join("Tasks")
+                .join(&new_task_id),
+        );
         let _ = fs::remove_dir_all(new_task_root);
     }
     result

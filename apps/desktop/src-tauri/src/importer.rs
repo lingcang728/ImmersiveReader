@@ -1,23 +1,80 @@
 use crate::contracts::{Chapter, Manifest};
+use crate::library::LibraryIssue;
 use chrono::Utc;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// P2-20: bound the source-tree walk — pathological nesting (or a junction
+/// that slipped past the symlink check) must not recurse forever.
+const MAX_IMPORT_DEPTH: usize = 64;
+
+/// Staging directory for in-flight imports, under `手动/.incoming`. Hidden
+/// (dot-prefixed) so `library::collect_manifests` never shelves a half-built
+/// book, and swept at startup so crash residue disappears instead of
+/// forcing the next import onto a `title (2)` duplicate (P2-19).
+const IMPORT_STAGING_DIR: &str = ".incoming";
+
+/// Import result: the manifest stays at the top level (flattened) so the
+/// existing frontend — which only reads `bookId` — is unaffected, while
+/// per-file problems surface in `issues` instead of failing the import
+/// wholesale (P2-17).
+#[derive(Clone, Debug, Serialize)]
+pub struct ImportOutcome {
+    #[serde(flatten)]
+    pub manifest: Manifest,
+    pub issues: Vec<LibraryIssue>,
+}
+
+fn issue(issues: &mut Vec<LibraryIssue>, path: &Path, message: impl Into<String>) {
+    issues.push(LibraryIssue {
+        path: path.to_string_lossy().into_owned(),
+        message: message.into(),
+    });
+}
+
+/// P2-17: per-entry tolerance — an unreadable directory/entry is recorded in
+/// `issues` and skipped; it no longer fails the entire scan.
 fn collect_markdown(
     root: &Path,
     dir: &Path,
     output: &mut Vec<(String, PathBuf)>,
-) -> Result<(), String> {
-    for entry in fs::read_dir(dir).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+    issues: &mut Vec<LibraryIssue>,
+    depth: usize,
+) {
+    if depth > MAX_IMPORT_DEPTH {
+        issue(issues, dir, "IMPORT_DEPTH_LIMIT");
+        return;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            issue(issues, dir, format!("目录无法读取：{error}"));
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                issue(issues, dir, format!("目录条目无法读取：{error}"));
+                continue;
+            }
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                issue(issues, &entry.path(), format!("条目类型无法读取：{error}"));
+                continue;
+            }
+        };
         if file_type.is_symlink() {
             continue;
         }
         if file_type.is_dir() {
-            collect_markdown(root, &entry.path(), output)?;
+            collect_markdown(root, &entry.path(), output, issues, depth + 1);
             continue;
         }
         let is_markdown = entry
@@ -29,15 +86,15 @@ fn collect_markdown(
         if !is_markdown {
             continue;
         }
-        let relative = entry
-            .path()
-            .strip_prefix(root)
-            .map_err(|error| error.to_string())?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = match entry.path().strip_prefix(root) {
+            Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
+            Err(error) => {
+                issue(issues, &entry.path(), format!("相对路径解析失败：{error}"));
+                continue;
+            }
+        };
         output.push((relative, entry.path()));
     }
-    Ok(())
 }
 
 fn stable_chapter_id(relative: &str) -> String {
@@ -53,12 +110,12 @@ fn unique_target(manual_root: &Path, title: &str) -> PathBuf {
         title
     };
     let direct = manual_root.join(base);
-    if !direct.exists() {
+    if !crate::atomic_file::long_path(&direct).exists() {
         return direct;
     }
     for suffix in 2..10_000 {
         let candidate = manual_root.join(format!("{base} ({suffix})"));
-        if !candidate.exists() {
+        if !crate::atomic_file::long_path(&candidate).exists() {
             return candidate;
         }
     }
@@ -73,12 +130,46 @@ fn title_from_path(relative: &str) -> String {
         .to_string()
 }
 
-pub fn import_markdown_folder(source: &Path, library_root: &Path) -> Result<Manifest, String> {
+/// P2-19: remove leftover `手动/.incoming` staging directories. Runs at
+/// startup — before any import can be in flight — so the only residue it can
+/// delete is from a previous crash.
+pub fn sweep_staging_dirs(library_root: &Path) {
+    let staging_root =
+        crate::atomic_file::long_path(&library_root.join("手动").join(IMPORT_STAGING_DIR));
+    if !staging_root.is_dir() {
+        return;
+    }
+    let entries = match fs::read_dir(&staging_root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!(
+                "import staging sweep could not list {}: {error}",
+                staging_root.display()
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Err(error) = fs::remove_dir_all(crate::atomic_file::long_path(&path)) {
+            eprintln!(
+                "import staging sweep could not remove {}: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
+pub fn import_markdown_folder(source: &Path, library_root: &Path) -> Result<ImportOutcome, String> {
+    // P2-20: normalize the roots once — every path derived below inherits
+    // the `\\?\` spelling when the tree lives near/over MAX_PATH.
+    let source = &crate::atomic_file::long_path(source);
     if !source.is_dir() {
         return Err("Import source must be a folder".to_string());
     }
     let mut files = Vec::new();
-    collect_markdown(source, source, &mut files)?;
+    let mut issues = Vec::new();
+    collect_markdown(source, source, &mut files, &mut issues, 0);
     files.sort_by(|left, right| left.0.cmp(&right.0));
     if files.is_empty() {
         return Err("The selected folder contains no Markdown files".to_string());
@@ -89,19 +180,48 @@ pub fn import_markdown_folder(source: &Path, library_root: &Path) -> Result<Mani
         .and_then(|value| value.to_str())
         .unwrap_or("未命名书目")
         .to_string();
-    let manual_root = library_root.join("手动");
+    let manual_root = crate::atomic_file::long_path(&library_root.join("手动"));
     fs::create_dir_all(&manual_root).map_err(|error| error.to_string())?;
     let target = unique_target(&manual_root, &title);
-    fs::create_dir_all(&target).map_err(|error| error.to_string())?;
 
-    let result = (|| {
+    // P2-19: stage under 手动/.incoming/<uuid>, manifest written last, then
+    // finalize with a same-directory rename. A crash mid-import leaves a
+    // hidden, sweepable staging dir — never an invisible manifest-less
+    // orphan on the shelf path.
+    let staging_root = crate::atomic_file::long_path(&manual_root.join(IMPORT_STAGING_DIR));
+    fs::create_dir_all(&staging_root).map_err(|error| error.to_string())?;
+    let staging = crate::atomic_file::long_path(&staging_root.join(Uuid::new_v4().to_string()));
+    fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+
+    let staged = (|| -> Result<Manifest, String> {
         let mut chapters = Vec::with_capacity(files.len());
         for (relative, path) in files {
-            let destination = target.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            // P2-18: the reader caps Markdown at 64 MiB — importing a larger
+            // file would create a chapter that can never open, so skip it
+            // with an issue instead of failing the whole import.
+            let oversized = fs::metadata(&path)
+                .map(|metadata| metadata.len() > crate::MAX_MARKDOWN_FILE_BYTES)
+                .unwrap_or(false);
+            if oversized {
+                issue(&mut issues, &path, "MARKDOWN_FILE_TOO_LARGE");
+                continue;
             }
-            fs::copy(&path, &destination).map_err(|error| error.to_string())?;
+            let destination = crate::atomic_file::long_path(
+                &staging.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR)),
+            );
+            let copied = (|| -> Result<(), String> {
+                if let Some(parent) = destination.parent() {
+                    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                }
+                fs::copy(&path, &destination).map_err(|error| error.to_string())?;
+                Ok(())
+            })();
+            // P2-17: one unreadable/uncopyable file is an issue, not a
+            // failed import.
+            if let Err(error) = copied {
+                issue(&mut issues, &path, format!("文件复制失败：{error}"));
+                continue;
+            }
             let word_count = fs::read_to_string(&path)
                 .map(|content| {
                     content
@@ -120,6 +240,9 @@ pub fn import_markdown_folder(source: &Path, library_root: &Path) -> Result<Mani
                 metadata_status: None,
             });
         }
+        if chapters.is_empty() {
+            return Err("The selected folder contains no readable Markdown files".to_string());
+        }
         let now = Utc::now().to_rfc3339();
         let manifest = Manifest {
             schema_version: 1,
@@ -132,14 +255,27 @@ pub fn import_markdown_folder(source: &Path, library_root: &Path) -> Result<Mani
             chapters,
         };
         let data = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
-        crate::atomic_write_file(&target.join("manifest.json"), &data)?;
+        // atomic_file::write normalizes the path itself; still cheap.
+        crate::atomic_write_file(&staging.join("manifest.json"), &data)?;
         Ok(manifest)
     })();
 
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&target);
+    match staged {
+        Ok(manifest) => {
+            // Finalize: same-volume rename onto the shelf is atomic — the
+            // book either appears complete with its manifest or not at all.
+            let final_target = crate::atomic_file::long_path(&target);
+            if let Err(error) = fs::rename(&staging, &final_target) {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(format!("Import finalize failed: {error}"));
+            }
+            Ok(ImportOutcome { manifest, issues })
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            Err(error)
+        }
     }
-    result
 }
 
 #[cfg(test)]
@@ -156,8 +292,9 @@ mod tests {
         fs::create_dir_all(source.join("part")).expect("source must be created");
         fs::write(source.join("02.md"), "second").expect("fixture must write");
         fs::write(source.join("part/01.md"), "first").expect("fixture must write");
-        let manifest = import_markdown_folder(&source, &library).expect("import must succeed");
-        assert_eq!(manifest.chapters.len(), 2);
+        let outcome = import_markdown_folder(&source, &library).expect("import must succeed");
+        assert_eq!(outcome.manifest.chapters.len(), 2);
+        assert!(outcome.issues.is_empty());
         assert!(source.join("02.md").exists());
         assert!(library.join("手动/source-book/manifest.json").exists());
         fs::remove_dir_all(root).expect("temp directory must be removed");
@@ -195,6 +332,77 @@ mod tests {
             serde_json::from_str(&raw).expect("written manifest must deserialize");
         crate::contracts::validate_manifest(&manifest)
             .expect("written manifest must satisfy the shared contract");
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    #[test]
+    fn staging_directory_is_finalized_and_leaves_no_incoming_residue() {
+        // P2-19: a finished import must leave no `.incoming` staging behind,
+        // and the staging area must be hidden from the shelf.
+        let root =
+            std::env::temp_dir().join(format!("immersive-import-staging-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source-book");
+        let library = root.join("library");
+        fs::create_dir_all(&source).expect("source must be created");
+        fs::write(source.join("01.md"), "first").expect("fixture must write");
+
+        import_markdown_folder(&source, &library).expect("import must succeed");
+
+        let staging_root = library.join("手动/.incoming");
+        let leftover = fs::read_dir(&staging_root)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(leftover, 0, "staging must be moved or removed");
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    #[test]
+    fn import_skips_overly_deep_files_instead_of_failing() {
+        // P2-17 + P2-20 depth cap: a file nested past MAX_IMPORT_DEPTH is
+        // reported as an issue and skipped — the import itself succeeds.
+        let root =
+            std::env::temp_dir().join(format!("immersive-import-tolerant-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source-book");
+        let library = root.join("library");
+        fs::create_dir_all(&source).expect("source must be created");
+        fs::write(source.join("01.md"), "first").expect("fixture must write");
+        let mut deep = source.clone();
+        for _ in 0..(super::MAX_IMPORT_DEPTH + 2) {
+            deep = deep.join("d");
+        }
+        fs::create_dir_all(&deep).expect("deep tree must be created");
+        fs::write(deep.join("buried.md"), "too deep").expect("fixture must write");
+
+        let outcome = import_markdown_folder(&source, &library).expect("import must succeed");
+        assert_eq!(outcome.manifest.chapters.len(), 1);
+        assert!(outcome
+            .issues
+            .iter()
+            .any(|issue| issue.message == "IMPORT_DEPTH_LIMIT"));
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    #[test]
+    fn sweep_removes_staging_residue() {
+        // P2-19: startup sweep deletes abandoned `.incoming` trees but leaves
+        // finished books untouched.
+        let root =
+            std::env::temp_dir().join(format!("immersive-import-sweep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let library = root.join("library");
+        let staging = library.join("手动/.incoming/orphaned-staging");
+        fs::create_dir_all(&staging).expect("staging fixture must be created");
+        fs::write(staging.join("partial.md"), "half-copied").expect("fixture must write");
+        let book = library.join("手动/finished-book");
+        fs::create_dir_all(&book).expect("book fixture must be created");
+        fs::write(book.join("manifest.json"), "{}").expect("fixture must write");
+
+        super::sweep_staging_dirs(&library);
+
+        assert!(!library.join("手动/.incoming/orphaned-staging").exists());
+        assert!(book.join("manifest.json").exists());
         fs::remove_dir_all(root).expect("temp directory must be removed");
     }
 }

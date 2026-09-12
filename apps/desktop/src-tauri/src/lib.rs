@@ -1,11 +1,11 @@
 use encoding_rs::{GB18030, UTF_16BE, UTF_16LE};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -106,19 +106,32 @@ fn state_dir() -> PathBuf {
     dir
 }
 
+/// P2-20: bound the usage walk — managed roots only hold app-created trees,
+/// but a pathological (or previously corrupted) layout must not recurse
+/// without limit.
+const MAX_DIRECTORY_SIZE_DEPTH: usize = 64;
+
 fn directory_size(path: &Path) -> Result<u64, String> {
-    if !path.exists() {
+    directory_size_at(path, 0)
+}
+
+fn directory_size_at(path: &Path, depth: usize) -> Result<u64, String> {
+    if depth > MAX_DIRECTORY_SIZE_DEPTH {
         return Ok(0);
     }
-    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    let normalized = atomic_file::long_path(path);
+    if !normalized.exists() {
+        return Ok(0);
+    }
+    let metadata = fs::symlink_metadata(&normalized).map_err(|error| error.to_string())?;
     if metadata.file_type().is_symlink() || metadata.is_file() {
         return Ok(metadata.len());
     }
-    fs::read_dir(path)
+    fs::read_dir(&normalized)
         .map_err(|error| error.to_string())?
         .map(|entry| entry.map_err(|error| error.to_string()))
         .try_fold(0_u64, |total, entry| {
-            Ok(total.saturating_add(directory_size(&entry?.path())?))
+            Ok(total.saturating_add(directory_size_at(&entry?.path(), depth + 1)?))
         })
 }
 
@@ -277,14 +290,17 @@ fn markdown_path_allowed(path: &str) -> Result<PathBuf, String> {
 /// bounded to Markdown files, and writes stay behind `markdown_write_permitted`.
 fn markdown_read_target(path: &str) -> Result<PathBuf, String> {
     let candidate = markdown_path_allowed(path)?;
-    let metadata = fs::metadata(&candidate).map_err(|error| error.to_string())?;
+    // P2-20: normalize before metadata/read — a >MAX_PATH Markdown must be
+    // readable via the `\\?\` spelling instead of failing as "not found".
+    let normalized = atomic_file::long_path(&candidate);
+    let metadata = fs::metadata(&normalized).map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("MARKDOWN_PATH_NOT_FILE".to_string());
     }
     if metadata.len() > MAX_MARKDOWN_FILE_BYTES {
         return Err("MARKDOWN_FILE_TOO_LARGE".to_string());
     }
-    Ok(candidate)
+    Ok(normalized)
 }
 
 /// Write-side whitelist: managed roots (Library/Data/Cache) always qualify;
@@ -326,20 +342,14 @@ fn markdown_write_permitted(path: &Path) -> Result<(), String> {
 /// standalone `.md` files outside the Library lose relative-image loading —
 /// granting arbitrary user directories recursively is exactly what P1-18
 /// removes.
-fn grant_markdown_asset_scope(app: &tauri::AppHandle, path: &Path) {
-    let scope = app.asset_protocol_scope();
-    let _ = scope.allow_file(path);
-    let Ok(locations) = storage::StorageLocations::current_with_library_settings() else {
-        return;
-    };
-    let (Ok(canonical_file), Ok(canonical_library)) = (
-        path.canonicalize(),
-        locations.library_root.canonicalize(),
-    ) else {
-        return;
-    };
-    if !canonical_file.starts_with(&canonical_library) {
-        return;
+/// P2-44: the ancestor directory holding `manifest.json` — i.e. the book
+/// root — is what gets the recursive asset grant, so `chapters/*.md` can
+/// reach `assets/` siblings and `../img.png`-style references that stay
+/// inside the book. Anything outside the Library (or escaping the book dir,
+/// e.g. `../../x.png`) intentionally stays ungranted.
+fn book_asset_root(canonical_file: &Path, canonical_library: &Path) -> Option<PathBuf> {
+    if !canonical_file.starts_with(canonical_library) {
+        return None;
     }
     let mut dir = canonical_file.parent();
     while let Some(current) = dir {
@@ -347,10 +357,26 @@ fn grant_markdown_asset_scope(app: &tauri::AppHandle, path: &Path) {
             break;
         }
         if current.join("manifest.json").is_file() {
-            let _ = scope.allow_directory(current, true);
-            return;
+            return Some(current.to_path_buf());
         }
         dir = current.parent();
+    }
+    None
+}
+
+fn grant_markdown_asset_scope(app: &tauri::AppHandle, path: &Path) {
+    let scope = app.asset_protocol_scope();
+    let _ = scope.allow_file(path);
+    let Ok(locations) = storage::StorageLocations::current_with_library_settings() else {
+        return;
+    };
+    let (Ok(canonical_file), Ok(canonical_library)) =
+        (path.canonicalize(), locations.library_root.canonicalize())
+    else {
+        return;
+    };
+    if let Some(book_root) = book_asset_root(&canonical_file, &canonical_library) {
+        let _ = scope.allow_directory(book_root, true);
     }
 }
 
@@ -438,7 +464,7 @@ fn initial_markdown_path(args: &[String]) -> Option<String> {
 async fn get_file_mtime(path: String) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<u64, String> {
         let path = markdown_path_allowed(&path)?;
-        let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+        let meta = fs::metadata(atomic_file::long_path(&path)).map_err(|e| e.to_string())?;
         let modified = meta.modified().map_err(|e| e.to_string())?;
         let ms = modified
             .duration_since(std::time::UNIX_EPOCH)
@@ -457,7 +483,19 @@ async fn read_markdown_file(
 ) -> Result<ReadResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ReadResult, String> {
         let path = markdown_read_target(&path)?;
-        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        // P2-18: the metadata check above can be raced — cap the read itself
+        // so a swapped-in file can never slurp more than the limit + 1 byte.
+        let bytes = {
+            let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+            let mut bytes = Vec::new();
+            file.take(MAX_MARKDOWN_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() as u64 > MAX_MARKDOWN_FILE_BYTES {
+                return Err("MARKDOWN_FILE_TOO_LARGE".to_string());
+            }
+            bytes
+        };
         let (content, encoding) = decode_markdown_bytes(bytes)?;
         register_opened_markdown(&path);
         grant_markdown_asset_scope(&app, &path);
@@ -490,19 +528,30 @@ async fn save_markdown_file(
     .map_err(|error| error.to_string())?
 }
 
+/// P2-18: reading-state blobs are app-generated and tiny — anything bigger
+/// is corrupt or hostile, so read through a hard cap instead of slurping.
+fn read_state_json_capped(path: &Path) -> Result<String, String> {
+    let normalized = atomic_file::long_path(path);
+    let metadata = fs::metadata(&normalized).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_MARKDOWN_FILE_BYTES {
+        return Err("STATE_FILE_TOO_LARGE".to_string());
+    }
+    fs::read_to_string(&normalized).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn load_reading_state(path: String) -> Result<ReadingState, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ReadingState, String> {
         let sp = state_path_for(&path);
         if sp.exists() {
-            let data = fs::read_to_string(&sp).map_err(|e| e.to_string())?;
+            let data = read_state_json_capped(&sp)?;
             serde_json::from_str(&data).map_err(|e| e.to_string())
         } else {
             let legacy = state_path_for_in_dir(&legacy_state_dir(), &path);
             if !legacy.exists() {
                 return Ok(ReadingState::default());
             }
-            let data = fs::read_to_string(&legacy).map_err(|e| e.to_string())?;
+            let data = read_state_json_capped(&legacy)?;
             let state: ReadingState = serde_json::from_str(&data).map_err(|e| e.to_string())?;
             let migrated = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
             atomic_write_file(&sp, &migrated)?;
@@ -580,7 +629,7 @@ async fn load_recent_files() -> Result<RecentFilesLoad, String> {
         let dir = state_dir();
         let path = dir.join("recent-files.json");
         if path.exists() {
-            let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let raw = read_state_json_capped(&path)?;
             let (json, changed) = cleanup_recent_files_json(&raw, &dir);
             if changed {
                 atomic_write_file(&path, json.as_bytes())?;
@@ -593,7 +642,7 @@ async fn load_recent_files() -> Result<RecentFilesLoad, String> {
         } else {
             let legacy_path = legacy_state_dir().join("recent-files.json");
             if legacy_path.exists() {
-                let raw = fs::read_to_string(&legacy_path).map_err(|e| e.to_string())?;
+                let raw = read_state_json_capped(&legacy_path)?;
                 let (json, _) = cleanup_recent_files_json(&raw, &dir);
                 atomic_write_file(&path, json.as_bytes())?;
                 register_recent_markdown_paths(&json);
@@ -910,6 +959,72 @@ async fn get_migration_runs() -> Result<Vec<control::MigrationRunRecord>, String
     .map_err(|error| error.to_string())?
 }
 
+// P2-14 registration half: the three migration executors existed but were
+// unreachable — nothing registered them as Tauri commands. Idempotency
+// (claim settlement, stale-preview checks, conflict gate) lives in the
+// execution layer; these wrappers only derive managed locations and hop off
+// the IPC thread.
+
+#[tauri::command]
+async fn execute_settings_migration(
+    preview_id: String,
+    request_id: String,
+) -> Result<migration::MigrationExecutionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut target = storage::StorageLocations::current()?;
+        let settings = settings::load_settings()?;
+        target.library_root = PathBuf::from(&settings.library_root);
+        let legacy = migration::current_legacy_locations(PathBuf::from(settings.library_root))?;
+        migration::execute_settings_migration(&legacy, &target, &preview_id, &request_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn migrate_sqlite_verified(
+    source: String,
+    target: String,
+) -> Result<migration::MigrationReceipt, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let locations = storage::StorageLocations::current()?;
+        // Rollback + receipt stay under the managed Data root — the caller
+        // picks source/target only, never where safety copies land.
+        let run_root = locations
+            .data_root
+            .join("Migrations")
+            .join(format!("sqlite-{}", uuid::Uuid::new_v4()));
+        let rollback = run_root.join("rollback");
+        let receipt_path = run_root.join("receipt.json");
+        migration::migrate_sqlite_verified(
+            Path::new("sqlite3"),
+            Path::new(&source),
+            Path::new(&target),
+            &rollback,
+            &receipt_path,
+            env!("CARGO_PKG_VERSION"),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn reconcile_zhihu_archive(
+    database: String,
+    output_root: String,
+) -> Result<migration::ReconciliationReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        migration::reconcile_zhihu_archive(
+            Path::new("sqlite3"),
+            Path::new(&database),
+            Path::new(&output_root),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 async fn get_acquisition_snapshot(
     kind: Option<tasks::TaskKind>,
@@ -997,7 +1112,7 @@ fn enrich_task_display_names(
             .join("Tasks")
             .join(&task.id)
             .join("task.json");
-        let Ok(raw) = std::fs::read_to_string(&spec_path) else {
+        let Ok(raw) = read_state_json_capped(&spec_path) else {
             continue;
         };
         let Ok(spec) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -1015,10 +1130,53 @@ fn enrich_task_display_names(
     }
 }
 
+/// P2-11: per-task `cancel_and_discard` cannot reuse
+/// `control.capture_cancel_discard` — it snapshots *every* active podcast
+/// task, so it would plant discard intents for tasks the user never
+/// cancelled. A sibling `<task_id>.discard-pending` marker under
+/// `Cache\Podcast\Tasks` is the durable intent instead: it is written before
+/// the fallible discard, survives a mid-discard crash (it lives outside the
+/// directory being deleted), and `reconcile_cancel_and_discard` retries any
+/// leftover marker at startup / on every acquisition snapshot.
+const DISCARD_INTENT_SUFFIX: &str = ".discard-pending";
+
+fn discard_intent_path(locations: &storage::StorageLocations, task_id: &str) -> PathBuf {
+    locations
+        .cache_root
+        .join("Podcast")
+        .join("Tasks")
+        .join(format!("{task_id}{DISCARD_INTENT_SUFFIX}"))
+}
+
+fn reconcile_discard_markers(locations: &storage::StorageLocations) {
+    let tasks_dir = atomic_file::long_path(&locations.cache_root.join("Podcast").join("Tasks"));
+    let Ok(entries) = fs::read_dir(&tasks_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(task_id) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(DISCARD_INTENT_SUFFIX))
+        else {
+            continue;
+        };
+        if task_id.is_empty() {
+            continue;
+        }
+        // Best effort per marker: a task whose cache is already gone reports
+        // Ok, a genuinely stuck discard keeps its marker for the next sweep.
+        if cache::discard_podcast_task_at(locations, task_id).is_ok() {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn reconcile_cancel_and_discard(
     locations: &storage::StorageLocations,
     control: &control::ControlDb,
 ) -> Result<(), String> {
+    reconcile_discard_markers(locations);
     let pending = control.pending_cancel_discard()?;
     if pending.is_empty() {
         return Ok(());
@@ -1180,7 +1338,7 @@ async fn save_book_progress(
 }
 
 #[tauri::command]
-async fn import_markdown_folder(path: String) -> Result<contracts::Manifest, String> {
+async fn import_markdown_folder(path: String) -> Result<importer::ImportOutcome, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let value = settings::load_settings()?;
         importer::import_markdown_folder(Path::new(&path), Path::new(&value.library_root))
@@ -1190,9 +1348,17 @@ async fn import_markdown_folder(path: String) -> Result<contracts::Manifest, Str
 }
 
 #[tauri::command]
-async fn remove_book(book_id: String) -> Result<String, String> {
+async fn remove_book(
+    book_id: String,
+    state: tauri::State<'_, std::sync::Arc<reader_server::ReaderServiceState>>,
+) -> Result<String, String> {
+    // P2-21: close every 连读 session on this book first — a live session's
+    // PUT /progress would otherwise re-create .reading.json (and the book
+    // directory) underneath a remove in flight.
+    let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let value = settings::load_settings()?;
+        close_reader_sessions_for_book(&state, &book_id);
         library::remove_book(Path::new(&value.library_root), &book_id)
     })
     .await
@@ -1200,9 +1366,14 @@ async fn remove_book(book_id: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn delete_book(book_id: String) -> Result<String, String> {
+async fn delete_book(
+    book_id: String,
+    state: tauri::State<'_, std::sync::Arc<reader_server::ReaderServiceState>>,
+) -> Result<String, String> {
+    let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let value = settings::load_settings()?;
+        close_reader_sessions_for_book(&state, &book_id);
         library::delete_book(Path::new(&value.library_root), &book_id)
     })
     .await
@@ -1276,6 +1447,47 @@ async fn get_companion_status(tool: String) -> Result<tools::ToolStatus, String>
         .map_err(|error| error.to_string())?
 }
 
+/// P2-21: `reader_server` keeps its Sessions map private, so lib.rs tracks
+/// book_id → session_id alongside `start_reader_session`. `remove_book`/
+/// `delete_book` close every tracked session first so the tiny_http reader
+/// cannot recreate files (e.g. .reading.json via PUT /progress) inside a
+/// directory that is being removed.
+fn reader_sessions_by_book() -> &'static Mutex<BTreeMap<String, Vec<String>>> {
+    static MAP: OnceLock<Mutex<BTreeMap<String, Vec<String>>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn track_reader_session(book_id: &str, session_id: &str) {
+    if let Ok(mut map) = reader_sessions_by_book().lock() {
+        map.entry(book_id.to_string())
+            .or_default()
+            .push(session_id.to_string());
+    }
+}
+
+fn untrack_reader_session(session_id: &str) {
+    if let Ok(mut map) = reader_sessions_by_book().lock() {
+        for ids in map.values_mut() {
+            ids.retain(|id| id != session_id);
+        }
+        map.retain(|_, ids| !ids.is_empty());
+    }
+}
+
+fn close_reader_sessions_for_book(state: &reader_server::ReaderServiceState, book_id: &str) {
+    let ids = reader_sessions_by_book()
+        .lock()
+        .map(|mut map| map.remove(book_id).unwrap_or_default())
+        .unwrap_or_default();
+    for id in ids {
+        // A TTL-expired or already-closed session reports Ok(false)/Err —
+        // either way it no longer serves the book; keep closing the rest.
+        if let Err(error) = reader_server::close_session(state, &id) {
+            eprintln!("reader session {id} close before book removal failed: {error}");
+        }
+    }
+}
+
 #[tauri::command]
 async fn start_reader_session(
     book_id: String,
@@ -1285,7 +1497,9 @@ async fn start_reader_session(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let value = settings::load_settings()?;
-        reader_server::start_session(&state, &value, &book_id)
+        let descriptor = reader_server::start_session(&state, &value, &book_id)?;
+        track_reader_session(&book_id, &descriptor.session_id);
+        Ok(descriptor)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1299,7 +1513,9 @@ async fn close_reader_session(
     // Session teardown joins the accept thread — keep off IPC thread.
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        reader_server::close_session(&state, &session_id)
+        let closed = reader_server::close_session(&state, &session_id)?;
+        untrack_reader_session(&session_id);
+        Ok(closed)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1565,23 +1781,89 @@ async fn control_podcast_task(
                             tasks::TaskKind::Podcast,
                             expected_revision,
                         )?;
-                        match action.as_str() {
-                            "pause" => podcast::pause_task(&task_id)?,
-                            "resume" => podcast::resume_task(&task_id)?,
+                        if !matches!(
+                            action.as_str(),
+                            "pause" | "resume" | "cancel" | "cancel_and_discard"
+                        ) {
+                            return Err("INVALID_TASK_CONTROL".to_string());
+                        }
+                        // P2-11: durable intent BEFORE process side effects —
+                        // a crash between "worker killed" and "DB updated" used
+                        // to leave the snapshot claiming the task still ran.
+                        // For cancel_and_discard the sibling marker is written
+                        // first too, so even a crash mid-discard stays
+                        // recoverable via reconcile_cancel_and_discard.
+                        let discard_locations = if action == "cancel_and_discard" {
+                            let locations = storage::StorageLocations::current()?;
+                            atomic_file::write(
+                                &discard_intent_path(&locations, &task_id),
+                                b"pending",
+                            )?;
+                            Some(locations)
+                        } else {
+                            None
+                        };
+                        let event = match control.control_task(
+                            &task_id,
+                            &action,
+                            expected_revision,
+                        ) {
+                            Ok(event) => event,
+                            Err(error) => {
+                                if let Some(locations) = &discard_locations {
+                                    let _ = fs::remove_file(
+                                        discard_intent_path(locations, &task_id),
+                                    );
+                                }
+                                return Err(error);
+                            }
+                        };
+                        let side_effect = match action.as_str() {
+                            "pause" => podcast::pause_task(&task_id),
+                            "resume" => podcast::resume_task(&task_id),
                             "cancel" | "cancel_and_discard" => {
-                                if let Err(error) = podcast::cancel_task(&task_id) {
-                                    if error != "WORKER_NOT_RUNNING" {
-                                        return Err(error);
-                                    }
+                                match podcast::cancel_task(&task_id) {
+                                    // Worker already gone → the recorded
+                                    // terminal intent is the truth.
+                                    Err(error) if error == "WORKER_NOT_RUNNING" => Ok(()),
+                                    other => other,
                                 }
                             }
-                            _ => return Err("INVALID_TASK_CONTROL".to_string()),
+                            _ => unreachable!(),
+                        };
+                        if let Err(error) = side_effect {
+                            // Compensating transition: pause↔resume restore the
+                            // worker's real state so the DB stops lying about
+                            // it. For cancel the recorded intent stands — the
+                            // user did cancel; the Job Object and the
+                            // interrupted-task reaper reap any orphaned worker,
+                            // and a cancel_and_discard marker keeps the
+                            // pending discard recoverable.
+                            let inverse = match action.as_str() {
+                                "pause" => Some("resume"),
+                                "resume" => Some("pause"),
+                                _ => None,
+                            };
+                            if let Some(inverse) = inverse {
+                                let _ = control.control_task(
+                                    &task_id,
+                                    inverse,
+                                    event.snapshot.revision,
+                                );
+                            }
+                            return Err(error);
                         }
-                        let event =
-                            control.control_task(&task_id, &action, expected_revision)?;
-                        if action == "cancel_and_discard" {
-                            let locations = storage::StorageLocations::current()?;
-                            cache::discard_podcast_task_at(&locations, &task_id)?;
+                        if let Some(locations) = &discard_locations {
+                            if let Err(error) =
+                                cache::discard_podcast_task_at(locations, &task_id)
+                            {
+                                // Marker stays → the reconcile sweep retries;
+                                // the intent is durable even though we report
+                                // the failure.
+                                return Err(format!("TASK_DISCARD_PENDING: {error}"));
+                            }
+                            let _ =
+                                fs::remove_file(discard_intent_path(locations, &task_id));
                         }
                         app.emit(podcast::TASK_EVENT_NAME, &event)
                             .map_err(|error| error.to_string())?;
@@ -1659,6 +1941,9 @@ pub fn run() {
             recover_publish_transactions,
             preview_legacy_migration,
             get_migration_runs,
+            execute_settings_migration,
+            migrate_sqlite_verified,
+            reconcile_zhihu_archive,
             get_acquisition_snapshot,
             get_task_events,
             preview_podcast_files,
@@ -1706,6 +1991,12 @@ pub fn run() {
                 let active_ids = podcast::active_podcast_task_ids().unwrap_or_default();
                 if let Err(error) = control.recover_interrupted_tasks(&active_ids) {
                     eprintln!("interrupted podcast task recovery failed: {error}");
+                }
+                // P2-19: sweep abandoned import staging and P2-11 discard
+                // markers left by a crash — before the UI can start new work.
+                if let Ok(locations) = storage::StorageLocations::current_with_library_settings() {
+                    importer::sweep_staging_dirs(&locations.library_root);
+                    reconcile_discard_markers(&locations);
                 }
             });
             // Windows: file path passed as CLI argument
@@ -1908,7 +2199,93 @@ mod recent_file_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{initial_markdown_path, is_markdown_path};
+    use super::{
+        book_asset_root, initial_markdown_path, is_markdown_path, reconcile_discard_markers,
+    };
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scoped_temp_dir(name: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "immersive-lib-test-{name}-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn book_asset_root_covers_chapters_and_assets_but_not_outside() {
+        // P2-44: a chapter under `chapters/` resolves to the manifest-bearing
+        // book dir, so `assets/` siblings and `../img.png`-style references
+        // inside the book keep working. Files outside the Library — and
+        // references escaping the book dir (`../../`) — stay ungranted.
+        let dir = scoped_temp_dir("asset-scope");
+        let library = dir.join("library");
+        let book = library.join("手动").join("书");
+        fs::create_dir_all(book.join("chapters")).unwrap();
+        fs::write(book.join("manifest.json"), "{}").unwrap();
+        let chapter = book.join("chapters").join("01.md");
+        fs::write(&chapter, "x").unwrap();
+        let canonical_library = library.canonicalize().unwrap();
+
+        assert_eq!(
+            book_asset_root(&chapter.canonicalize().unwrap(), &canonical_library),
+            Some(book.canonicalize().unwrap())
+        );
+
+        let outside = dir.join("elsewhere.md");
+        fs::write(&outside, "x").unwrap();
+        assert_eq!(
+            book_asset_root(&outside.canonicalize().unwrap(), &canonical_library),
+            None
+        );
+
+        let loose = library.join("loose.md");
+        fs::write(&loose, "x").unwrap();
+        assert_eq!(
+            book_asset_root(&loose.canonicalize().unwrap(), &canonical_library),
+            None
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reconcile_discard_markers_retries_pending_discards() {
+        // P2-11: a leftover `<task>.discard-pending` marker re-triggers the
+        // cache discard; sibling task dirs without a marker are untouched.
+        let dir = scoped_temp_dir("discard-markers");
+        let tasks_dir = dir.join("Cache").join("Podcast").join("Tasks");
+        let doomed = tasks_dir.join("task-doomed");
+        let kept = tasks_dir.join("task-kept");
+        fs::create_dir_all(&doomed).unwrap();
+        fs::create_dir_all(&kept).unwrap();
+        fs::write(doomed.join("partial.bin"), "x").unwrap();
+        fs::write(kept.join("partial.bin"), "x").unwrap();
+        fs::write(tasks_dir.join("task-doomed.discard-pending"), b"pending").unwrap();
+
+        let locations = crate::storage::StorageLocations {
+            channel: "test".to_string(),
+            settings_path: dir.join("settings.json"),
+            data_root: dir.join("Data"),
+            cache_root: dir.join("Cache"),
+            logs_root: dir.join("Logs"),
+            runtime_state_root: dir.join("RuntimeState"),
+            backups_root: dir.join("Backups"),
+            library_root: dir.join("Library"),
+            runtime_root: dir.join("Runtime"),
+        };
+        reconcile_discard_markers(&locations);
+
+        assert!(!doomed.exists());
+        assert!(!tasks_dir.join("task-doomed.discard-pending").exists());
+        assert!(kept.join("partial.bin").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn markdown_extension_check_is_case_insensitive() {

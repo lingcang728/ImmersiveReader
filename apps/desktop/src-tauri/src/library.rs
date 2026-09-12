@@ -58,13 +58,56 @@ pub struct BookDetail {
     pub task_records: Vec<TaskSnapshot>,
 }
 
-fn collect_manifests(dir: &Path, depth: usize, manifests: &mut Vec<PathBuf>) -> Result<(), String> {
-    if depth > 3 || !dir.exists() {
-        return Ok(());
+/// P2-17: per-entry tolerance — a directory/entry that cannot be read is
+/// recorded in `issues` and skipped instead of failing the whole scan.
+/// P2-20: the depth cap keeps the recursion bounded.
+fn collect_manifests(
+    dir: &Path,
+    depth: usize,
+    manifests: &mut Vec<PathBuf>,
+    issues: &mut Vec<LibraryIssue>,
+) {
+    if depth > 3 {
+        issues.push(LibraryIssue {
+            path: dir.to_string_lossy().into_owned(),
+            message: "LIBRARY_DEPTH_LIMIT".to_string(),
+        });
+        return;
     }
-    for entry in fs::read_dir(dir).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+    if !dir.exists() {
+        return;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            issues.push(LibraryIssue {
+                path: dir.to_string_lossy().into_owned(),
+                message: format!("目录无法读取：{error}"),
+            });
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                issues.push(LibraryIssue {
+                    path: dir.to_string_lossy().into_owned(),
+                    message: format!("目录条目无法读取：{error}"),
+                });
+                continue;
+            }
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                issues.push(LibraryIssue {
+                    path: entry.path().to_string_lossy().into_owned(),
+                    message: format!("条目类型无法读取：{error}"),
+                });
+                continue;
+            }
+        };
         if file_type.is_symlink() {
             continue;
         }
@@ -76,17 +119,18 @@ fn collect_manifests(dir: &Path, depth: usize, manifests: &mut Vec<PathBuf>) -> 
             if name == ".trash" || name.to_string_lossy().starts_with('.') {
                 continue;
             }
-            collect_manifests(&entry.path(), depth + 1, manifests)?;
+            collect_manifests(&entry.path(), depth + 1, manifests, issues);
         }
     }
-    Ok(())
 }
 
 fn ensure_book_inside_library(library_root: &Path, book_root: &Path) -> Result<(), String> {
-    let canonical_library = library_root
+    // P2-20: normalize before canonicalize — an un-prefixed path past
+    // MAX_PATH fails to even open without longPathAware.
+    let canonical_library = crate::atomic_file::long_path(library_root)
         .canonicalize()
         .map_err(|error| error.to_string())?;
-    let canonical_book = book_root
+    let canonical_book = crate::atomic_file::long_path(book_root)
         .canonicalize()
         .map_err(|error| error.to_string())?;
     if !canonical_book.starts_with(&canonical_library) {
@@ -99,6 +143,7 @@ fn ensure_book_inside_library(library_root: &Path, book_root: &Path) -> Result<(
 }
 
 pub fn remove_book(root: &Path, book_id: &str) -> Result<String, String> {
+    let root = &crate::atomic_file::long_path(root);
     let (book_root, manifest, _) = find_book(root, book_id)?;
     ensure_book_inside_library(root, &book_root)?;
     crate::trash::move_book(root, &book_root, &manifest)?;
@@ -107,18 +152,35 @@ pub fn remove_book(root: &Path, book_id: &str) -> Result<String, String> {
 
 /// Permanently delete a book directory from disk. Irreversible.
 pub fn delete_book(root: &Path, book_id: &str) -> Result<String, String> {
+    let root = &crate::atomic_file::long_path(root);
     let (book_root, manifest, _) = find_book(root, book_id)?;
     ensure_book_inside_library(root, &book_root)?;
     let chapter_count = manifest.chapters.len();
-    fs::remove_dir_all(&book_root).map_err(|error| error.to_string())?;
+    fs::remove_dir_all(crate::atomic_file::long_path(&book_root))
+        .map_err(|error| error.to_string())?;
     Ok(format!(
         "已永久删除《{}》（{} 篇）",
         manifest.title, chapter_count
     ))
 }
 
+/// P2-18: metadata pre-check before slurping — a corrupt/hostile manifest
+/// or provenance file must not pull an unbounded blob into memory. Shares
+/// the reader's 64 MiB ceiling.
+fn read_json_file_capped(path: &Path) -> Result<String, String> {
+    let normalized = crate::atomic_file::long_path(path);
+    let metadata = fs::metadata(&normalized).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("Not a file".to_string());
+    }
+    if metadata.len() > crate::MAX_MARKDOWN_FILE_BYTES {
+        return Err("FILE_TOO_LARGE".to_string());
+    }
+    fs::read_to_string(&normalized).map_err(|error| error.to_string())
+}
+
 fn read_manifest(path: &Path) -> Result<Manifest, String> {
-    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let raw = read_json_file_capped(path)?;
     let manifest: Manifest = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
     validate_manifest(&manifest)?;
     Ok(manifest)
@@ -128,11 +190,11 @@ fn read_provenance(
     book_root: &Path,
     expected_book_id: &str,
 ) -> Result<Option<BookProvenance>, String> {
-    let path = book_root.join("provenance.json");
+    let path = crate::atomic_file::long_path(&book_root.join("provenance.json"));
     if !path.exists() {
         return Ok(None);
     }
-    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let raw = read_json_file_capped(&path)?;
     let provenance: BookProvenance =
         serde_json::from_str(&raw).map_err(|error| error.to_string())?;
     if provenance.schema_version != 1 || provenance.book_id != expected_book_id {
@@ -173,6 +235,9 @@ fn load_book_at(manifest_path: &Path) -> Result<(Manifest, ReadingProgress), Str
 }
 
 pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
+    // P2-20: normalize the root once — every path the walk derives inherits
+    // the `\\?\` spelling when the library lives near/over MAX_PATH.
+    let root = &crate::atomic_file::long_path(root);
     fs::create_dir_all(root).map_err(|error| error.to_string())?;
     let writable = fs::OpenOptions::new()
         .create(true)
@@ -182,10 +247,10 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
         .and_then(|_| fs::remove_file(root.join(".write-test")))
         .is_ok();
     let mut paths = Vec::new();
-    collect_manifests(root, 0, &mut paths)?;
+    let mut issues = Vec::new();
+    collect_manifests(root, 0, &mut paths, &mut issues);
     paths.sort();
     let mut books = Vec::new();
-    let mut issues = Vec::new();
     for path in paths {
         match load_book_at(&path) {
             Ok((manifest, progress)) => {
@@ -226,8 +291,15 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
 }
 
 fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingProgress), String> {
+    // P2-17: a broken sibling directory must not hide a book — skip-and-scan
+    // behaviour is already how unreadable manifests are handled below.
     let mut paths = Vec::new();
-    collect_manifests(root, 0, &mut paths)?;
+    collect_manifests(
+        &crate::atomic_file::long_path(root),
+        0,
+        &mut paths,
+        &mut Vec::new(),
+    );
     for path in paths {
         let Ok(manifest) = read_manifest(&path) else {
             continue;
@@ -256,7 +328,12 @@ pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
 
 pub fn find_book_by_source_id(root: &Path, source_id: &str) -> Result<Option<Manifest>, String> {
     let mut paths = Vec::new();
-    collect_manifests(root, 0, &mut paths)?;
+    collect_manifests(
+        &crate::atomic_file::long_path(root),
+        0,
+        &mut paths,
+        &mut Vec::new(),
+    );
     for path in paths {
         let Ok(manifest) = read_manifest(&path) else {
             continue;
@@ -283,10 +360,10 @@ pub fn chapter_path(root: &Path, book_id: &str, chapter_id: &str) -> Result<Path
         .find(|item| item.id == chapter_id)
         .ok_or_else(|| format!("Chapter not found: {chapter_id}"))?;
     let candidate = book_root.join(chapter.path.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let canonical_root = book_root
+    let canonical_root = crate::atomic_file::long_path(&book_root)
         .canonicalize()
         .map_err(|error| error.to_string())?;
-    let canonical_file = candidate
+    let canonical_file = crate::atomic_file::long_path(&candidate)
         .canonicalize()
         .map_err(|error| error.to_string())?;
     if !canonical_file.starts_with(canonical_root) {
@@ -295,13 +372,39 @@ pub fn chapter_path(root: &Path, book_id: &str, chapter_id: &str) -> Result<Path
     Ok(canonical_file)
 }
 
+/// P2-21 read-merge-write: two reading surfaces (the Svelte 精读 workspace
+/// via `save_book_progress` and the tiny_http 连读 reader via
+/// `reader_http`'s PUT /progress) write the same `.reading.json`. A naive
+/// last-write-wins store drops concurrent updates — most visibly `read`
+/// marks from the other surface. Merge before writing: the `read` set is a
+/// union, and the cursor (current/position/updated) goes to whichever side
+/// saved most recently (`updated` is the RFC-3339 ordering key).
+/// `pub(crate)` so the reader_http half of this fix can share the same merge.
+pub(crate) fn merge_progress(
+    existing: &ReadingProgress,
+    incoming: &ReadingProgress,
+) -> ReadingProgress {
+    let mut merged = incoming.clone();
+    for id in &existing.read {
+        if !merged.read.iter().any(|known| known == id) {
+            merged.read.push(id.clone());
+        }
+    }
+    if existing.updated > merged.updated {
+        merged.current = existing.current.clone();
+        merged.position = existing.position;
+        merged.updated = existing.updated.clone();
+    }
+    merged
+}
+
 pub fn save_book_progress(
     root: &Path,
     book_id: &str,
     progress: &ReadingProgress,
 ) -> Result<(), String> {
-    let (book_root, manifest, _) = find_book(root, book_id)?;
-    crate::progress::save_progress(&book_root, &manifest, progress)
+    let (book_root, manifest, existing) = find_book(root, book_id)?;
+    crate::progress::save_progress(&book_root, &manifest, &merge_progress(&existing, progress))
 }
 
 #[cfg(test)]
@@ -378,6 +481,78 @@ mod tests {
         assert!(!book_path.exists());
         let after = scan_library(&root).expect("scan after");
         assert!(after.books.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_collects_per_book_issues_instead_of_failing() {
+        // P2-17: one corrupt book must not blank the shelf — it lands in
+        // `issues` while healthy books still list.
+        let root = temp_library("issues");
+        write_fixture_book(&root, "manual:healthy", "健康书");
+        let broken = root.join("手动").join("坏书");
+        fs::create_dir_all(&broken).expect("broken book dir");
+        fs::write(broken.join("manifest.json"), "{not json").expect("write broken manifest");
+
+        let scan = scan_library(&root).expect("scan must tolerate the bad book");
+        assert_eq!(scan.books.len(), 1);
+        assert_eq!(scan.books[0].book_id, "manual:healthy");
+        assert_eq!(scan.issues.len(), 1);
+        assert!(scan.issues[0].path.contains("坏书"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_progress_merges_read_marks_across_surfaces() {
+        // P2-21: the 精读 command surface and the 连读 HTTP surface write the
+        // same .reading.json — a last-write-wins save must not drop the other
+        // surface's `read` marks or yank the cursor backwards.
+        let root = temp_library("progress-merge");
+        let book = root.join("手动").join("合并进度");
+        fs::create_dir_all(&book).expect("book dir");
+        let mut manifest: Manifest = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/manifest.valid.json"
+        ))
+        .expect("fixture");
+        manifest.book_id = "manual:merge".to_string();
+        let mut second = manifest.chapters[0].clone();
+        second.id = "answer:fixture-2".to_string();
+        second.path = "002.md".to_string();
+        manifest.chapters.push(second);
+        fs::write(
+            book.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("json"),
+        )
+        .expect("manifest");
+
+        // Surface A marks chapter 1 read at t1.
+        let mut first = ReadingProgress::empty("answer:fixture-1");
+        first.read = vec!["answer:fixture-1".to_string()];
+        first.updated = "2026-07-10T01:00:00.000Z".to_string();
+        super::save_book_progress(&root, "manual:merge", &first).expect("save A");
+
+        // Surface B marks chapter 2 read at a later time, cursor on ch2.
+        let mut latest = ReadingProgress::empty("answer:fixture-2");
+        latest.read = vec!["answer:fixture-2".to_string()];
+        latest.position = 0.25;
+        latest.updated = "2026-07-10T02:00:00.000Z".to_string();
+        super::save_book_progress(&root, "manual:merge", &latest).expect("save B");
+
+        let merged = crate::progress::load_progress(&book, &manifest).expect("load merged");
+        assert!(merged.read.contains(&"answer:fixture-1".to_string()));
+        assert!(merged.read.contains(&"answer:fixture-2".to_string()));
+        assert_eq!(merged.current, "answer:fixture-2");
+
+        // A stale write (older `updated`) keeps contributing its read marks
+        // but must not move the cursor back.
+        let mut stale = ReadingProgress::empty("answer:fixture-1");
+        stale.read = vec!["answer:fixture-1".to_string()];
+        stale.position = 0.9;
+        stale.updated = "2026-07-10T00:30:00.000Z".to_string();
+        super::save_book_progress(&root, "manual:merge", &stale).expect("save stale");
+        let merged = crate::progress::load_progress(&book, &manifest).expect("load stale merge");
+        assert_eq!(merged.current, "answer:fixture-2");
+        assert_eq!(merged.position, 0.25);
         let _ = fs::remove_dir_all(&root);
     }
 }
