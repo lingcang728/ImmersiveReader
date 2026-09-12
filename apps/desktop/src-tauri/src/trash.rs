@@ -170,10 +170,8 @@ pub fn reconcile(root: &Path) -> Result<(), String> {
                     remove_journal(root, &journal.trash_id);
                 }
             }
-            "permanent_delete" => {
-                if !item_root.exists() {
-                    remove_journal(root, &journal.trash_id);
-                }
+            "permanent_delete" if !item_root.exists() => {
+                remove_journal(root, &journal.trash_id);
             }
             _ => {}
         }

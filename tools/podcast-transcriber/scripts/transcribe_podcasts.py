@@ -34,7 +34,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 del _stream
 
-from deepseek_pricing import (
+from deepseek_pricing import (  # noqa: E402
     DEEPSEEK_DEFAULT_MODEL,
     PodcastUpstreamError,
     PromptBudgetError,

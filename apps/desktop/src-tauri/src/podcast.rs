@@ -345,11 +345,11 @@ pub fn copy_verified_input_with_progress(
             hasher.update(&buffer[..read]);
             copied_bytes = copied_bytes.saturating_add(read as u64);
             if let Some(callback) = on_progress.as_mut() {
-                let percent = if expected_bytes == 0 {
-                    100
-                } else {
-                    ((copied_bytes.saturating_mul(100)) / expected_bytes).min(100)
-                };
+                let percent = copied_bytes
+                    .saturating_mul(100)
+                    .checked_div(expected_bytes)
+                    .unwrap_or(100)
+                    .min(100);
                 if last_report.elapsed() >= std::time::Duration::from_millis(250)
                     || percent >= last_percent.saturating_add(1)
                     || copied_bytes >= expected_bytes
