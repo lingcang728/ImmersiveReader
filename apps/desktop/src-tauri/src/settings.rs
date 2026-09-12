@@ -236,7 +236,7 @@ mod tests {
     fn current_rejects_an_unsafe_run_id_instead_of_falling_back_to_production() {
         let _guard = QaRunIdEnvGuard::set(r"..\production");
 
-        let result = std::panic::catch_unwind(|| AppChannel::current());
+        let result = std::panic::catch_unwind(AppChannel::current);
 
         assert!(
             result.is_err(),

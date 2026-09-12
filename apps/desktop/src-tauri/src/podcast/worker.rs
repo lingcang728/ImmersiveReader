@@ -552,7 +552,8 @@ fn terminate_task(entry: &WorkerEntry) -> Result<(), String> {
         let _ = entry.pid;
         // The pinned process handle identifies our worker even if its PID was
         // somehow recycled — never a bare OpenProcess(pid) (P1-3).
-        crate::job_object::terminate_process(entry.process.as_raw_handle() as HANDLE)
+        // SAFETY: `entry.process` is an owned clone of the live worker handle.
+        unsafe { crate::job_object::terminate_process(entry.process.as_raw_handle() as HANDLE) }
     }
     #[cfg(not(windows))]
     {

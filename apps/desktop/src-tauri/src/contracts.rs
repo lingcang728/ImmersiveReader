@@ -11,7 +11,7 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     match value.as_f64() {
-        Some(version) if version == 1.0 => Ok(1),
+        Some(1.0) => Ok(1),
         _ => Err(serde::de::Error::custom("unsupported schema version")),
     }
 }

@@ -115,8 +115,10 @@ pub fn resume_process(process: HANDLE, process_id: u32) -> Result<(), String> {
 
 /// Terminate via a pinned process handle — no PID is involved, so this can
 /// never kill an unrelated process that recycled the PID (P1-3).
-pub fn terminate_process(process: HANDLE) -> Result<(), String> {
-    // SAFETY: caller passes a live process handle with PROCESS_TERMINATE.
+///
+/// # Safety
+/// `process` must be a live process handle with `PROCESS_TERMINATE` access.
+pub unsafe fn terminate_process(process: HANDLE) -> Result<(), String> {
     if unsafe { TerminateProcess(process, 1) } == 0 {
         return Err(format!(
             "TerminateProcess failed: {}",
@@ -338,7 +340,8 @@ mod tests {
 
         suspend_process(handle, pid).expect("suspend own worker by verified handle");
         resume_process(handle, pid).expect("resume own worker by verified handle");
-        terminate_process(handle).expect("terminate own worker by pinned handle");
+        // SAFETY: `process` is an owned clone of the just-spawned child handle.
+        unsafe { terminate_process(handle) }.expect("terminate own worker by pinned handle");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
