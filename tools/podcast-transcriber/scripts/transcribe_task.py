@@ -11,6 +11,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# P0-2: vendored Python (< PEP-686) defaults pipe stdio to the console
+# codepage (cp936 on zh-CN Windows), while the host reads our pipes as
+# UTF-8 — the first non-ASCII byte would kill the reader thread. Force
+# both streams to UTF-8 before anything is printed. Best-effort only:
+# streams without reconfigure (StringIO, swapped/captured stdio, None)
+# are left untouched.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 COMPATIBILITY_FIELDS = (
     "inputSha256",
