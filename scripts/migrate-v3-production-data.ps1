@@ -22,7 +22,22 @@ $ExcludedProfileDirectories = @('Cache', 'Code Cache', 'GPUCache', 'GrShaderCach
 
 function Get-Sha256 {
     param([Parameter(Mandatory)][string]$Path)
-    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    # Get-FileHash is the fast path, but some Windows PowerShell 5.1 images
+    # lack it — fall back to raw .NET so the migration runs under either shell.
+    if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $algorithm = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $algorithm.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
 }
 
 function Get-RelativePath {

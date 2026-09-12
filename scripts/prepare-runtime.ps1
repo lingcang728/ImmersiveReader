@@ -230,7 +230,7 @@ function Write-CriticalRuntimeManifest {
         [ordered]@{
             path = $item.FullName.Substring($fullRuntimeRoot.Length).TrimStart('\').Replace('\', '/')
             bytes = $item.Length
-            sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+            sha256 = (Get-FileSha256Hex -Path $item.FullName)
         }
     })
     if ($entries.Count -eq 0) {

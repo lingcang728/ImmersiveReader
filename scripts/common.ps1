@@ -40,3 +40,23 @@ function Get-PodcastPython {
     $py = Require-Command -Name 'py'
     return $py
 }
+
+function Get-FileSha256Hex {
+    param([Parameter(Mandatory)][string]$Path)
+    # Get-FileHash is the fast path, but some Windows PowerShell 5.1 images
+    # lack it — fall back to raw .NET so scripts run under either shell.
+    if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    }
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $algorithm = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '')
+        } finally {
+            $algorithm.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
