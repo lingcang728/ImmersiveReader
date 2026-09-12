@@ -11,8 +11,8 @@
     "title": { "type": "string", "minLength": 1 },
     "source": { "enum": ["zhihu", "manual", "podcast"] },
     "sourceId": { "type": "string", "minLength": 1 },
-    "generatedAt": { "type": "string", "format": "date-time" },
-    "updatedAt": { "type": "string", "format": "date-time" },
+    "generatedAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$" },
+    "updatedAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$" },
     "chapters": {
       "type": "array",
       "minItems": 1,
@@ -22,9 +22,9 @@
         "required": ["id", "path", "title", "voteCount", "wordCount"],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
-          "path": { "type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$)).+$" },
+          "path": { "type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*\\u0000)(?=.*\\S).+$" },
           "title": { "type": "string", "minLength": 1 },
-          "date": { "type": "string", "format": "date" },
+          "date": { "type": "string", "format": "date", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
           "voteCount": { "type": "integer", "minimum": 0 },
           "wordCount": { "type": "integer", "minimum": 0 },
           "metadataStatus": { "enum": ["complete", "inferred"] }

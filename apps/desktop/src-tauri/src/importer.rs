@@ -162,4 +162,39 @@ mod tests {
         assert!(library.join("手动/source-book/manifest.json").exists());
         fs::remove_dir_all(root).expect("temp directory must be removed");
     }
+
+    #[test]
+    fn written_manifest_satisfies_the_shared_contract() {
+        // P1-21 regression: the manifest.json Rust writes must validate under
+        // the shared schema and TS parseManifest — optional fields are omitted,
+        // never serialized as explicit nulls.
+        let root =
+            std::env::temp_dir().join(format!("immersive-import-contract-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source-book");
+        let library = root.join("library");
+        fs::create_dir_all(&source).expect("source must be created");
+        fs::write(source.join("01.md"), "first").expect("fixture must write");
+        import_markdown_folder(&source, &library).expect("import must succeed");
+
+        let raw = fs::read_to_string(library.join("手动/source-book/manifest.json"))
+            .expect("manifest must be written");
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).expect("written manifest must be JSON");
+        assert!(value.get("sourceId").is_none(), "no null sourceId");
+        let chapters = value["chapters"].as_array().expect("chapters array");
+        assert!(!chapters.is_empty());
+        for chapter in chapters {
+            assert!(chapter.get("date").is_none(), "no null date");
+            assert!(chapter.get("metadataStatus").is_none(), "no null metadataStatus");
+            assert!(chapter.get("voteCount").is_some());
+            assert!(chapter.get("wordCount").is_some());
+        }
+        // The written JSON must deserialize and pass the shared validator.
+        let manifest: crate::contracts::Manifest =
+            serde_json::from_str(&raw).expect("written manifest must deserialize");
+        crate::contracts::validate_manifest(&manifest)
+            .expect("written manifest must satisfy the shared contract");
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
 }

@@ -665,18 +665,37 @@ mod tests {
             .expect("repeated publish must be idempotent");
         assert_eq!(repeated.phase, crate::publish::PublishPhase::Committed);
         let shelf_folder = format!("source-{}", &source_id[..12]);
-        assert!(locations
+        let manifest_path = locations
             .library_root
             .join("播客")
             .join(&shelf_folder)
-            .join("manifest.json")
-            .is_file());
+            .join("manifest.json");
+        assert!(manifest_path.is_file());
         assert!(locations
             .library_root
             .join("播客")
             .join(&shelf_folder)
             .join("source.md")
             .is_file());
+        // P1-21 regression: the written manifest.json must satisfy the shared
+        // schema/TS parseManifest — optional fields omitted, never null.
+        let raw_manifest = fs::read_to_string(&manifest_path).expect("manifest must read");
+        let manifest_value: serde_json::Value =
+            serde_json::from_str(&raw_manifest).expect("manifest must be JSON");
+        assert!(manifest_value["sourceId"].is_string());
+        for chapter in manifest_value["chapters"]
+            .as_array()
+            .expect("chapters array")
+        {
+            assert!(chapter.get("date").is_none(), "no null date");
+            assert!(chapter.get("metadataStatus").is_none(), "no null metadataStatus");
+            assert!(chapter.get("voteCount").is_some());
+            assert!(chapter.get("wordCount").is_some());
+        }
+        let manifest: crate::contracts::Manifest =
+            serde_json::from_str(&raw_manifest).expect("manifest must deserialize");
+        crate::contracts::validate_manifest(&manifest)
+            .expect("published manifest must satisfy the shared contract");
         assert!(
             !read_podcast_recovery(&locations, task_id)
                 .expect("recovery must load")

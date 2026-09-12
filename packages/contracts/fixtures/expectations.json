@@ -1,0 +1,21 @@
+[
+  { "fixture": "manifest.valid.json", "contract": "manifest", "expect": "valid" },
+  { "fixture": "manifest.valid.optional-omitted.json", "contract": "manifest", "expect": "valid" },
+  { "fixture": "manifest.valid.schema-version-float.json", "contract": "manifest", "expect": "valid" },
+  { "fixture": "manifest.invalid.unknown.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.date.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.empty.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.path-drive.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.path-nul.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.path-blank.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.path-traversal.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.missing-required.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.date-format.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.datetime-shape.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.datetime-leap-second.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.schema-version-float.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "reading.valid.json", "contract": "reading", "expect": "valid" },
+  { "fixture": "reading.valid.schema-version-float.json", "contract": "reading", "expect": "valid" },
+  { "fixture": "reading.invalid.duplicate.json", "contract": "reading", "expect": "invalid" },
+  { "fixture": "reading.invalid.unknown.json", "contract": "reading", "expect": "invalid" }
+]

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "bookId": "fixture",
+  "title": "NUL path",
+  "source": "manual",
+  "generatedAt": "2026-07-10T00:00:00.000Z",
+  "updatedAt": "2026-07-10T00:00:00.000Z",
+  "chapters": [
+    {
+      "id": "chapter:1",
+      "path": "a\u0000b.md",
+      "title": "chapter",
+      "voteCount": 0,
+      "wordCount": 1
+    }
+  ]
+}

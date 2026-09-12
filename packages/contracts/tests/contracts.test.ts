@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -120,4 +121,38 @@ test("rejects non-canonical dates and fractional counts", () => {
   const fractional = structuredClone(validManifest);
   fractional.chapters[0] = { ...fractional.chapters[0], wordCount: 1.5 };
   assert.throws(() => parseManifest(fractional), ContractParseError);
+});
+
+type FixtureExpectation = {
+  readonly fixture: string;
+  readonly contract: "manifest" | "reading";
+  readonly expect: "valid" | "invalid";
+};
+
+const loadFixture = (name: string): unknown =>
+  JSON.parse(readFileSync(new URL(`../fixtures/${name}`, import.meta.url), "utf8"));
+
+// P1-22 parity: the Rust suite (contracts.rs::shared_fixtures_match_*) runs this
+// exact table against the same fixtures — the two implementations can never
+// drift on accept/reject verdicts.
+const expectations = loadFixture("expectations.json") as FixtureExpectation[];
+
+test("shared fixtures produce the same verdicts as schema and Rust", () => {
+  const manifest = parseManifest(loadFixture("manifest.valid.json"));
+  for (const { fixture, contract, expect } of expectations) {
+    const act = () => {
+      const data = loadFixture(fixture);
+      if (contract === "manifest") {
+        return parseManifest(data);
+      }
+      const state = parseReadingState(data);
+      validateReadingState(state, manifest);
+      return state;
+    };
+    if (expect === "valid") {
+      assert.doesNotThrow(act, fixture);
+    } else {
+      assert.throws(act, ContractParseError, fixture);
+    }
+  }
 });

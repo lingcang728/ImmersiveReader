@@ -59,7 +59,24 @@ fn validate_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Strict superset of `contracts::is_safe_relative_path` / TS
+/// `requireRelativePath`: everything those reject (blank, leading `/`, drive
+/// prefix, `\`, NUL, empty/`.`/`..` segments) is rejected here too, and trash
+/// additionally rejects `.`-leading segments so a stored path can never point
+/// back into managed directories (`.trash`, `.journal`, `.incoming`, ...).
 fn parse_relative(value: &str) -> Result<PathBuf, String> {
+    // Segment checks happen on the raw string: `Path::components()` silently
+    // normalizes away repeated separators and interior `.` segments, which
+    // would let strings the contract rejects slip through.
+    if value.trim().is_empty()
+        || value.contains('\\')
+        || value.contains('\0')
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
+    }
     let path = Path::new(value);
     if path.is_absolute() {
         return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
@@ -130,6 +147,52 @@ fn write_entry(destination: &Path, item: &TrashItem) -> Result<(), String> {
     crate::atomic_file::write(&destination.join(ENTRY_FILE), &data)
 }
 
+/// Apply one journal entry. Errors are reported to the caller so a single
+/// corrupt or planted journal can neither abort the whole reconcile pass nor
+/// write outside the managed trash root.
+fn reconcile_journal(root: &Path, trash_root: &Path, journal: &TrashJournal) -> Result<(), String> {
+    // A journal's trash_id is used to build a filesystem path; an unvalidated
+    // value like ".." would let a planted journal write outside `.trash`.
+    validate_id(&journal.trash_id)?;
+    // The embedded item must satisfy the same invariants `load()` enforces —
+    // otherwise reconcile would write a trash-entry.json that can never load.
+    if journal.item.schema_version != 1
+        || journal.item.trash_id != journal.trash_id
+        || journal.item.trash_relative_path != format!(".trash/{}", journal.trash_id)
+    {
+        return Err("INVALID_TRASH_JOURNAL".to_string());
+    }
+    let item_root = trash_root.join(&journal.trash_id);
+    match journal.operation.as_str() {
+        "move" => {
+            let original = parse_relative(&journal.item.original_relative_path)?;
+            if item_root.is_dir() {
+                write_entry(&item_root, &journal.item)?;
+                remove_journal(root, &journal.trash_id);
+            } else if root.join(original).exists() {
+                remove_journal(root, &journal.trash_id);
+            }
+        }
+        "restore" => {
+            let destination = root.join(parse_relative(&journal.item.original_relative_path)?);
+            if destination.exists() {
+                remove_journal(root, &journal.trash_id);
+            } else if item_root.is_dir() {
+                let entry_path = item_root.join(ENTRY_FILE);
+                if !entry_path.exists() {
+                    write_entry(&item_root, &journal.item)?;
+                }
+                remove_journal(root, &journal.trash_id);
+            }
+        }
+        "permanent_delete" if !item_root.exists() => {
+            remove_journal(root, &journal.trash_id);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub fn reconcile(root: &Path) -> Result<(), String> {
     let trash_root = root.join(".trash");
     if !trash_root.exists() {
@@ -137,43 +200,42 @@ pub fn reconcile(root: &Path) -> Result<(), String> {
     }
     let journal_root = journal_root(root)?;
     for entry in fs::read_dir(&journal_root).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        if !entry.file_type().map_err(|error| error.to_string())?.is_file() {
-            continue;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                eprintln!("trash reconcile: cannot read a journal dir entry: {error}");
+                continue;
+            }
+        };
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_file() => {}
+            Ok(_) => continue,
+            Err(error) => {
+                eprintln!(
+                    "trash reconcile: cannot inspect {}: {error}",
+                    entry.path().display()
+                );
+                continue;
+            }
         }
         let journal: TrashJournal = match fs::read_to_string(entry.path())
             .ok()
             .and_then(|raw| serde_json::from_str::<TrashJournal>(&raw).ok())
         {
             Some(value) if value.schema_version == 1 => value,
-            _ => continue,
+            _ => {
+                eprintln!(
+                    "trash reconcile: skipping unreadable journal {}",
+                    entry.path().display()
+                );
+                continue;
+            }
         };
-        let item_root = trash_root.join(&journal.trash_id);
-        match journal.operation.as_str() {
-            "move" => {
-                if item_root.is_dir() {
-                    write_entry(&item_root, &journal.item)?;
-                    remove_journal(root, &journal.trash_id);
-                } else if root.join(parse_relative(&journal.item.original_relative_path)?).exists() {
-                    remove_journal(root, &journal.trash_id);
-                }
-            }
-            "restore" => {
-                let destination = root.join(parse_relative(&journal.item.original_relative_path)?);
-                if destination.exists() {
-                    remove_journal(root, &journal.trash_id);
-                } else if item_root.is_dir() {
-                    let entry_path = item_root.join(ENTRY_FILE);
-                    if !entry_path.exists() {
-                        write_entry(&item_root, &journal.item)?;
-                    }
-                    remove_journal(root, &journal.trash_id);
-                }
-            }
-            "permanent_delete" if !item_root.exists() => {
-                remove_journal(root, &journal.trash_id);
-            }
-            _ => {}
+        if let Err(error) = reconcile_journal(root, &trash_root, &journal) {
+            eprintln!(
+                "trash reconcile: skipping journal {}: {error}",
+                entry.path().display()
+            );
         }
     }
     Ok(())

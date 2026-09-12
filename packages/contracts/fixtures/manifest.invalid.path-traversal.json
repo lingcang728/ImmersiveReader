@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "bookId": "fixture",
+  "title": "穿越路径",
+  "source": "manual",
+  "generatedAt": "2026-07-10T00:00:00.000Z",
+  "updatedAt": "2026-07-10T00:00:00.000Z",
+  "chapters": [
+    {
+      "id": "chapter:1",
+      "path": "../secret.md",
+      "title": "第一篇",
+      "voteCount": 0,
+      "wordCount": 1
+    }
+  ]
+}
