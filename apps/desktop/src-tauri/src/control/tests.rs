@@ -1,4 +1,4 @@
-use super::{CommandClaim, ControlDb};
+use super::{CommandClaim, ControlDb, CONTROL_SCHEMA_VERSION};
 use crate::tasks::{
     LifecycleState, ProgressMode, RequiredAction, TaskErrorCode, TaskEvent, TaskKind, TaskOutcome,
     TaskProgress, TaskSnapshot,
@@ -107,7 +107,6 @@ fn control_database_creates_all_v3_control_tables() {
         "task_snapshots",
         "task_events",
         "command_results",
-        "cache_leases",
         "engine_instances",
         "publish_transaction_index",
         "migration_runs",
@@ -115,6 +114,12 @@ fn control_database_creates_all_v3_control_tables() {
     ] {
         assert!(tables.contains(&expected.to_string()), "missing {expected}");
     }
+    // P3-24: schema v2 drops `cache_leases` — it was created but never
+    // written or read; the live lease store is per-task `recovery.json`.
+    assert!(
+        !tables.contains(&"cache_leases".to_string()),
+        "dead cache_leases table must be dropped"
+    );
     drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
@@ -374,8 +379,7 @@ fn task_event_rejects_sequence_gaps_and_old_revisions() {
     ));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("test root must exist");
-    let database =
-        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
     database
         .persist_task_event(&task_event(1, 1))
         .expect("first event must persist");
@@ -1054,8 +1058,7 @@ fn recover_interrupted_tasks_marks_workerless_active_tasks() {
     ));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("test root must exist");
-    let database =
-        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
 
     // Running task with no live worker — the classic post-quit state.
     let mut orphaned = task_event(1, 1);
@@ -1179,8 +1182,7 @@ fn reap_stale_workers_marks_silent_running_tasks() {
     fs::create_dir_all(&root).expect("test root must exist");
     let work_root = root.join("Tasks");
     fs::create_dir_all(&work_root).expect("work root must exist");
-    let database =
-        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
     let stale_after = Duration::from_secs(300);
 
     // Dead worker: stale DB heartbeat, no state file.
@@ -1437,7 +1439,9 @@ fn open_skips_schema_bootstrap_when_version_is_current() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("user_version must read");
-    assert_eq!(version, 1);
+    // P3-25: the stamp comes from CONTROL_SCHEMA_VERSION, not a hardcoded
+    // literal — bumping the const must propagate to newly written versions.
+    assert_eq!(version, CONTROL_SCHEMA_VERSION);
     drop(reopened);
 
     // Rewinding the version re-runs the batch once (upgrade path).
@@ -1475,5 +1479,602 @@ fn open_skips_schema_bootstrap_when_version_is_current() {
         .expect("tables must list")
         .contains(&"command_results".to_string()));
     drop(healed);
+
+    // P3-25: a database stamped by a NEWER build must never be downgraded —
+    // the batch is gated on `version < CONTROL_SCHEMA_VERSION`, not `!=`.
+    {
+        let newer = ControlDb::open(&path).expect("control database must reopen");
+        newer
+            .connection
+            .execute_batch("PRAGMA user_version = 99")
+            .expect("user_version must set");
+    }
+    let respected = ControlDb::open(&path).expect("control database must reopen");
+    assert!(
+        !respected.schema_bootstrap_ran(),
+        "future version must skip the schema batch"
+    );
+    let version: i64 = respected
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("user_version must read");
+    assert_eq!(
+        version, 99,
+        "written version must be respected, not stamped back"
+    );
+    drop(respected);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P3-24/P3-25: a v1 database carrying the never-written `cache_leases`
+/// table upgrades once — the batch drops it and stamps the new version.
+#[test]
+fn schema_v2_upgrade_drops_dead_cache_leases() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-schema-v2-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    {
+        let database = ControlDb::open(&path).expect("control database must open");
+        // Recreate what a v1 database looked like: dead table present,
+        // version stamped 1.
+        database
+            .connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS cache_leases (
+                  task_id TEXT PRIMARY KEY NOT NULL,
+                  cache_relative_path TEXT NOT NULL,
+                  reason TEXT NOT NULL,
+                  bytes INTEGER NOT NULL,
+                  held INTEGER NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 1;",
+            )
+            .expect("v1 fixture must write");
+    }
+    let upgraded = ControlDb::open(&path).expect("control database must reopen");
+    assert!(
+        upgraded.schema_bootstrap_ran(),
+        "v1 database must run the v2 upgrade batch"
+    );
+    let tables = upgraded.table_names().expect("tables must list");
+    assert!(
+        !tables.contains(&"cache_leases".to_string()),
+        "v2 upgrade must drop dead cache_leases"
+    );
+    let version: i64 = upgraded
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("user_version must read");
+    assert_eq!(version, CONTROL_SCHEMA_VERSION);
+    drop(upgraded);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+const THIRTY_DAYS_SECS: u64 = 30 * 24 * 60 * 60;
+
+fn table_count(database: &ControlDb, table: &str) -> i64 {
+    database
+        .connection
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .expect("row count must load")
+}
+
+fn row_exists(database: &ControlDb, table: &str, key_column: &str, key: &str) -> bool {
+    database
+        .connection
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {key_column} = ?1)"),
+            [key],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("existence must load")
+        == 1
+}
+
+fn old_stamp(index: u32) -> String {
+    format!("2020-01-01T00:00:{index:02}Z")
+}
+
+/// P3-25: settled command rows past the retention window are purged while
+/// in-progress claims, recent rows and the newest `keep_latest_n` settled
+/// rows always survive.
+#[test]
+fn purge_completed_commands_keeps_in_progress_recent_and_latest_n() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-purge-commands-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
+
+    for index in 0..5_u32 {
+        let request_id = format!("old-{index}");
+        assert!(matches!(
+            database
+                .claim_command(&request_id, "command", "input")
+                .expect("claim must succeed"),
+            CommandClaim::New
+        ));
+        database
+            .complete_command(&request_id, "{}", None, None)
+            .expect("complete must succeed");
+        database
+            .connection
+            .execute(
+                "UPDATE command_results SET completed_at = ?2 WHERE request_id = ?1",
+                rusqlite::params![request_id, old_stamp(index)],
+            )
+            .expect("age stamp must update");
+    }
+    // One recent settled row and one aged in-progress claim — both survive:
+    // the former is inside the window, the latter is owned by
+    // abandoned-claim reclamation, not retention.
+    database
+        .claim_command("recent", "command", "input")
+        .expect("claim must succeed");
+    database
+        .complete_command("recent", "{}", None, None)
+        .expect("complete must succeed");
+    database
+        .claim_command("live", "command", "input")
+        .expect("claim must succeed");
+    database
+        .connection
+        .execute(
+            "UPDATE command_results SET created_at = ?2 WHERE request_id = ?1",
+            rusqlite::params!["live", old_stamp(0)],
+        )
+        .expect("age stamp must update");
+
+    // Settled rows newest-first: recent, old-4, old-3, … — keeping the
+    // latest 2 protects {recent, old-4}; the other four old rows go.
+    assert_eq!(
+        database
+            .purge_completed_commands(THIRTY_DAYS_SECS, 2)
+            .expect("purge must run"),
+        4
+    );
+    assert_eq!(table_count(&database, "command_results"), 3);
+    for kept in ["recent", "old-4", "live"] {
+        assert!(
+            row_exists(&database, "command_results", "request_id", kept),
+            "{kept} must survive retention"
+        );
+    }
+    for purged in ["old-0", "old-1", "old-2", "old-3"] {
+        assert!(
+            !row_exists(&database, "command_results", "request_id", purged),
+            "{purged} must be purged"
+        );
+    }
+
+    // A zero window with zero keep deletes every settled row; the
+    // in-progress claim is still untouchable.
+    assert_eq!(
+        database
+            .purge_completed_commands(0, 0)
+            .expect("purge must run"),
+        2
+    );
+    assert_eq!(table_count(&database, "command_results"), 1);
+    assert!(row_exists(
+        &database,
+        "command_results",
+        "request_id",
+        "live"
+    ));
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P3-25: finished migration runs age out; a `running` row (live or crashed
+/// migration) is never purged no matter how old.
+#[test]
+fn purge_finished_migration_runs_keeps_running_rows() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-purge-migrations-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
+
+    for index in 0..3_u32 {
+        let migration_id = format!("m-{index}");
+        database
+            .begin_migration_run(&migration_id, "preview", "settings")
+            .expect("run must start");
+        database
+            .complete_migration_run(&migration_id, "success", None, "{}")
+            .expect("run must complete");
+        database
+            .connection
+            .execute(
+                "UPDATE migration_runs SET created_at = ?2, completed_at = ?2 WHERE migration_id = ?1",
+                rusqlite::params![migration_id, old_stamp(index)],
+            )
+            .expect("age stamp must update");
+    }
+    database
+        .begin_migration_run("m-running", "preview", "settings")
+        .expect("run must start");
+    database
+        .connection
+        .execute(
+            "UPDATE migration_runs SET created_at = ?2 WHERE migration_id = ?1",
+            rusqlite::params!["m-running", old_stamp(0)],
+        )
+        .expect("age stamp must update");
+    database
+        .begin_migration_run("m-recent", "preview", "settings")
+        .expect("run must start");
+    database
+        .complete_migration_run("m-recent", "success", None, "{}")
+        .expect("run must complete");
+
+    // Settled newest-first: m-recent, m-2, m-1, m-0 — keep 2.
+    assert_eq!(
+        database
+            .purge_finished_migration_runs(THIRTY_DAYS_SECS, 2)
+            .expect("purge must run"),
+        2
+    );
+    assert_eq!(table_count(&database, "migration_runs"), 3);
+    for kept in ["m-recent", "m-2", "m-running"] {
+        assert!(
+            row_exists(&database, "migration_runs", "migration_id", kept),
+            "{kept} must survive retention"
+        );
+    }
+    for purged in ["m-0", "m-1"] {
+        assert!(
+            !row_exists(&database, "migration_runs", "migration_id", purged),
+            "{purged} must be purged"
+        );
+    }
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P3-24 + P3-25: `publish_transaction_index` has a real read path
+/// (in-flight rows for crash recovery), and retention purges only the
+/// settled phases — an aged `prepared` row is never deleted.
+#[test]
+fn purge_settled_publish_transactions_keeps_in_flight_rows() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-purge-publish-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
+
+    for index in 0..3_u32 {
+        let transaction_id = format!("txn-{index}");
+        database
+            .record_publish_transaction(
+                &transaction_id,
+                &format!("task-{index}"),
+                &format!("book-{index}"),
+                "committed",
+                &format!(".transactions/{transaction_id}.json"),
+            )
+            .expect("publish index must record");
+        database
+            .connection
+            .execute(
+                "UPDATE publish_transaction_index SET updated_at = ?2 WHERE transaction_id = ?1",
+                rusqlite::params![transaction_id, old_stamp(index)],
+            )
+            .expect("age stamp must update");
+    }
+    database
+        .record_publish_transaction(
+            "txn-live",
+            "task-live",
+            "book-live",
+            "prepared",
+            ".transactions/txn-live.json",
+        )
+        .expect("publish index must record");
+    database
+        .connection
+        .execute(
+            "UPDATE publish_transaction_index SET updated_at = ?2 WHERE transaction_id = ?1",
+            rusqlite::params!["txn-live", old_stamp(0)],
+        )
+        .expect("age stamp must update");
+    database
+        .record_publish_transaction(
+            "txn-recent",
+            "task-recent",
+            "book-recent",
+            "committed",
+            ".transactions/txn-recent.json",
+        )
+        .expect("publish index must record");
+
+    // P3-24 read path: only the in-flight row is unfinished.
+    let unfinished = database
+        .unfinished_publish_transactions()
+        .expect("unfinished publishes must load");
+    assert_eq!(unfinished.len(), 1);
+    assert_eq!(unfinished[0].transaction_id, "txn-live");
+    assert_eq!(unfinished[0].phase, "prepared");
+    assert_eq!(
+        unfinished[0].journal_relative_path,
+        ".transactions/txn-live.json"
+    );
+
+    // Settled newest-first: txn-recent, txn-2, txn-1, txn-0 — keep 2.
+    assert_eq!(
+        database
+            .purge_settled_publish_transactions(THIRTY_DAYS_SECS, 2)
+            .expect("purge must run"),
+        2
+    );
+    assert_eq!(table_count(&database, "publish_transaction_index"), 3);
+    for kept in ["txn-recent", "txn-2", "txn-live"] {
+        assert!(
+            row_exists(
+                &database,
+                "publish_transaction_index",
+                "transaction_id",
+                kept
+            ),
+            "{kept} must survive retention"
+        );
+    }
+    for purged in ["txn-0", "txn-1"] {
+        assert!(
+            !row_exists(
+                &database,
+                "publish_transaction_index",
+                "transaction_id",
+                purged
+            ),
+            "{purged} must be purged"
+        );
+    }
+    // The in-flight row still reads back after retention.
+    assert_eq!(
+        database
+            .unfinished_publish_transactions()
+            .expect("unfinished publishes must reload")
+            .len(),
+        1
+    );
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P3-25: completed cancel-discard intents age out; `pending` rows are the
+/// durable intent retried after restart and are never purged.
+#[test]
+fn purge_completed_cancel_intents_keeps_pending_rows() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-purge-intents-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
+
+    for index in 0..3_u32 {
+        database
+            .connection
+            .execute(
+                "INSERT INTO cancel_discard_intents(task_id, state, created_at, updated_at) VALUES (?1, 'completed', ?2, ?2)",
+                rusqlite::params![format!("t-comp-{index}"), old_stamp(index)],
+            )
+            .expect("completed intent must insert");
+    }
+    for (task_id, state) in [("t-pending", "pending"), ("t-recent", "completed")] {
+        database
+            .connection
+            .execute(
+                "INSERT INTO cancel_discard_intents(task_id, state, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+                rusqlite::params![task_id, state, chrono::Utc::now().to_rfc3339()],
+            )
+            .expect("intent must insert");
+    }
+    database
+        .connection
+        .execute(
+            "UPDATE cancel_discard_intents SET created_at = ?2, updated_at = ?2 WHERE task_id = ?1",
+            rusqlite::params!["t-pending", old_stamp(0)],
+        )
+        .expect("age stamp must update");
+
+    // Settled newest-first: t-recent, t-comp-2, t-comp-1, t-comp-0 — keep 2.
+    assert_eq!(
+        database
+            .purge_completed_cancel_intents(THIRTY_DAYS_SECS, 2)
+            .expect("purge must run"),
+        2
+    );
+    assert_eq!(table_count(&database, "cancel_discard_intents"), 3);
+    for kept in ["t-recent", "t-comp-2", "t-pending"] {
+        assert!(
+            row_exists(&database, "cancel_discard_intents", "task_id", kept),
+            "{kept} must survive retention"
+        );
+    }
+    for purged in ["t-comp-0", "t-comp-1"] {
+        assert!(
+            !row_exists(&database, "cancel_discard_intents", "task_id", purged),
+            "{purged} must be purged"
+        );
+    }
+    // The aged pending intent is still what startup reconciliation sees.
+    assert_eq!(
+        database
+            .pending_cancel_discard()
+            .expect("pending intents must load"),
+        vec!["t-pending".to_string()]
+    );
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P3-25: `run_maintenance` applies the settled-row retention policy to all
+/// four append-only tables at once, keeps every live row, and is idempotent.
+#[test]
+fn run_maintenance_purges_settled_rows_and_keeps_live_ones() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-maintenance-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let old = old_stamp(0);
+
+    // 105 settled rows per table → SETTLED_KEEP_LATEST (100) survive.
+    for index in 0..105_u32 {
+        database
+            .connection
+            .execute(
+                "INSERT INTO command_results(request_id, command_name, input_hash, created_at, completed_at) VALUES (?1, 'command', 'input', ?2, ?2)",
+                rusqlite::params![format!("settled-cmd-{index}"), old],
+            )
+            .expect("settled command must insert");
+        database
+            .connection
+            .execute(
+                "INSERT INTO migration_runs(migration_id, preview_id, scope, status, created_at, completed_at) VALUES (?1, 'preview', 'settings', 'success', ?2, ?2)",
+                rusqlite::params![format!("settled-mig-{index}"), old],
+            )
+            .expect("settled migration must insert");
+        database
+            .connection
+            .execute(
+                "INSERT INTO publish_transaction_index(transaction_id, task_id, book_id, phase, journal_relative_path, updated_at) VALUES (?1, 'task', 'book', 'committed', '.transactions/j.json', ?2)",
+                rusqlite::params![format!("settled-txn-{index}"), old],
+            )
+            .expect("settled publish must insert");
+        database
+            .connection
+            .execute(
+                "INSERT INTO cancel_discard_intents(task_id, state, created_at, updated_at) VALUES (?1, 'completed', ?2, ?2)",
+                rusqlite::params![format!("settled-intent-{index}"), old],
+            )
+            .expect("settled intent must insert");
+    }
+    // One live row per table — aged but unsettled, so retention must keep it.
+    database
+        .connection
+        .execute(
+            "INSERT INTO command_results(request_id, command_name, input_hash, created_at) VALUES ('live-cmd', 'command', 'input', ?1)",
+            rusqlite::params![old],
+        )
+        .expect("live command must insert");
+    database
+        .connection
+        .execute(
+            "INSERT INTO migration_runs(migration_id, preview_id, scope, status, created_at) VALUES ('live-mig', 'preview', 'settings', 'running', ?1)",
+            rusqlite::params![old],
+        )
+        .expect("running migration must insert");
+    database
+        .connection
+        .execute(
+            "INSERT INTO publish_transaction_index(transaction_id, task_id, book_id, phase, journal_relative_path, updated_at) VALUES ('live-txn', 'task', 'book', 'prepared', '.transactions/live.json', ?1)",
+            rusqlite::params![old],
+        )
+        .expect("in-flight publish must insert");
+    database
+        .connection
+        .execute(
+            "INSERT INTO cancel_discard_intents(task_id, state, created_at, updated_at) VALUES ('live-intent', 'pending', ?1, ?1)",
+            rusqlite::params![old],
+        )
+        .expect("pending intent must insert");
+
+    let report = database.run_maintenance().expect("maintenance must run");
+    assert_eq!(report.purged_commands, 5);
+    assert_eq!(report.purged_migration_runs, 5);
+    assert_eq!(report.purged_publish_transactions, 5);
+    assert_eq!(report.purged_cancel_intents, 5);
+    assert!(
+        !report.vacuumed,
+        "tiny freed page count must stay under the VACUUM gate"
+    );
+    for (table, key, live) in [
+        ("command_results", "request_id", "live-cmd"),
+        ("migration_runs", "migration_id", "live-mig"),
+        ("publish_transaction_index", "transaction_id", "live-txn"),
+        ("cancel_discard_intents", "task_id", "live-intent"),
+    ] {
+        assert_eq!(table_count(&database, table), 101, "{table} count");
+        assert!(
+            row_exists(&database, table, key, live),
+            "{live} must survive"
+        );
+    }
+
+    // Idempotent: a second pass finds nothing left to do.
+    let second = database.run_maintenance().expect("maintenance must re-run");
+    assert_eq!(second.purged_commands, 0);
+    assert_eq!(second.purged_migration_runs, 0);
+    assert_eq!(second.purged_publish_transactions, 0);
+    assert_eq!(second.purged_cancel_intents, 0);
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P3-25: when a purge frees a meaningful share of pages, `run_maintenance`
+/// follows up with a VACUUM so the file actually shrinks.
+#[test]
+fn run_maintenance_vacuums_when_freelist_is_large() {
+    let root =
+        std::env::temp_dir().join(format!("immersive-control-vacuum-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
+
+    // ~160 settled rows carrying ~4 KiB results ≈ 160+ pages — comfortably
+    // past the 32-page / 20%-free VACUUM gate once deleted.
+    let blob = "x".repeat(4096);
+    for index in 0..160_u32 {
+        database
+            .connection
+            .execute(
+                "INSERT INTO command_results(request_id, command_name, input_hash, created_at, completed_at, result_json) VALUES (?1, 'command', 'input', ?2, ?2, ?3)",
+                rusqlite::params![format!("bulk-{index}"), old_stamp(0), blob],
+            )
+            .expect("bulk command must insert");
+    }
+    assert_eq!(
+        database
+            .purge_completed_commands(0, 0)
+            .expect("settled rows must purge"),
+        160
+    );
+    let freelist_before: i64 = database
+        .connection
+        .pragma_query_value(None, "freelist_count", |row| row.get(0))
+        .expect("freelist must read");
+    assert!(
+        freelist_before >= 32,
+        "fixture must free enough pages to test the gate, got {freelist_before}"
+    );
+
+    let report = database.run_maintenance().expect("maintenance must run");
+    assert!(report.vacuumed, "large freelist must trigger VACUUM");
+    let freelist_after: i64 = database
+        .connection
+        .pragma_query_value(None, "freelist_count", |row| row.get(0))
+        .expect("freelist must read");
+    assert_eq!(freelist_after, 0, "VACUUM must reclaim the freelist");
+    drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

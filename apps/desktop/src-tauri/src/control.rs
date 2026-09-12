@@ -8,6 +8,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,6 +44,29 @@ pub struct MigrationRunRecord {
     pub result_json: Option<String>,
 }
 
+/// P3-24: the read-side record of `publish_transaction_index` — the
+/// DB-side index of publish journals under `Library\.transactions\`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishTransactionRecord {
+    pub transaction_id: String,
+    pub task_id: String,
+    pub book_id: String,
+    pub phase: String,
+    pub journal_relative_path: String,
+    pub updated_at: String,
+}
+
+/// P3-25: outcome of one `run_maintenance` pass — per-table settled-row
+/// purge counts plus whether a VACUUM actually reclaimed pages.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ControlMaintenanceReport {
+    pub purged_commands: u32,
+    pub purged_migration_runs: u32,
+    pub purged_publish_transactions: u32,
+    pub purged_cancel_intents: u32,
+    pub vacuumed: bool,
+}
+
 pub struct ControlDb {
     connection: Connection,
     /// P2-12: whether this `open` ran the schema bootstrap batch. Healthy
@@ -51,10 +75,38 @@ pub struct ControlDb {
     schema_bootstrap_ran: bool,
 }
 
-/// P2-12: schema bootstrap runs only while `PRAGMA user_version` is below
-/// this. Bump it whenever the DDL batch grows a new (still idempotent)
-/// statement so existing databases get upgraded once on their next open.
-const CONTROL_SCHEMA_VERSION: i64 = 1;
+/// P2-12/P3-25: schema bootstrap runs only while `PRAGMA user_version` is
+/// below this — the stored version is read first, the (idempotent) DDL batch
+/// applies only when the stored version is lower or the schema is
+/// incomplete, and the version is then stamped back up to this const. Bump
+/// it whenever the batch grows a new statement so existing databases get
+/// upgraded once on their next open. A database stamped by a *newer* build
+/// is never downgraded (`version < CONTROL_SCHEMA_VERSION`, not `!=`).
+///
+/// Version history: 1 = initial control schema. 2 = drop `cache_leases`,
+/// which was created but never written or read — the live cache-lease store
+/// is the per-task `recovery.json` under `Data\Podcast\Tasks` (`cache.rs`).
+const CONTROL_SCHEMA_VERSION: i64 = 2;
+
+/// P3-25: retention maintenance runs at most once per process — lazily from
+/// `ControlDb::open_current` (so it always runs in the app) or explicitly via
+/// `control::run_maintenance`, whichever happens first.
+static MAINTENANCE_RAN: AtomicBool = AtomicBool::new(false);
+
+/// P3-25: settled control rows are retained 30 days — long enough to replay
+/// a retried command or audit a finished migration/publish, short enough
+/// that the append-only tables cannot grow without bound.
+const SETTLED_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Regardless of age, the newest `SETTLED_KEEP_LATEST` settled rows of each
+/// table always survive — retention never empties the audit trail.
+const SETTLED_KEEP_LATEST: u32 = 100;
+
+/// VACUUM only pays when at least this many pages (~128 KiB at the default
+/// 4 KiB page size) AND more than a fifth of the file is free — below that,
+/// the full rewrite costs more startup time than it reclaims.
+const VACUUM_MIN_FREE_PAGES: i64 = 32;
+const VACUUM_MIN_FREE_RATIO_DIVISOR: i64 = 5;
 
 /// P2-9: a claim that stays `in-progress` (claimed but never completed) past
 /// this window belonged to a crashed or hung caller. Without reclamation the
@@ -72,6 +124,20 @@ fn claim_age(created_at: &str) -> Option<Duration> {
     let parsed = chrono::DateTime::parse_from_rfc3339(created_at).ok()?;
     let elapsed = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
     Some(elapsed.to_std().unwrap_or(Duration::ZERO))
+}
+
+/// P3-25: RFC3339 cutoff `older_than_secs` before now. Every persisted
+/// timestamp in the control schema is a `chrono::Utc::now().to_rfc3339()`
+/// stamp, so the lexical `<` on the TEXT column is a chronological compare.
+/// Out-of-range windows saturate at the unix epoch — they simply retain
+/// nothing beyond the `keep_latest_n` rows.
+fn retention_cutoff(older_than_secs: u64) -> String {
+    let now = chrono::Utc::now();
+    let secs = i64::try_from(older_than_secs.min(i64::MAX as u64)).unwrap_or(i64::MAX);
+    chrono::Duration::try_seconds(secs)
+        .and_then(|delta| now.checked_sub_signed(delta))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
+        .to_rfc3339()
 }
 
 fn is_retryable_initialization_lock(error: &SqliteError) -> bool {
@@ -177,10 +243,45 @@ pub fn repair_orphaned_podcast_tasks() -> Result<u32, String> {
     control.repair_orphaned_podcast_tasks_at(&locations.data_root)
 }
 
+/// P3-25: startup-adjacent control.db maintenance entry point — bounded
+/// retention for the append-only tables plus freelist-gated space
+/// reclamation (see `ControlDb::run_maintenance`). Runs at most once per
+/// process: the guard is shared with the lazy call inside
+/// `ControlDb::open_current`, which normally gets there first, so an
+/// explicit call afterwards returns `Ok(None)` without touching the disk.
+/// `Ok(Some(report))` carries the purge counts when this call did the work.
+// Wired for the startup sequence owner (lib.rs); `open_current`'s lazy call
+// is what exercises it in-process today.
+#[allow(dead_code)]
+pub(crate) fn run_maintenance() -> Result<Option<ControlMaintenanceReport>, String> {
+    if MAINTENANCE_RAN.swap(true, Ordering::SeqCst) {
+        return Ok(None);
+    }
+    match ControlDb::open_current() {
+        Ok(database) => database.run_maintenance().map(Some),
+        Err(error) => {
+            // Leave the flag clear so the next lazy `open_current` retries
+            // maintenance once the database can be opened again.
+            MAINTENANCE_RAN.store(false, Ordering::SeqCst);
+            Err(error)
+        }
+    }
+}
+
 impl ControlDb {
     pub fn open_current() -> Result<Self, String> {
         let locations = crate::storage::StorageLocations::current()?;
-        Self::open(&locations.data_root.join(r"App\control.db"))
+        let database = Self::open(&locations.data_root.join(r"App\control.db"))?;
+        // P3-25: run bounded-retention maintenance lazily, at most once per
+        // process, so it executes even when no caller invokes
+        // `control::run_maintenance` explicitly. Best-effort — a purge or
+        // vacuum failure must never block opening the database.
+        if !MAINTENANCE_RAN.swap(true, Ordering::SeqCst) {
+            if let Err(error) = database.run_maintenance() {
+                eprintln!("control.db maintenance failed: {error}");
+            }
+        }
+        Ok(database)
     }
 
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -248,14 +349,11 @@ impl ControlDb {
                   error_code TEXT,
                   resulting_revision INTEGER
                 );
-                CREATE TABLE IF NOT EXISTS cache_leases (
-                  task_id TEXT PRIMARY KEY NOT NULL,
-                  cache_relative_path TEXT NOT NULL,
-                  reason TEXT NOT NULL,
-                  bytes INTEGER NOT NULL,
-                  held INTEGER NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
+                -- P3-24/P3-25 (schema v2): `cache_leases` was created but
+                -- never written or read — the live cache-lease store is the
+                -- per-task `recovery.json` under `Data\Podcast\Tasks`
+                -- (`cache.rs`). Drop it from databases that still carry it.
+                DROP TABLE IF EXISTS cache_leases;
                 CREATE TABLE IF NOT EXISTS engine_instances (
                   engine TEXT PRIMARY KEY NOT NULL,
                   pid INTEGER,
@@ -265,6 +363,10 @@ impl ControlDb {
                   started_at TEXT,
                   updated_at TEXT NOT NULL
                 );
+                -- P3-24: DB-side index of publish journals written by
+                -- `record_publish_transaction`; the read path is
+                -- `unfinished_publish_transactions` (crash-recovery
+                -- shortlist). Settled phases are retained per P3-25.
                 CREATE TABLE IF NOT EXISTS publish_transaction_index (
                   transaction_id TEXT PRIMARY KEY NOT NULL,
                   task_id TEXT NOT NULL,
@@ -289,7 +391,6 @@ impl ControlDb {
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
-                PRAGMA user_version = 1;
                 "#;
         let mut last_lock_error = None;
         for attempt in 0..=8 {
@@ -306,6 +407,13 @@ impl ControlDb {
                 )?;
                 if version < CONTROL_SCHEMA_VERSION || schema_missing {
                     connection.execute_batch(schema)?;
+                    // P3-25: stamp outside the DDL literal so the written
+                    // version always equals CONTROL_SCHEMA_VERSION — a
+                    // hardcoded `PRAGMA user_version = 1` inside the batch is
+                    // how "old versions write 1 back" happens.
+                    connection.execute_batch(&format!(
+                        "PRAGMA user_version = {CONTROL_SCHEMA_VERSION}"
+                    ))?;
                     return Ok(true);
                 }
                 Ok(false)
@@ -554,6 +662,159 @@ impl ControlDb {
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
+    }
+
+    /// P3-24: the read side of `publish_transaction_index` — publish
+    /// transactions whose recorded phase is still in-flight (anything not
+    /// `committed`/`rolled_back`). Startup crash recovery can use this as the
+    /// shortlist of journals to inspect instead of walking every
+    /// `.transactions/*.json` under the library root; the filesystem scan in
+    /// `publish::list_transactions` stays the authoritative journal list.
+    pub fn unfinished_publish_transactions(&self) -> Result<Vec<PublishTransactionRecord>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT transaction_id, task_id, book_id, phase, journal_relative_path, updated_at FROM publish_transaction_index WHERE phase NOT IN ('committed', 'rolled_back') ORDER BY updated_at DESC, transaction_id",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(PublishTransactionRecord {
+                    transaction_id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    book_id: row.get(2)?,
+                    phase: row.get(3)?,
+                    journal_relative_path: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    /// P3-25: one bounded-retention + space-reclamation pass over the
+    /// append-only control tables. Deletes settled rows older than
+    /// `SETTLED_RETENTION_SECS` from `command_results`, `migration_runs`,
+    /// `publish_transaction_index` and `cancel_discard_intents`, always
+    /// keeping the newest `SETTLED_KEEP_LATEST` settled rows per table;
+    /// in-progress claims, running migrations, in-flight publishes and
+    /// pending cancel-discard intents are never touched. A VACUUM then
+    /// reclaims pages — but only when at least `VACUUM_MIN_FREE_PAGES` are
+    /// free and the freelist exceeds a fifth of the file, so a routine
+    /// launch never pays for a full rewrite — and a TRUNCATE checkpoint
+    /// bounds the `-wal` sidecar. Idempotent; safe to run on every startup.
+    pub fn run_maintenance(&self) -> Result<ControlMaintenanceReport, String> {
+        let mut report = ControlMaintenanceReport {
+            purged_commands: self
+                .purge_completed_commands(SETTLED_RETENTION_SECS, SETTLED_KEEP_LATEST)?,
+            purged_migration_runs: self
+                .purge_finished_migration_runs(SETTLED_RETENTION_SECS, SETTLED_KEEP_LATEST)?,
+            purged_publish_transactions: self
+                .purge_settled_publish_transactions(SETTLED_RETENTION_SECS, SETTLED_KEEP_LATEST)?,
+            purged_cancel_intents: self
+                .purge_completed_cancel_intents(SETTLED_RETENTION_SECS, SETTLED_KEEP_LATEST)?,
+            vacuumed: false,
+        };
+        let freelist: i64 = self
+            .connection
+            .pragma_query_value(None, "freelist_count", |row| row.get(0))
+            .unwrap_or(0);
+        let page_count: i64 = self
+            .connection
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap_or(0);
+        if freelist >= VACUUM_MIN_FREE_PAGES
+            && freelist * VACUUM_MIN_FREE_RATIO_DIVISOR > page_count
+        {
+            // Best-effort: another connection holding a lock past
+            // busy_timeout just postpones the reclaim to the next launch.
+            report.vacuumed = self.connection.execute_batch("VACUUM").is_ok();
+        }
+        // Bound the -wal sidecar too; a busy checkpoint is skipped, not an
+        // error — the row reports (busy, log_frames, checkpointed_frames).
+        let _ = self
+            .connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional();
+        Ok(report)
+    }
+
+    /// P3-25: delete settled (`completed_at` set) command rows older than
+    /// `older_than_secs`, always keeping in-progress claims — their lifetime
+    /// is owned by abandoned-claim reclamation, not retention — and the
+    /// newest `keep_latest_n` settled rows regardless of age for
+    /// replay/audit.
+    pub fn purge_completed_commands(
+        &self,
+        older_than_secs: u64,
+        keep_latest_n: u32,
+    ) -> Result<u32, String> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM command_results WHERE completed_at IS NOT NULL AND completed_at < ?1 AND request_id NOT IN (SELECT request_id FROM command_results WHERE completed_at IS NOT NULL ORDER BY completed_at DESC, request_id DESC LIMIT ?2)",
+                params![retention_cutoff(older_than_secs), i64::from(keep_latest_n)],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(u32::try_from(deleted).unwrap_or(u32::MAX))
+    }
+
+    /// P3-25: same retention shape for `migration_runs` — a run is settled
+    /// once `complete_migration_run` stamps `completed_at`; `running` rows
+    /// (a live or crashed migration) are never purged.
+    pub fn purge_finished_migration_runs(
+        &self,
+        older_than_secs: u64,
+        keep_latest_n: u32,
+    ) -> Result<u32, String> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM migration_runs WHERE completed_at IS NOT NULL AND completed_at < ?1 AND migration_id NOT IN (SELECT migration_id FROM migration_runs WHERE completed_at IS NOT NULL ORDER BY completed_at DESC, migration_id DESC LIMIT ?2)",
+                params![retention_cutoff(older_than_secs), i64::from(keep_latest_n)],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(u32::try_from(deleted).unwrap_or(u32::MAX))
+    }
+
+    /// P3-25: same retention shape for `publish_transaction_index`, keyed on
+    /// `updated_at`. Only the known-settled phases (`committed`,
+    /// `rolled_back`) are eligible — an in-flight or unrecognised phase may
+    /// still be needed by crash recovery and is always kept.
+    pub fn purge_settled_publish_transactions(
+        &self,
+        older_than_secs: u64,
+        keep_latest_n: u32,
+    ) -> Result<u32, String> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM publish_transaction_index WHERE phase IN ('committed', 'rolled_back') AND updated_at < ?1 AND transaction_id NOT IN (SELECT transaction_id FROM publish_transaction_index WHERE phase IN ('committed', 'rolled_back') ORDER BY updated_at DESC, transaction_id DESC LIMIT ?2)",
+                params![retention_cutoff(older_than_secs), i64::from(keep_latest_n)],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(u32::try_from(deleted).unwrap_or(u32::MAX))
+    }
+
+    /// P3-25: same retention shape for `cancel_discard_intents`, keyed on
+    /// `updated_at`. `pending` rows are never purged — they are the durable
+    /// intent `reconcile_cancel_and_discard` retries after a restart.
+    pub fn purge_completed_cancel_intents(
+        &self,
+        older_than_secs: u64,
+        keep_latest_n: u32,
+    ) -> Result<u32, String> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM cancel_discard_intents WHERE state = 'completed' AND updated_at < ?1 AND task_id NOT IN (SELECT task_id FROM cancel_discard_intents WHERE state = 'completed' ORDER BY updated_at DESC, task_id DESC LIMIT ?2)",
+                params![retention_cutoff(older_than_secs), i64::from(keep_latest_n)],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(u32::try_from(deleted).unwrap_or(u32::MAX))
     }
 
     /// `&self` (not `&mut self`) so recovery paths such as
