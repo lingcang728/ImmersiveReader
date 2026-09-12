@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 mod channel;
 pub use channel::AppChannel;
@@ -33,8 +35,11 @@ pub fn app_state_dir() -> PathBuf {
             return parent.to_path_buf();
         }
     }
+    // P3-23: fail closed — never root app state at the process CWD. Same
+    // contract as `AppChannel::current`, which panics rather than silently
+    // downgrading to the production channel.
     dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .expect("Roaming AppData is unavailable")
         .join(AppChannel::current().settings_directory_name())
 }
 
@@ -96,17 +101,62 @@ pub(crate) fn load_compatible_from(path: &Path) -> Result<AppSettings, String> {
     Ok(settings)
 }
 
+/// P3-23: settings.json writes have no transactional CAS, so track the
+/// on-disk mtime this process last observed (read or wrote). `save_settings`
+/// refuses to clobber a file an external writer touched since then.
+static SETTINGS_FILE_STAMP: Mutex<Option<(PathBuf, Option<SystemTime>)>> = Mutex::new(None);
+
+fn file_stamp(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
+fn remember_file_stamp(path: &Path) {
+    if let Ok(mut stamp) = SETTINGS_FILE_STAMP.lock() {
+        *stamp = Some((path.to_path_buf(), file_stamp(path)));
+    }
+}
+
+fn stamp_unchanged(
+    recorded: &Option<(PathBuf, Option<SystemTime>)>,
+    path: &Path,
+    observed: Option<SystemTime>,
+) -> bool {
+    match recorded {
+        Some((known_path, stamp)) => known_path == path && observed == *stamp,
+        // Never observed by this process: creating a still-absent file is
+        // safe, but an existing unread file is never silently overwritten.
+        None => observed.is_none(),
+    }
+}
+
+fn check_file_stamp(path: &Path) -> Result<(), String> {
+    let observed = file_stamp(path);
+    let recorded = SETTINGS_FILE_STAMP
+        .lock()
+        .map_err(|_| "Settings state is unavailable".to_string())?
+        .clone();
+    if stamp_unchanged(&recorded, path, observed) {
+        return Ok(());
+    }
+    Err("settings.json changed on disk since it was last read; refusing to overwrite".to_string())
+}
+
 pub(crate) fn save_compatible_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
     validate(settings)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let data = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
-    crate::atomic_write_file(path, &data)
+    crate::atomic_write_file(path, &data)?;
+    remember_file_stamp(path);
+    Ok(())
 }
 
 pub fn load_settings() -> Result<AppSettings, String> {
     let path = crate::storage::StorageLocations::current()?.settings_path;
+    remember_file_stamp(&path);
     match load_status_from(&path) {
         SettingsLoadState::Active(settings) => {
             // Always keep production library at Documents/沉浸阅读/Library.
@@ -147,6 +197,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
         settings.library_root = locations.library_root.to_string_lossy().into_owned();
     }
     crate::storage::validate_library_root(Path::new(&settings.library_root), &locations)?;
+    check_file_stamp(&locations.settings_path)?;
     save_compatible_to(&locations.settings_path, &settings)
 }
 
@@ -164,11 +215,12 @@ pub fn runtime_root() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_settings, load_compatible_from, load_status_from, save_compatible_to, AppChannel,
-        SettingsLoadState,
+        default_settings, load_compatible_from, load_status_from, save_compatible_to,
+        stamp_unchanged, AppChannel, SettingsLoadState,
     };
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn detect_without_qa_run_id_is_production() {
@@ -406,6 +458,31 @@ mod tests {
             );
         }
         fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    #[test]
+    fn save_cas_rejects_files_not_matching_the_last_observation() {
+        // P3-23: the stamp comparison is pure — exercise every divergence
+        // between what this process last saw and what is on disk now.
+        let path = PathBuf::from("settings.json");
+        let t1 = SystemTime::UNIX_EPOCH;
+        let t2 = t1 + Duration::from_secs(1);
+        let observed = Some((path.clone(), Some(t1)));
+
+        assert!(stamp_unchanged(&observed, &path, Some(t1)));
+        assert!(!stamp_unchanged(&observed, &path, Some(t2))); // external write
+        assert!(!stamp_unchanged(&observed, &path, None)); // deleted
+        assert!(!stamp_unchanged(
+            &Some((PathBuf::from("other.json"), Some(t1))),
+            &path,
+            Some(t1)
+        )); // recorded for another path
+        let absent = Some((path.clone(), None));
+        assert!(stamp_unchanged(&absent, &path, None));
+        assert!(!stamp_unchanged(&absent, &path, Some(t1))); // appeared since load
+        // Never observed in this process: create is fine, clobber is not.
+        assert!(stamp_unchanged(&None, &path, None));
+        assert!(!stamp_unchanged(&None, &path, Some(t1)));
     }
 
     #[test]

@@ -10,7 +10,12 @@ pub struct SecretStatus {
     pub configured: bool,
     /// First two characters + stars; never the full key.
     pub masked_hint: Option<String>,
-    pub last_verified_at: Option<String>,
+    /// When the credential was last read out of Credential Manager — a status
+    /// read timestamp, NOT a verification against the DeepSeek API (no network
+    /// check ever runs here). The wire name stays `lastVerifiedAt` because the
+    /// frontend `SecretStatus` contract already declares it (P3-23).
+    #[serde(rename = "lastVerifiedAt")]
+    pub last_read_at: Option<String>,
 }
 
 fn mask_secret_hint(secret: &[u8]) -> Option<String> {
@@ -166,7 +171,7 @@ pub fn deepseek_status(channel: &AppChannel) -> Result<SecretStatus, String> {
     Ok(SecretStatus {
         configured,
         masked_hint,
-        last_verified_at: configured.then(|| chrono::Utc::now().to_rfc3339()),
+        last_read_at: configured.then(|| chrono::Utc::now().to_rfc3339()),
     })
 }
 
@@ -211,7 +216,7 @@ mod tests {
         let status = SecretStatus {
             configured: true,
             masked_hint: Some("sk********".to_string()),
-            last_verified_at: None,
+            last_read_at: None,
         };
         let json = serde_json::to_string(&status).expect("status must serialize");
 
@@ -220,6 +225,9 @@ mod tests {
         assert!(!json.contains("credentialBlob"));
         assert!(!json.contains("target"));
         assert!(json.contains("maskedHint"));
+        // The wire name is part of the frontend contract even though the
+        // Rust field was renamed to describe what it actually records.
+        assert!(json.contains("lastVerifiedAt"));
     }
 
     #[test]

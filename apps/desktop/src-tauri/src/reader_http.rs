@@ -25,6 +25,11 @@ const READER_DOCUMENT_CSP: &str = "default-src 'none'; script-src 'unsafe-inline
 /// policy — it also defangs scriptable payloads such as image/svg+xml when
 /// a content URL is navigated to directly instead of loaded via <img>.
 const CONTENT_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
+/// P3-20: SVG can carry script when served same-origin and navigated to as a
+/// document. On top of the strict content CSP, `sandbox` pins it into a
+/// scriptless opaque origin; <img>-embedded SVG is unaffected (a response CSP
+/// only applies to document/worker contexts).
+const SVG_CSP: &str = "sandbox; default-src 'none'; frame-ancestors 'none'";
 
 #[derive(Clone)]
 pub struct ReaderSession {
@@ -88,21 +93,33 @@ fn prune_expired_sessions(sessions: &mut HashMap<String, (ReaderSession, Instant
     sessions.retain(|_, (_, last_access)| now.duration_since(*last_access) < READER_SESSION_TTL);
 }
 
-pub fn insert_session(
+/// P3-20: insert-time sweep — a crashed webview stops heartbeating, so its
+/// orphaned session is dropped once it is past the TTL and can never pin one
+/// of the MAX_READER_SESSIONS slots forever. `now` is a parameter so the
+/// expiry boundary is unit-testable.
+fn insert_session_at(
     sessions: &Sessions,
     token: String,
     session: ReaderSession,
+    now: Instant,
 ) -> Result<(), String> {
     let mut sessions = sessions
         .write()
         .map_err(|_| "Reader session store is unavailable".to_string())?;
-    let now = Instant::now();
     prune_expired_sessions(&mut sessions, now);
     if sessions.len() >= MAX_READER_SESSIONS {
         return Err("READER_SESSION_LIMIT".to_string());
     }
     sessions.insert(token, (session, now));
     Ok(())
+}
+
+pub fn insert_session(
+    sessions: &Sessions,
+    token: String,
+    session: ReaderSession,
+) -> Result<(), String> {
+    insert_session_at(sessions, token, session, Instant::now())
 }
 
 pub fn close_session(sessions: &Sessions, session_id: &str) -> Result<bool, String> {
@@ -131,10 +148,25 @@ fn common_headers(content_type: &str, csp: &str) -> Vec<(String, String)> {
     ]
 }
 
+/// P3-20: headers for non-document routes. Everything here is only ever
+/// consumed by the same-origin reader document, so `Cross-Origin-Resource-
+/// Policy: same-origin` is cheap defense in depth — it keeps another origin
+/// from embedding book bytes (e.g. a page hot-linking a leaked session URL
+/// on the loopback port). The document route must NOT carry it: the reader
+/// iframe is embedded cross-origin from the tauri://localhost page.
+fn content_headers(content_type: &str, csp: &str) -> Vec<(String, String)> {
+    let mut headers = common_headers(content_type, csp);
+    headers.push((
+        "Cross-Origin-Resource-Policy".to_string(),
+        "same-origin".to_string(),
+    ));
+    headers
+}
+
 fn response(status: u16, body: impl Into<Vec<u8>>, content_type: &str) -> ReaderResponse {
     ReaderResponse {
         status,
-        headers: common_headers(content_type, CONTENT_CSP),
+        headers: content_headers(content_type, CONTENT_CSP),
         body: ReaderBody::Bytes(body.into()),
     }
 }
@@ -150,9 +182,14 @@ fn document_response(status: u16, body: Arc<Vec<u8>>, content_type: &str) -> Rea
 }
 
 fn file_response(file: fs::File, content_type: &str) -> ReaderResponse {
+    let csp = if content_type == "image/svg+xml" {
+        SVG_CSP
+    } else {
+        CONTENT_CSP
+    };
     ReaderResponse {
         status: 200,
-        headers: common_headers(content_type, CONTENT_CSP),
+        headers: content_headers(content_type, csp),
         body: ReaderBody::File(file),
     }
 }
@@ -337,11 +374,15 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_book_resource, merge_progress, prune_expired_sessions, ReaderSession, READER_SESSION_TTL};
+    use super::{
+        insert_session_at, is_book_resource, merge_progress, prune_expired_sessions,
+        ReaderSession, Sessions, MAX_READER_SESSIONS, READER_SESSION_TTL,
+    };
     use crate::contracts::{Manifest, ReadingProgress};
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::time::Instant;
+    use std::sync::{Arc, RwLock};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn permits_manifest_chapters_and_assets_only() {
@@ -376,6 +417,44 @@ mod tests {
         );
         prune_expired_sessions(&mut sessions, now);
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn insert_sweeps_orphaned_sessions_before_enforcing_the_cap() {
+        // P3-20: a crashed webview stops heartbeating — its session must free
+        // its slot at the TTL on the next insert instead of wedging the cap.
+        let manifest: Manifest = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/manifest.valid.json"
+        ))
+        .expect("fixture must deserialize");
+        let session = ReaderSession {
+            book_root: PathBuf::from("book"),
+            manifest,
+        };
+        let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
+        let stale = Instant::now();
+        for index in 0..MAX_READER_SESSIONS {
+            sessions
+                .write()
+                .expect("session store must lock")
+                .insert(format!("stale-{index}"), (session.clone(), stale));
+        }
+        // A full map of live sessions still rejects the insert.
+        assert!(insert_session_at(
+            &sessions,
+            "fresh".to_string(),
+            session.clone(),
+            Instant::now(),
+        )
+        .is_err());
+        // Past the TTL the orphans are swept first and the insert succeeds.
+        insert_session_at(
+            &sessions,
+            "fresh".to_string(),
+            session,
+            stale + READER_SESSION_TTL + Duration::from_secs(1),
+        )
+        .expect("expired sessions must free their slots");
     }
 
     #[test]

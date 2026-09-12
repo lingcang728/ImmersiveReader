@@ -26,6 +26,9 @@ pub struct PodcastRecovery {
     pub lease_held: bool,
     pub lease_reason: String,
     pub cache_relative_path: String,
+    // P3-24: `resumable` / `last_compatible_checkpoint` are write-only today —
+    // nothing reads them back, but they are part of the persisted
+    // recovery.json schema, so they stay for format stability.
     pub resumable: bool,
     pub last_compatible_checkpoint: Option<String>,
     pub bytes: u64,

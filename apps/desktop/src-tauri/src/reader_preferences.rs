@@ -56,6 +56,31 @@ fn preferences_path() -> PathBuf {
     crate::settings::app_state_dir().join("reader-preferences.json")
 }
 
+/// P3-23: quarantine an unreadable store to `*.corrupt-<epoch>` (the same
+/// convention as `progress.rs`/`control.rs`, with the `-N` retry suffix so a
+/// second corruption cannot collide) instead of hard-erroring every load.
+/// Fail-silent: a failed rename must not mask the parse error.
+fn quarantine_corrupt(path: &Path) {
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "reader-preferences.json".to_string());
+    for attempt in 0..10_u32 {
+        let suffix = if attempt == 0 {
+            format!("corrupt-{epoch}")
+        } else {
+            format!("corrupt-{epoch}-{attempt}")
+        };
+        if fs::rename(path, path.with_file_name(format!("{file_name}.{suffix}"))).is_ok() {
+            return;
+        }
+    }
+}
+
 pub(crate) fn load_from(path: &Path) -> Result<ReaderPreferencesLoad, String> {
     if !path.exists() {
         return Ok(ReaderPreferencesLoad {
@@ -65,9 +90,20 @@ pub(crate) fn load_from(path: &Path) -> Result<ReaderPreferencesLoad, String> {
     }
     let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw.as_str());
-    let preferences: ReaderPreferences =
-        serde_json::from_str(raw).map_err(|error| error.to_string())?;
-    validate(&preferences)?;
+    let preferences: ReaderPreferences = match serde_json::from_str(raw) {
+        Ok(preferences) => preferences,
+        Err(_) => {
+            quarantine_corrupt(path);
+            return Ok(ReaderPreferencesLoad {
+                preferences: ReaderPreferences::default(),
+                store_exists: false,
+            });
+        }
+    };
+    if let Err(error) = validate(&preferences) {
+        quarantine_corrupt(path);
+        return Err(format!("Invalid reader preferences were quarantined: {error}"));
+    }
     Ok(ReaderPreferencesLoad {
         preferences,
         store_exists: true,
@@ -150,6 +186,31 @@ mod tests {
         };
 
         assert!(save_to(&path, &preferences).is_err());
+        fs::remove_dir_all(root).expect("temporary preferences directory must be removed");
+    }
+
+    #[test]
+    fn corrupt_preferences_are_quarantined_and_fall_back_to_defaults() {
+        let root = std::env::temp_dir().join(format!(
+            "immersive-reader-preferences-corrupt-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temporary preferences directory must exist");
+        let path = root.join("reader-preferences.json");
+        fs::write(&path, "not json").expect("corrupt fixture must write");
+
+        let loaded = load_from(&path).expect("corrupt store must not hard-error");
+
+        assert!(!loaded.store_exists);
+        assert_eq!(loaded.preferences, ReaderPreferences::default());
+        assert!(!path.exists());
+        let quarantined = fs::read_dir(&root)
+            .expect("temp directory must list")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+            .count();
+        assert_eq!(quarantined, 1);
         fs::remove_dir_all(root).expect("temporary preferences directory must be removed");
     }
 }

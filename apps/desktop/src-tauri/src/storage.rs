@@ -1,5 +1,6 @@
 use crate::settings::AppChannel;
 use serde::Serialize;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 mod path_guard;
@@ -117,10 +118,56 @@ impl StorageLocations {
     }
 }
 
+/// P3-23: `Logs\` is created on startup but nothing ever wrote to it, so
+/// release builds have no diagnostics once `eprintln!` goes nowhere. This is
+/// the smallest fail-silent sink: append one `[timestamp] [component] msg`
+/// line to `Logs\app.log`, rotating to a single `app.log.1` generation past
+/// the cap — the same pattern as the zhihu-packer logger. Any failure is
+/// swallowed: logging must never break the operation it describes.
+const APP_LOG_LIMIT: u64 = 512 * 1024;
+
+// Wired by design — call sites land in lib.rs (setup/eprintln bridge).
+#[allow(dead_code)]
+pub(crate) fn app_log(component: &str, message: &str) {
+    let Ok(locations) = StorageLocations::current() else {
+        return;
+    };
+    app_log_at(&locations.logs_root, component, message);
+}
+
+#[allow(dead_code)]
+fn app_log_at(logs_root: &Path, component: &str, message: &str) {
+    use std::io::Write;
+
+    let run = || -> Result<(), std::io::Error> {
+        fs::create_dir_all(logs_root)?;
+        let path = logs_root.join("app.log");
+        if fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) > APP_LOG_LIMIT {
+            let rotated = logs_root.join("app.log.1");
+            let _ = fs::remove_file(&rotated);
+            fs::rename(&path, &rotated)?;
+        }
+        // Keep one entry per line — callers may pass text with embedded
+        // newlines (error chains, stderr captures).
+        let flattened = message.replace(['\r', '\n'], " ");
+        let line = format!(
+            "[{}] [{component}] {flattened}\n",
+            chrono::Utc::now().to_rfc3339()
+        );
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(line.as_bytes()))
+    };
+    let _ = run();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{validate_library_root, StorageLocations};
     use crate::settings::AppChannel;
+    use std::fs;
     use std::path::Path;
 
     #[test]
@@ -194,6 +241,28 @@ mod tests {
                 unsafe_path.display()
             );
         }
+    }
+
+    #[test]
+    fn app_log_appends_and_rotates_one_generation() {
+        let root = std::env::temp_dir().join(format!("immersive-app-log-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+
+        super::app_log_at(&root, "test", "first line");
+        let log = root.join("app.log");
+        let text = fs::read_to_string(&log).expect("log line must be written");
+        assert!(text.contains("[test] first line"));
+
+        // Past the cap the file rotates to a single app.log.1 generation.
+        fs::write(&log, vec![b'x'; (super::APP_LOG_LIMIT + 1) as usize])
+            .expect("oversized log must write");
+        super::app_log_at(&root, "test", "after rotation");
+        assert!(root.join("app.log.1").exists());
+        let text = fs::read_to_string(&log).expect("fresh log must be written");
+        assert!(text.contains("after rotation"));
+        assert!(text.len() < super::APP_LOG_LIMIT as usize);
+
+        fs::remove_dir_all(root).expect("temp directory must be removed");
     }
 
     #[test]
