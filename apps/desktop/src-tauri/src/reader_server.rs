@@ -334,7 +334,7 @@ fn write_response(
     let body_length = response
         .body
         .len()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "body length unavailable"))?;
+        .ok_or_else(|| io::Error::other("body length unavailable"))?;
     let mut head = String::with_capacity(256);
     head.push_str(&format!(
         "HTTP/1.1 {} {}\r\n",

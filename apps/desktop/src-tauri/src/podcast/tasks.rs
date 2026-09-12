@@ -339,7 +339,7 @@ pub fn add_podcast_files_at(
     }
     let input_hash = request_hash(request)?;
     match control.claim_command(request.request_id, COMMAND_NAME, &input_hash)? {
-        CommandClaim::Existing(record) => return replay(record),
+        CommandClaim::Existing(record) => return replay(*record),
         CommandClaim::New => {}
     }
     let result = (|| {

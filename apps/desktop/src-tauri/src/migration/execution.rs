@@ -234,7 +234,7 @@ pub fn execute_settings_migration(
 ) -> Result<MigrationExecutionResult, String> {
     let control = ControlDb::open(&target.data_root.join(r"App\control.db"))?;
     match control.claim_command(request_id, COMMAND_NAME, &command_input_hash(preview_id))? {
-        CommandClaim::Existing(record) => return replay(record),
+        CommandClaim::Existing(record) => return replay(*record),
         CommandClaim::New => {}
     }
 

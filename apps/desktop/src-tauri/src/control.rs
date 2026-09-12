@@ -29,7 +29,7 @@ pub struct CommandRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandClaim {
     New,
-    Existing(CommandRecord),
+    Existing(Box<CommandRecord>),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -414,7 +414,7 @@ impl ControlDb {
             return Ok(CommandClaim::New);
         }
         transaction.commit().map_err(|error| error.to_string())?;
-        Ok(CommandClaim::Existing(record))
+        Ok(CommandClaim::Existing(Box::new(record)))
     }
 
     pub fn complete_command(

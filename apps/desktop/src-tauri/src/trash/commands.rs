@@ -34,7 +34,7 @@ fn execute<T: DeserializeOwned + Serialize>(
         return Err("INVALID_ARGUMENT".to_string());
     }
     match control.claim_command(request_id, command_name, hash)? {
-        CommandClaim::Existing(record) => return replay(record),
+        CommandClaim::Existing(record) => return replay(*record),
         CommandClaim::New => {}
     }
     match operation() {
