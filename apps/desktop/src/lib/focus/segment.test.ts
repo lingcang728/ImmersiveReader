@@ -51,4 +51,19 @@ describe('splitSentences', () => {
 		const ranges = splitSentences('   ');
 		expect(ranges).toEqual([]);
 	});
+
+	it('reuses the shared segmenter without leaking state between calls', () => {
+		// splitSentences now shares one module-level Intl.Segmenter — back-to-back
+		// calls on different texts must each return ranges anchored at their own
+		// string, never stale offsets from the previous call.
+		const first = '第一句。第二句。';
+		const second = 'Another one. And another!';
+		const a = splitSentences(first);
+		const b = splitSentences(second);
+		const again = splitSentences(first);
+		expect(a).toEqual(again);
+		expect(a[0]).toEqual({ start: 0, end: 4 });
+		expect(b[0].start).toBe(0);
+		expect(b[b.length - 1].end).toBe(second.length);
+	});
 });

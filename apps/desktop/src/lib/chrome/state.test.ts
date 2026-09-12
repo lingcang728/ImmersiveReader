@@ -178,6 +178,52 @@ describe('chrome state machine', () => {
 		}
 	});
 
+	it('returns the same state reference for steady-state no-ops', () => {
+		// Hidden markdown surface: further reading-activity must not allocate —
+		// scroll bursts dispatch this event once per frame.
+		let state = createChromeState('markdown');
+		state = apply(state, [readingActivity(), readingActivity()]);
+		expect(state.chromeVisible).toBe(false);
+		const hidden = state;
+		state = apply(state, [readingActivity(), readingActivity(), readingActivity()]);
+		expect(state).toBe(hidden);
+	});
+
+	it('returns the same state reference for repeated no-op events', () => {
+		let state = createChromeState('markdown');
+
+		// apply-hide on an already-hidden surface is a no-op.
+		state = apply(state, [readingActivity(), readingActivity()]);
+		const hidden = state;
+		state = apply(state, [applyHide()]);
+		expect(state).toBe(hidden);
+
+		// chrome-focus while already focused is a no-op.
+		state = apply(state, [topEdgeEnter(), chromeFocus(), chromeFocus()]);
+		expect(state.focusedInChrome).toBe(true);
+		const focused = state;
+		state = apply(state, [chromeFocus()]);
+		expect(state).toBe(focused);
+
+		// chrome-leave while hidden / focused is a no-op.
+		state = apply(state, [chromeLeave()]);
+		expect(state).toBe(focused);
+
+		// Non-immersive surfaces ignore immersive-only events entirely.
+		state = apply(state, [enterSurface('library')]);
+		const library = apply(state, [readingActivity()]);
+		const settled = apply(library, [readingActivity()]);
+		expect(apply(settled, [readingActivity(), topEdgeEnter()])).toBe(settled);
+	});
+
+	it('still emits one-shots when a real transition happens', () => {
+		let state = createChromeState('markdown');
+		// visible → hidden still carries the cancel one-shot for pending timers.
+		state = apply(state, [readingActivity()]);
+		expect(state.shouldCancelHide).toBe(true);
+		expect(state.chromeVisible).toBe(false);
+	});
+
 	it('deriveChromeSurface prefers flow over focus over markdown', () => {
 		expect(
 			deriveChromeSurface({ flowActive: true, focusMode: true, fileOpen: true })

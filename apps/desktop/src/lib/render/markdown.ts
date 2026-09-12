@@ -434,10 +434,20 @@ function rehypeNormalizePodcastBilingual() {
 			return -1;
 		};
 
+		// Track the last element pushed instead of rescanning `normalized` for
+		// every Latin blockquote — the scan made each lookup O(n) → O(n²) total.
+		let lastNormalizedElement: any = null;
+		const pushNormalized = (...nodes: any[]) => {
+			for (const pushed of nodes) {
+				normalized.push(pushed);
+				if (isElement(pushed)) lastNormalizedElement = pushed;
+			}
+		};
+
 		for (let i = 0; i < children.length; i += 1) {
 			const node = children[i];
 			if (isWhitespace(node)) {
-				normalized.push(node);
+				pushNormalized(node);
 				continue;
 			}
 			if (isElement(node) && node.tagName === 'p') {
@@ -455,8 +465,8 @@ function rehypeNormalizePodcastBilingual() {
 						};
 						pairId(following, original);
 						// Preserve interstitial whitespace between the pair.
-						for (let w = i + 1; w < followIdx; w += 1) normalized.push(children[w]);
-						normalized.push(following, original);
+						for (let w = i + 1; w < followIdx; w += 1) pushNormalized(children[w]);
+						pushNormalized(following, original);
 						i = followIdx;
 						continue;
 					}
@@ -466,8 +476,8 @@ function rehypeNormalizePodcastBilingual() {
 						isMostlyLatin(right)
 					) {
 						pairId(node, following);
-						for (let w = i + 1; w < followIdx; w += 1) normalized.push(children[w]);
-						normalized.push(node, following);
+						for (let w = i + 1; w < followIdx; w += 1) pushNormalized(children[w]);
+						pushNormalized(node, following);
 						i = followIdx;
 						continue;
 					}
@@ -479,7 +489,7 @@ function rehypeNormalizePodcastBilingual() {
 				isMostlyLatin(textFromHast(node)) &&
 				!hasClass(node, 'podcast-original')
 			) {
-				const prev = [...normalized].reverse().find((item) => isElement(item));
+				const prev = lastNormalizedElement;
 				if (prev?.tagName === 'p' && isMostlyChinese(textFromHast(prev))) {
 					pairId(prev, node);
 				}
@@ -490,7 +500,7 @@ function rehypeNormalizePodcastBilingual() {
 			if (isElement(node) && node.tagName === 'blockquote' && hasClass(node, 'podcast-original')) {
 				markPodcastOriginal(node, existingId(node) || createId());
 			}
-			normalized.push(node);
+			pushNormalized(node);
 		}
 
 		const originals = normalized.filter(
@@ -501,7 +511,9 @@ function rehypeNormalizePodcastBilingual() {
 			return;
 		}
 
-		const content = normalized.filter((node) => !originals.includes(node));
+		// `includes` made this filter O(n·originals); a Set keeps it linear.
+		const originalSet = new Set(originals);
+		const content = normalized.filter((node) => !originalSet.has(node));
 		const heading = content.find(
 			(node) => isElement(node) && node.tagName === 'h2' && textFromHast(node).trim() === '英文原文',
 		) as any;

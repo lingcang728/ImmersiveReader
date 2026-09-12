@@ -1211,30 +1211,46 @@
 		}
 	}
 
+	// Overlapping refreshes (task-event bursts interleave with explicit calls)
+	// resolved out of order used to make the bookshelf flash a stale list.
+	// Only the latest call may land its results.
+	let libraryRefreshNonce = 0;
 	async function refreshLibrary() {
+		const nonce = ++libraryRefreshNonce;
 		libraryLoading = true;
 		try {
-			appSettings = await invoke<AppSettings>("get_app_settings");
+			const settings = await invoke<AppSettings>("get_app_settings");
 			const scan = await invoke<{ books: BookSummary[]; issues: LibraryIssue[]; writable: boolean }>("scan_library");
+			if (nonce !== libraryRefreshNonce) return;
+			appSettings = settings;
 			libraryBooks = scan.books;
 			libraryIssues = scan.issues;
 			libraryWritable = scan.writable;
+			let nextTemporaryItems: TemporaryItem[] = [];
 			try {
-				temporaryItems = await invoke<TemporaryItem[]>("list_temporary_content");
+				nextTemporaryItems = await invoke<TemporaryItem[]>("list_temporary_content");
 			} catch {
-				temporaryItems = [];
+				nextTemporaryItems = [];
 			}
+			if (nonce !== libraryRefreshNonce) return;
+			temporaryItems = nextTemporaryItems;
+			let nextTrashItems: TrashItem[] = [];
 			try {
-				trashItems = await invoke<TrashItem[]>("list_trash");
+				nextTrashItems = await invoke<TrashItem[]>("list_trash");
 			} catch {
-				trashItems = [];
+				nextTrashItems = [];
 			}
+			if (nonce !== libraryRefreshNonce) return;
+			trashItems = nextTrashItems;
 		} catch (error) {
+			if (nonce !== libraryRefreshNonce) return;
 			libraryBooks = [];
 			libraryIssues = [{ path: appSettings?.libraryRoot ?? "书库", message: String(error) }];
 			libraryWritable = false;
 		} finally {
-			libraryLoading = false;
+			if (nonce === libraryRefreshNonce) {
+				libraryLoading = false;
+			}
 		}
 	}
 
@@ -1790,6 +1806,11 @@
 			clearTimeout(focusScrollEndTimer);
 			focusScrollEndTimer = null;
 		}
+		if (focusWheelMoveFrame !== null) {
+			cancelAnimationFrame(focusWheelMoveFrame);
+			focusWheelMoveFrame = null;
+		}
+		pendingFocusWheelSteps = 0;
 	}
 
 	function markFocusScrollActive() {
@@ -2703,6 +2724,18 @@
 		const loadGeneration = ++navigationGeneration;
 		if ((await requestNavigationGuard("打开另一篇 Markdown")) === "cancel") return false;
 		if (navigationGeneration !== loadGeneration) return false;
+
+		// Opening a Markdown file always replaces the 连读 surface: an OS
+		// open-file event or drag-and-drop can arrive while a flow session is
+		// still active — leaving it running would both hide the new document
+		// behind the iframe and leak the backend reader session.
+		if (flowReaderSession) {
+			const session = flowReaderSession;
+			flowReaderSession = null;
+			void invoke("close_reader_session", { sessionId: session.sessionId }).catch((err) => {
+				console.warn("Failed to close flow reader session:", err);
+			});
+		}
 
 		if ($currentFilePath && !options.skipFlush) {
 			await flushSaveState();
@@ -4398,14 +4431,19 @@
 	// the cache on every content/layout change; late-loading images invalidate
 	// via a capture-phase load listener on contentEl.
 	let headingIndex: { item: TocItem; top: number }[] | null = null;
+	// The array the index was measured against — a swapped tocItems (new
+	// render, edit, chapter change) always re-measures even if a call site
+	// forgot to invalidate.
+	let headingIndexItems: TocItem[] | null = null;
 
 	function invalidateHeadingIndex() {
 		headingIndex = null;
+		headingIndexItems = null;
 	}
 
 	function getHeadingIndex() {
 		if (!contentEl || tocItems.length === 0) return null;
-		if (headingIndex) return headingIndex;
+		if (headingIndex && headingIndexItems === tocItems) return headingIndex;
 		const contentRect = contentEl.getBoundingClientRect();
 		const scrollTop = contentEl.scrollTop;
 		const entries: { item: TocItem; top: number }[] = [];
@@ -4418,6 +4456,7 @@
 			});
 		}
 		headingIndex = entries;
+		headingIndexItems = tocItems;
 		return headingIndex;
 	}
 

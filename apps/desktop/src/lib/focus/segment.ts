@@ -20,10 +20,30 @@ export function splitSentencesFallback(text: string): SentenceRange[] {
 	return ranges;
 }
 
+// Intl.Segmenter construction is expensive enough to matter when
+// splitSentences runs once per paragraph during focus entry, so the
+// (stateless) segmenter is shared module-wide. `segment()` returns a fresh
+// iterable per call, so reuse across texts is safe.
+let sentenceSegmenter: Intl.Segmenter | null | undefined;
+
+function getSentenceSegmenter(): Intl.Segmenter | null {
+	if (sentenceSegmenter === undefined) {
+		sentenceSegmenter = null;
+		if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+			try {
+				sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: 'sentence' });
+			} catch {
+				sentenceSegmenter = null;
+			}
+		}
+	}
+	return sentenceSegmenter;
+}
+
 export function splitSentences(text: string): SentenceRange[] {
-	if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+	const segmenter = getSentenceSegmenter();
+	if (segmenter) {
 		try {
-			const segmenter = new Intl.Segmenter(undefined, { granularity: 'sentence' });
 			const ranges: SentenceRange[] = [];
 			for (const segment of segmenter.segment(text)) {
 				const start = segment.index;

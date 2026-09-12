@@ -88,6 +88,23 @@ describe('renderMarkdown', () => {
 		expect(en).toBeGreaterThan(zh);
 	});
 
+	it('pairs an untagged Latin blockquote with the preceding Chinese paragraph', async () => {
+		const source = [
+			'这里是本期内容的中文译文段落，足够长以通过中文判定。',
+			'',
+			'> This is the original English quote transcribed from the podcast episode.'
+		].join('\n');
+		const html = await renderMarkdown(source);
+		expect(html).toContain('podcast-translation');
+		expect(html).toContain('podcast-original');
+		const idMatch = html.match(/data-bilingual-id="([^"]+)"/);
+		expect(idMatch).not.toBeNull();
+		const zh = html.indexOf('这里是本期内容');
+		const en = html.indexOf('This is the original English quote');
+		expect(zh).toBeGreaterThanOrEqual(0);
+		expect(en).toBeGreaterThan(zh);
+	});
+
 	it('keeps all podcast translations above originals and preserves pair ids', async () => {
 		const source = [
 			'English first paragraph for the podcast.',

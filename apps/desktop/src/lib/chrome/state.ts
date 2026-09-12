@@ -59,6 +59,10 @@ export function createChromeState(surface: ChromeSurface = 'library'): ChromeSta
 }
 
 function clearOneShots(state: ChromeState): ChromeState {
+	// Scroll/wheel events hit this reducer at pointer rate; when nothing is
+	// pending the state object must come back as-is so stores keyed on
+	// reference identity don't invalidate per event.
+	if (!state.shouldScheduleHide && !state.shouldCancelHide) return state;
 	return {
 		...state,
 		shouldScheduleHide: false,
@@ -66,12 +70,29 @@ function clearOneShots(state: ChromeState): ChromeState {
 	};
 }
 
+// Invariant relied on by the early exits below: a pending hide timer implies
+// a visible chrome. shouldScheduleHide is only emitted while chromeVisible is
+// true (chrome-leave / chrome-blur), and the host consumes that one-shot —
+// the timer is cancelled by shouldCancelHide or fires apply-hide, both of
+// which keep "hidden ⇒ no pending hide" true afterwards. So when a branch can
+// prove chromeVisible === false (or focusedInChrome === true, which blocks
+// scheduling entirely), dropping a redundant shouldCancelHide/shouldScheduleHide
+// emission cannot strand a live timer.
 export function reduceChrome(state: ChromeState, event: ChromeEvent): ChromeState {
 	const base = clearOneShots(state);
 
 	switch (event.type) {
 		case 'enter-surface': {
 			const surface = event.surface;
+			if (
+				surface === base.surface &&
+				base.chromeVisible === initialChromeVisible(surface) &&
+				!base.focusedInChrome
+			) {
+				// Same surface, same derived visibility — the only remaining
+				// effect would be a redundant cancel one-shot.
+				return { ...base, shouldCancelHide: true };
+			}
 			return {
 				...base,
 				surface,
@@ -85,6 +106,8 @@ export function reduceChrome(state: ChromeState, event: ChromeEvent): ChromeStat
 			// Scroll up/down, wheel, arrow keys, PageUp/PageDown — hide immediately.
 			// Never use scroll direction to reveal chrome.
 			if (!isImmersiveSurface(base.surface)) return base;
+			// Already hidden: nothing changes, and no hide timer can be pending.
+			if (!base.chromeVisible) return base;
 			return {
 				...base,
 				chromeVisible: false,
@@ -94,6 +117,9 @@ export function reduceChrome(state: ChromeState, event: ChromeEvent): ChromeStat
 
 		case 'top-edge-enter': {
 			if (!isImmersiveSurface(base.surface)) return base;
+			// Already visible with focus inside chrome: no hide timer can be
+			// pending (focus blocks scheduling), so the reveal is a no-op.
+			if (base.chromeVisible && base.focusedInChrome) return base;
 			return {
 				...base,
 				chromeVisible: true,
@@ -112,6 +138,9 @@ export function reduceChrome(state: ChromeState, event: ChromeEvent): ChromeStat
 		}
 
 		case 'chrome-focus': {
+			// Already focused: no hide timer can be pending, so the cancel
+			// one-shot would be redundant.
+			if (base.focusedInChrome) return base;
 			return {
 				...base,
 				focusedInChrome: true,
@@ -120,16 +149,17 @@ export function reduceChrome(state: ChromeState, event: ChromeEvent): ChromeStat
 		}
 
 		case 'chrome-blur': {
-			const next = { ...base, focusedInChrome: false };
-			if (isImmersiveSurface(next.surface) && next.chromeVisible) {
-				return { ...next, shouldScheduleHide: true };
+			if (isImmersiveSurface(base.surface) && base.chromeVisible) {
+				return { ...base, focusedInChrome: false, shouldScheduleHide: true };
 			}
-			return next;
+			if (!base.focusedInChrome) return base;
+			return { ...base, focusedInChrome: false };
 		}
 
 		case 'apply-hide': {
 			if (!isImmersiveSurface(base.surface)) return base;
 			if (base.focusedInChrome) return base;
+			if (!base.chromeVisible) return base;
 			return {
 				...base,
 				chromeVisible: false
