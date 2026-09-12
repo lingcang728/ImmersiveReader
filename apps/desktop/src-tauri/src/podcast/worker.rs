@@ -74,6 +74,12 @@ fn podcast_worker_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Vendored Python 3.12 predates PEP-686: on zh-CN Windows its piped
+        // stdio defaults to cp936 while the worker emits ensure_ascii=False
+        // Chinese JSON/log lines. Force UTF-8 stdio so host-side line
+        // decoding always sees valid UTF-8 bytes.
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
         .env("IMMERSIVE_PODCAST_DATA_ROOT", data_root)
         .env("IMMERSIVE_PODCAST_CACHE_ROOT", cache_root)
         .env("IMMERSIVE_LIBRARY_ROOT", &settings.library_root)
@@ -122,10 +128,28 @@ fn read_stream<R: std::io::Read + Send + 'static>(
     sender: mpsc::Sender<(String, String)>,
 ) {
     thread::spawn(move || {
-        for line in BufReader::new(stream).lines() {
-            match line {
-                Ok(value) => {
-                    let _ = sender.send((name.to_string(), value));
+        let mut reader = BufReader::new(stream);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {
+                    // Keep the BufRead::lines() framing contract: strip one
+                    // trailing LF/CRLF so each send carries one complete
+                    // NDJSON/log line.
+                    if buffer.last() == Some(&b'\n') {
+                        buffer.pop();
+                        if buffer.last() == Some(&b'\r') {
+                            buffer.pop();
+                        }
+                    }
+                    // Lossy decode: stray non-UTF-8 bytes (e.g. cp936 output
+                    // from a worker that ignored PYTHONUTF8) become U+FFFD
+                    // instead of killing the pump and deadlocking the child
+                    // on a full pipe.
+                    let line = String::from_utf8_lossy(&buffer).into_owned();
+                    let _ = sender.send((name.to_string(), line));
                 }
                 Err(error) => {
                     let _ = sender.send((name.to_string(), format!("stream read failed: {error}")));
@@ -380,7 +404,36 @@ fn parse_worker_json(line: &str) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_worker_json;
+    use super::{parse_worker_json, read_stream};
+    use std::io::Cursor;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn read_stream_survives_non_utf8_lines_and_keeps_line_framing() {
+        // cp936 bytes for 「中文」 followed by a valid UTF-8 NDJSON line and a
+        // final line without a trailing newline.
+        let bytes = b"\xd6\xd0\xce\xc4 log\r\n{\"type\":\"progress\",\"percent\":1}\ntail"
+            .to_vec();
+        let (sender, receiver) = mpsc::channel();
+        read_stream(Cursor::new(bytes), "stdout", sender);
+
+        let first = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first line must arrive");
+        let second = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second line must arrive");
+        let third = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("tail line must arrive");
+        assert_eq!(first.0, "stdout");
+        assert!(first.1.contains('\u{fffd}'));
+        assert!(first.1.ends_with("log"));
+        assert_eq!(second.1, "{\"type\":\"progress\",\"percent\":1}");
+        assert_eq!(third.1, "tail");
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).is_err());
+    }
 
     #[test]
     fn worker_json_lines_are_optional_and_safe() {
