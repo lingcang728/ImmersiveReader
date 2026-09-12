@@ -234,26 +234,37 @@ fn initial_markdown_path(args: &[String]) -> Option<String> {
 /// File mtime in milliseconds since epoch — the frontend polls this to
 /// auto-reload when the file is changed by an external editor.
 #[tauri::command]
-fn get_file_mtime(path: String) -> Result<u64, String> {
-    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
-    let modified = meta.modified().map_err(|e| e.to_string())?;
-    let ms = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_millis() as u64;
-    Ok(ms)
+async fn get_file_mtime(path: String) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<u64, String> {
+        let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+        let modified = meta.modified().map_err(|e| e.to_string())?;
+        let ms = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis() as u64;
+        Ok(ms)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn read_markdown_file(app: tauri::AppHandle, path: String) -> Result<ReadResult, String> {
-    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-    let (content, encoding) = decode_markdown_bytes(bytes)?;
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        app.asset_protocol_scope()
-            .allow_directory(parent, true)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(ReadResult { content, encoding })
+async fn read_markdown_file(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<ReadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ReadResult, String> {
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        let (content, encoding) = decode_markdown_bytes(bytes)?;
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            app.asset_protocol_scope()
+                .allow_directory(parent, true)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(ReadResult { content, encoding })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn atomic_write_file(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
@@ -261,35 +272,51 @@ fn atomic_write_file(path: &std::path::Path, data: &[u8]) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn save_markdown_file(path: String, content: String, encoding: String) -> Result<(), String> {
-    let bytes = encode_markdown(&content, &encoding)?;
-    atomic_write_file(std::path::Path::new(&path), &bytes)
+async fn save_markdown_file(
+    path: String,
+    content: String,
+    encoding: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let bytes = encode_markdown(&content, &encoding)?;
+        atomic_write_file(std::path::Path::new(&path), &bytes)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn load_reading_state(path: String) -> Result<ReadingState, String> {
-    let sp = state_path_for(&path);
-    if sp.exists() {
-        let data = fs::read_to_string(&sp).map_err(|e| e.to_string())?;
-        serde_json::from_str(&data).map_err(|e| e.to_string())
-    } else {
-        let legacy = state_path_for_in_dir(&legacy_state_dir(), &path);
-        if !legacy.exists() {
-            return Ok(ReadingState::default());
+async fn load_reading_state(path: String) -> Result<ReadingState, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ReadingState, String> {
+        let sp = state_path_for(&path);
+        if sp.exists() {
+            let data = fs::read_to_string(&sp).map_err(|e| e.to_string())?;
+            serde_json::from_str(&data).map_err(|e| e.to_string())
+        } else {
+            let legacy = state_path_for_in_dir(&legacy_state_dir(), &path);
+            if !legacy.exists() {
+                return Ok(ReadingState::default());
+            }
+            let data = fs::read_to_string(&legacy).map_err(|e| e.to_string())?;
+            let state: ReadingState = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+            let migrated = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
+            atomic_write_file(&sp, &migrated)?;
+            Ok(state)
         }
-        let data = fs::read_to_string(&legacy).map_err(|e| e.to_string())?;
-        let state: ReadingState = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-        let migrated = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
-        atomic_write_file(&sp, &migrated)?;
-        Ok(state)
-    }
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn save_reading_state(path: String, state: ReadingState) -> Result<(), String> {
-    let sp = state_path_for(&path);
-    let data = serde_json::to_string(&state).map_err(|e| e.to_string())?;
-    atomic_write_file(&sp, data.as_bytes())
+async fn save_reading_state(path: String, state: ReadingState) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let sp = state_path_for(&path);
+        let data = serde_json::to_string(&state).map_err(|e| e.to_string())?;
+        atomic_write_file(&sp, data.as_bytes())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn delete_reading_state_for_path(path: &str) -> Result<(), String> {
@@ -343,293 +370,380 @@ fn cleanup_recent_files_json(json: &str, state_base_dir: &Path) -> (String, bool
 /// Recent files list, stored as an opaque JSON string in the app state dir so
 /// it survives WebView cache clears (unlike localStorage).
 #[tauri::command]
-fn load_recent_files() -> Result<RecentFilesLoad, String> {
-    let dir = state_dir();
-    let path = dir.join("recent-files.json");
-    if path.exists() {
-        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let (json, changed) = cleanup_recent_files_json(&raw, &dir);
-        if changed {
-            atomic_write_file(&path, json.as_bytes())?;
-        }
-        Ok(RecentFilesLoad {
-            json,
-            store_exists: true,
-        })
-    } else {
-        let legacy_path = legacy_state_dir().join("recent-files.json");
-        if legacy_path.exists() {
-            let raw = fs::read_to_string(&legacy_path).map_err(|e| e.to_string())?;
-            let (json, _) = cleanup_recent_files_json(&raw, &dir);
-            atomic_write_file(&path, json.as_bytes())?;
-            return Ok(RecentFilesLoad {
+async fn load_recent_files() -> Result<RecentFilesLoad, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<RecentFilesLoad, String> {
+        let dir = state_dir();
+        let path = dir.join("recent-files.json");
+        if path.exists() {
+            let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let (json, changed) = cleanup_recent_files_json(&raw, &dir);
+            if changed {
+                atomic_write_file(&path, json.as_bytes())?;
+            }
+            Ok(RecentFilesLoad {
                 json,
                 store_exists: true,
-            });
+            })
+        } else {
+            let legacy_path = legacy_state_dir().join("recent-files.json");
+            if legacy_path.exists() {
+                let raw = fs::read_to_string(&legacy_path).map_err(|e| e.to_string())?;
+                let (json, _) = cleanup_recent_files_json(&raw, &dir);
+                atomic_write_file(&path, json.as_bytes())?;
+                return Ok(RecentFilesLoad {
+                    json,
+                    store_exists: true,
+                });
+            }
+            Ok(RecentFilesLoad {
+                json: "[]".to_string(),
+                store_exists: false,
+            })
         }
-        Ok(RecentFilesLoad {
-            json: "[]".to_string(),
-            store_exists: false,
-        })
-    }
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn save_recent_files(json: String) -> Result<String, String> {
-    let dir = state_dir();
-    let path = dir.join("recent-files.json");
-    let (cleaned, _) = cleanup_recent_files_json(&json, &dir);
-    atomic_write_file(&path, cleaned.as_bytes())?;
-    Ok(cleaned)
+async fn save_recent_files(json: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let dir = state_dir();
+        let path = dir.join("recent-files.json");
+        let (cleaned, _) = cleanup_recent_files_json(&json, &dir);
+        atomic_write_file(&path, cleaned.as_bytes())?;
+        Ok(cleaned)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn load_reader_preferences() -> Result<reader_preferences::ReaderPreferencesLoad, String> {
-    reader_preferences::load()
+async fn load_reader_preferences() -> Result<reader_preferences::ReaderPreferencesLoad, String> {
+    tauri::async_runtime::spawn_blocking(reader_preferences::load)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn save_reader_preferences(
+async fn save_reader_preferences(
     preferences: reader_preferences::ReaderPreferences,
 ) -> Result<(), String> {
-    reader_preferences::save(&preferences)
+    tauri::async_runtime::spawn_blocking(move || reader_preferences::save(&preferences))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn delete_reading_state(path: String) -> Result<(), String> {
-    delete_reading_state_for_path(&path)
+async fn delete_reading_state(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_reading_state_for_path(&path))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn markdown_file_exists(path: String) -> bool {
-    path_exists(&path)
+async fn markdown_file_exists(path: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || path_exists(&path))
+        .await
+        .unwrap_or(false)
 }
 
 #[tauri::command]
-fn get_app_settings() -> Result<settings::AppSettings, String> {
-    settings::load_settings()
+async fn get_app_settings() -> Result<settings::AppSettings, String> {
+    tauri::async_runtime::spawn_blocking(settings::load_settings)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn get_storage_locations() -> Result<storage::StorageLocations, String> {
-    let mut locations = storage::StorageLocations::current()?;
-    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
-    Ok(locations)
-}
-
-#[tauri::command]
-fn get_storage_usage() -> Result<StorageUsage, String> {
-    let mut locations = storage::StorageLocations::current()?;
-    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
-    Ok(StorageUsage {
-        library_bytes: directory_size(&locations.library_root)?,
-        data_bytes: directory_size(&locations.data_root)?,
-        cache_bytes: directory_size(&locations.cache_root)?,
-        logs_bytes: directory_size(&locations.logs_root)?,
-        backups_bytes: directory_size(&locations.backups_root)?,
-        runtime_state_bytes: directory_size(&locations.runtime_state_root)?,
+async fn get_storage_locations() -> Result<storage::StorageLocations, String> {
+    tauri::async_runtime::spawn_blocking(|| -> Result<storage::StorageLocations, String> {
+        let mut locations = storage::StorageLocations::current()?;
+        locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+        Ok(locations)
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn create_state_backup() -> Result<StateBackupResult, String> {
-    let locations = storage::StorageLocations::current()?;
-    fs::create_dir_all(&locations.backups_root).map_err(|error| error.to_string())?;
-    let backup_root = locations
-        .backups_root
-        .join(format!("state-{}", uuid::Uuid::new_v4()));
-    fs::create_dir_all(&backup_root).map_err(|error| error.to_string())?;
-    let mut included = Vec::new();
-    let mut skipped = vec![
-        "library".to_string(),
-        "cache".to_string(),
-        "logs".to_string(),
-        "credentials".to_string(),
-        "browser_profiles".to_string(),
-    ];
-    for (label, source, name) in [
-        ("settings", locations.settings_path, "settings.json"),
-        (
-            "control_db",
-            locations.data_root.join(r"App\control.db"),
-            "control.db",
-        ),
-    ] {
-        if source.is_file() {
-            fs::copy(&source, backup_root.join(name)).map_err(|error| error.to_string())?;
-            included.push(label.to_string());
-        } else {
-            skipped.push(label.to_string());
+async fn get_storage_usage() -> Result<StorageUsage, String> {
+    tauri::async_runtime::spawn_blocking(|| -> Result<StorageUsage, String> {
+        let mut locations = storage::StorageLocations::current()?;
+        locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+        Ok(StorageUsage {
+            library_bytes: directory_size(&locations.library_root)?,
+            data_bytes: directory_size(&locations.data_root)?,
+            cache_bytes: directory_size(&locations.cache_root)?,
+            logs_bytes: directory_size(&locations.logs_root)?,
+            backups_bytes: directory_size(&locations.backups_root)?,
+            runtime_state_bytes: directory_size(&locations.runtime_state_root)?,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn create_state_backup() -> Result<StateBackupResult, String> {
+    tauri::async_runtime::spawn_blocking(|| -> Result<StateBackupResult, String> {
+        let locations = storage::StorageLocations::current()?;
+        fs::create_dir_all(&locations.backups_root).map_err(|error| error.to_string())?;
+        let backup_root = locations
+            .backups_root
+            .join(format!("state-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&backup_root).map_err(|error| error.to_string())?;
+        let mut included = Vec::new();
+        let mut skipped = vec![
+            "library".to_string(),
+            "cache".to_string(),
+            "logs".to_string(),
+            "credentials".to_string(),
+            "browser_profiles".to_string(),
+        ];
+        for (label, source, name) in [
+            ("settings", locations.settings_path, "settings.json"),
+            (
+                "control_db",
+                locations.data_root.join(r"App\control.db"),
+                "control.db",
+            ),
+        ] {
+            if source.is_file() {
+                fs::copy(&source, backup_root.join(name)).map_err(|error| error.to_string())?;
+                included.push(label.to_string());
+            } else {
+                skipped.push(label.to_string());
+            }
         }
-    }
-    skipped.sort();
-    let manifest = serde_json::json!({
-        "schemaVersion": 1,
-        "createdAt": chrono::Utc::now().to_rfc3339(),
-        "channel": locations.channel,
-        "included": included,
-        "skipped": skipped,
-        "sensitiveData": "excluded",
-    });
-    atomic_file::write(
-        &backup_root.join("backup-manifest.json"),
-        &serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
-    )?;
-    let included = manifest
-        .get("included")
-        .and_then(serde_json::Value::as_array)
-        .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
-    let skipped = manifest
-        .get("skipped")
-        .and_then(serde_json::Value::as_array)
-        .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
-    Ok(StateBackupResult {
-        backup_path: backup_root.to_string_lossy().into_owned(),
-        included,
-        skipped,
+        skipped.sort();
+        let manifest = serde_json::json!({
+            "schemaVersion": 1,
+            "createdAt": chrono::Utc::now().to_rfc3339(),
+            "channel": locations.channel,
+            "included": included,
+            "skipped": skipped,
+            "sensitiveData": "excluded",
+        });
+        atomic_file::write(
+            &backup_root.join("backup-manifest.json"),
+            &serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+        )?;
+        let included = manifest
+            .get("included")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let skipped = manifest
+            .get("skipped")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        Ok(StateBackupResult {
+            backup_path: backup_root.to_string_lossy().into_owned(),
+            included,
+            skipped,
+        })
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn reveal_storage_directory(kind: String) -> Result<(), String> {
-    let mut locations = storage::StorageLocations::current()?;
-    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
-    let path = match kind.as_str() {
-        "library" => locations.library_root,
-        "data" => locations.data_root,
-        "cache" => locations.cache_root,
-        "logs" => locations.logs_root,
-        "backups" => locations.backups_root,
-        "runtime_state" => locations.runtime_state_root,
-        _ => return Err("Unknown storage directory".to_string()),
-    };
-    tauri_plugin_opener::reveal_item_in_dir(path).map_err(|error| error.to_string())
+async fn reveal_storage_directory(kind: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut locations = storage::StorageLocations::current()?;
+        locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+        let path = match kind.as_str() {
+            "library" => locations.library_root,
+            "data" => locations.data_root,
+            "cache" => locations.cache_root,
+            "logs" => locations.logs_root,
+            "backups" => locations.backups_root,
+            "runtime_state" => locations.runtime_state_root,
+            _ => return Err("Unknown storage directory".to_string()),
+        };
+        tauri_plugin_opener::reveal_item_in_dir(path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn update_app_settings(value: settings::AppSettings) -> Result<(), String> {
-    settings::save_settings(&value)
+async fn update_app_settings(value: settings::AppSettings) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || settings::save_settings(&value))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn clear_safe_cache(
+async fn clear_safe_cache(
     categories: Vec<cache::CacheCategory>,
     task_ids: Option<Vec<String>>,
 ) -> Result<cache::CacheClearResult, String> {
-    cache::clear_safe_cache_at(
-        &storage::StorageLocations::current()?,
-        &categories,
-        task_ids.as_deref().unwrap_or_default(),
-    )
-}
-
-#[tauri::command]
-fn get_secret_status() -> Result<secrets::SecretStatus, String> {
-    secrets::deepseek_status(&settings::AppChannel::current())
-}
-
-#[tauri::command]
-fn set_deepseek_api_key(api_key: String) -> Result<secrets::SecretStatus, String> {
-    secrets::set_deepseek_api_key(&settings::AppChannel::current(), &api_key)
-}
-
-#[tauri::command]
-fn delete_deepseek_api_key() -> Result<secrets::SecretStatus, String> {
-    secrets::delete_deepseek_api_key(&settings::AppChannel::current())
-}
-
-#[tauri::command]
-fn get_publish_recovery_status() -> Result<Vec<publish::PublishTransaction>, String> {
-    let value = settings::load_settings()?;
-    publish::list_transactions(Path::new(&value.library_root)).map(|transactions| {
-        transactions
-            .into_iter()
-            .filter(|transaction| {
-                !matches!(
-                    transaction.phase,
-                    publish::PublishPhase::Committed | publish::PublishPhase::RolledBack
-                )
-            })
-            .collect()
+    tauri::async_runtime::spawn_blocking(move || {
+        cache::clear_safe_cache_at(
+            &storage::StorageLocations::current()?,
+            &categories,
+            task_ids.as_deref().unwrap_or_default(),
+        )
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn recover_publish_transactions(
+async fn get_secret_status() -> Result<secrets::SecretStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        secrets::deepseek_status(&settings::AppChannel::current())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn set_deepseek_api_key(api_key: String) -> Result<secrets::SecretStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        secrets::set_deepseek_api_key(&settings::AppChannel::current(), &api_key)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn delete_deepseek_api_key() -> Result<secrets::SecretStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        secrets::delete_deepseek_api_key(&settings::AppChannel::current())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_publish_recovery_status() -> Result<Vec<publish::PublishTransaction>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let value = settings::load_settings()?;
+        publish::list_transactions(Path::new(&value.library_root)).map(|transactions| {
+            transactions
+                .into_iter()
+                .filter(|transaction| {
+                    !matches!(
+                        transaction.phase,
+                        publish::PublishPhase::Committed | publish::PublishPhase::RolledBack
+                    )
+                })
+                .collect()
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn recover_publish_transactions(
     transaction_ids: Option<Vec<String>>,
 ) -> Result<Vec<publish::PublishTransaction>, String> {
-    let value = settings::load_settings()?;
-    let library_root = Path::new(&value.library_root);
-    let ids = match transaction_ids {
-        Some(ids) => ids,
-        None => publish::list_transactions(library_root)?
-            .into_iter()
-            .filter(|transaction| {
-                !matches!(
-                    transaction.phase,
-                    publish::PublishPhase::Committed | publish::PublishPhase::RolledBack
-                )
-            })
-            .map(|transaction| transaction.transaction_id)
-            .collect(),
-    };
-    ids.into_iter()
-        .map(|id| publish::recover_transaction(library_root, &id))
-        .collect()
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<Vec<publish::PublishTransaction>, String> {
+            let value = settings::load_settings()?;
+            let library_root = Path::new(&value.library_root);
+            let ids = match transaction_ids {
+                Some(ids) => ids,
+                None => publish::list_transactions(library_root)?
+                    .into_iter()
+                    .filter(|transaction| {
+                        !matches!(
+                            transaction.phase,
+                            publish::PublishPhase::Committed
+                                | publish::PublishPhase::RolledBack
+                        )
+                    })
+                    .map(|transaction| transaction.transaction_id)
+                    .collect(),
+            };
+            ids.into_iter()
+                .map(|id| publish::recover_transaction(library_root, &id))
+                .collect()
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn preview_legacy_migration(
+async fn preview_legacy_migration(
     scope: migration::MigrationScope,
 ) -> Result<migration::MigrationPreview, String> {
-    let mut target = storage::StorageLocations::current()?;
-    let settings = settings::load_settings()?;
-    target.library_root = PathBuf::from(&settings.library_root);
-    let legacy = migration::current_legacy_locations(PathBuf::from(settings.library_root))?;
-    migration::preview_for(&legacy, &target, scope)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut target = storage::StorageLocations::current()?;
+        let settings = settings::load_settings()?;
+        target.library_root = PathBuf::from(&settings.library_root);
+        let legacy = migration::current_legacy_locations(PathBuf::from(settings.library_root))?;
+        migration::preview_for(&legacy, &target, scope)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn get_migration_runs() -> Result<Vec<control::MigrationRunRecord>, String> {
-    control::ControlDb::open_current()?.migration_runs()
+async fn get_migration_runs() -> Result<Vec<control::MigrationRunRecord>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        control::ControlDb::open_current()?.migration_runs()
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn get_acquisition_snapshot(
+async fn get_acquisition_snapshot(
     kind: Option<tasks::TaskKind>,
     app: tauri::AppHandle,
 ) -> Result<tasks::AcquisitionSnapshot, String> {
-    tools::recover_stale_engine_instances()?;
-    // Connect/start Zhihu sidecar when needed, then reconcile sidecar truth over
-    // stale desktop mirrors (including false interrupted/crashed terminals).
+    // Warm up the Zhihu engine on a dedicated background worker (deduped
+    // internally) instead of launching it inline here — the snapshot path must
+    // never spawn the engine or wait on its readiness/health probes itself.
     if matches!(kind, None | Some(tasks::TaskKind::Zhihu)) {
-        let settings = settings::load_settings()?;
-        if let Ok(()) = tools::ensure_zhihu_ready(&settings) {
-            let _ = zhihu::reconcile_active_tasks(&settings, Some(&app));
-        }
+        crate::tools::request_engine_warmup(crate::tools::ToolKind::Zhihu);
     }
-    control::repair_orphaned_podcast_tasks()?;
-    let mut control = control::ControlDb::open_current()?;
-    let locations = storage::StorageLocations::current_with_library_settings()?;
-    reconcile_cancel_and_discard(&locations, &control)?;
-    // Keep the queue lean: drop terminal history older than a week.
-    let _ = control.prune_terminal_tasks_older_than(7);
-    let mut tasks = control.task_snapshots(kind)?;
-    // Backfill titles for older snapshots that predate displayName.
-    if let Ok(locations) = storage::StorageLocations::current_with_library_settings() {
-        enrich_task_display_names(&locations, &mut tasks);
-    }
-    Ok(tasks::AcquisitionSnapshot {
-        recoverable_cache_bytes: tasks
-            .iter()
-            .filter(|task| task.recoverable)
-            .map(|task| task.cache_lease_bytes)
-            .sum(),
-        tasks,
-        generated_at: chrono::Utc::now().to_rfc3339(),
-    })
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<tasks::AcquisitionSnapshot, String> {
+            tools::recover_stale_engine_instances()?;
+            // Reconcile sidecar truth over stale desktop mirrors (including
+            // false interrupted/crashed terminals) — but only when the engine
+            // is already running: zhihu_* HTTP calls would otherwise launch it
+            // inline and block this path on spawn + readiness waits.
+            if matches!(kind, None | Some(tasks::TaskKind::Zhihu))
+                && tools::status("zhihu")
+                    .map(|status| status.state == "running")
+                    .unwrap_or(false)
+            {
+                let settings = settings::load_settings()?;
+                let _ = zhihu::reconcile_active_tasks(&settings, Some(&app));
+            }
+            control::repair_orphaned_podcast_tasks()?;
+            let mut control = control::ControlDb::open_current()?;
+            let locations = storage::StorageLocations::current_with_library_settings()?;
+            reconcile_cancel_and_discard(&locations, &control)?;
+            // Keep the queue lean: drop terminal history older than a week.
+            let _ = control.prune_terminal_tasks_older_than(7);
+            let mut tasks = control.task_snapshots(kind)?;
+            // Backfill titles for older snapshots that predate displayName.
+            if let Ok(locations) = storage::StorageLocations::current_with_library_settings() {
+                enrich_task_display_names(&locations, &mut tasks);
+            }
+            Ok(tasks::AcquisitionSnapshot {
+                recoverable_cache_bytes: tasks
+                    .iter()
+                    .filter(|task| task.recoverable)
+                    .map(|task| task.cache_lease_bytes)
+                    .sum(),
+                tasks,
+                generated_at: chrono::Utc::now().to_rfc3339(),
+            })
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn enrich_task_display_names(
@@ -706,25 +820,35 @@ fn reconcile_cancel_and_discard(
 }
 
 #[tauri::command]
-fn get_task_events(
+async fn get_task_events(
     task_id: String,
     after_sequence: u64,
     limit: u32,
 ) -> Result<Vec<tasks::TaskEvent>, String> {
-    control::ControlDb::open_current()?.task_events(&task_id, after_sequence, limit)
+    tauri::async_runtime::spawn_blocking(move || {
+        control::ControlDb::open_current()?.task_events(&task_id, after_sequence, limit)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn preview_podcast_files(
+async fn preview_podcast_files(
     paths: Vec<String>,
     options: podcast::PodcastPreviewOptions,
     state: tauri::State<'_, podcast::PodcastPreviewStore>,
 ) -> Result<podcast::PodcastFilesPreview, String> {
-    let mut locations = storage::StorageLocations::current()?;
-    locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
-    let preview = podcast::preview_podcast_files_at(&paths, &options, &locations)?;
-    state.insert(preview.clone(), options)?;
-    Ok(preview)
+    // SHA-256 hashing + ffprobe per file must not run on the IPC thread.
+    let store = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut locations = storage::StorageLocations::current()?;
+        locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+        let preview = podcast::preview_podcast_files_at(&paths, &options, &locations)?;
+        store.insert(preview.clone(), options)?;
+        Ok(preview)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -758,23 +882,39 @@ async fn add_podcast_files(
     .map_err(|error| error.to_string())??;
 
     // Input prep finished: auto-start transcription without a second "开始" click.
-    for task in &result.tasks {
-        if let Err(error) = podcast::start_task(task.id.clone(), app.clone()) {
-            eprintln!("Auto-start podcast task {} failed: {error}", task.id);
+    // Worker spawn + DB writes stay off the async runtime's worker threads.
+    let task_ids: Vec<String> = result
+        .tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        for task_id in task_ids {
+            if let Err(error) = podcast::start_task(task_id.clone(), app.clone()) {
+                eprintln!("Auto-start podcast task {task_id} failed: {error}");
+            }
         }
-    }
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(result)
 }
 
 #[tauri::command]
-fn scan_library() -> Result<library::LibraryScan, String> {
-    let value = settings::load_settings()?;
-    library::scan_library(Path::new(&value.library_root))
+async fn scan_library() -> Result<library::LibraryScan, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let value = settings::load_settings()?;
+        library::scan_library(Path::new(&value.library_root))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn open_book(book_id: String) -> Result<library::BookDetail, String> {
-    open_book_detail(&book_id)
+async fn open_book(book_id: String) -> Result<library::BookDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || open_book_detail(&book_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn open_book_detail(book_id: &str) -> Result<library::BookDetail, String> {
@@ -786,105 +926,159 @@ fn open_book_detail(book_id: &str) -> Result<library::BookDetail, String> {
 }
 
 #[tauri::command]
-fn get_book_chapter_path(book_id: String, chapter_id: String) -> Result<String, String> {
-    let value = settings::load_settings()?;
-    let path = library::chapter_path(Path::new(&value.library_root), &book_id, &chapter_id)?;
-    Ok(path.to_string_lossy().into_owned())
+async fn get_book_chapter_path(book_id: String, chapter_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let value = settings::load_settings()?;
+        let path = library::chapter_path(Path::new(&value.library_root), &book_id, &chapter_id)?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn save_book_progress(book_id: String, progress: contracts::ReadingProgress) -> Result<(), String> {
-    let value = settings::load_settings()?;
-    library::save_book_progress(Path::new(&value.library_root), &book_id, &progress)
+async fn save_book_progress(
+    book_id: String,
+    progress: contracts::ReadingProgress,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = settings::load_settings()?;
+        library::save_book_progress(Path::new(&value.library_root), &book_id, &progress)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn import_markdown_folder(path: String) -> Result<contracts::Manifest, String> {
-    let value = settings::load_settings()?;
-    importer::import_markdown_folder(Path::new(&path), Path::new(&value.library_root))
+async fn import_markdown_folder(path: String) -> Result<contracts::Manifest, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = settings::load_settings()?;
+        importer::import_markdown_folder(Path::new(&path), Path::new(&value.library_root))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn remove_book(book_id: String) -> Result<String, String> {
-    let value = settings::load_settings()?;
-    library::remove_book(Path::new(&value.library_root), &book_id)
+async fn remove_book(book_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = settings::load_settings()?;
+        library::remove_book(Path::new(&value.library_root), &book_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn delete_book(book_id: String) -> Result<String, String> {
-    let value = settings::load_settings()?;
-    library::delete_book(Path::new(&value.library_root), &book_id)
+async fn delete_book(book_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = settings::load_settings()?;
+        library::delete_book(Path::new(&value.library_root), &book_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn list_trash() -> Result<Vec<trash::TrashItem>, String> {
-    let value = settings::load_settings()?;
-    trash::list(Path::new(&value.library_root))
+async fn list_trash() -> Result<Vec<trash::TrashItem>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let value = settings::load_settings()?;
+        trash::list(Path::new(&value.library_root))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn restore_trash_item(
+async fn restore_trash_item(
     trash_id: String,
     expected_revision: u64,
     request_id: String,
 ) -> Result<trash::TrashRestoreResult, String> {
-    let value = settings::load_settings()?;
-    let control = control::ControlDb::open_current()?;
-    trash::restore_idempotent(
-        Path::new(&value.library_root),
-        &control,
-        &trash_id,
-        expected_revision,
-        &request_id,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = settings::load_settings()?;
+        let control = control::ControlDb::open_current()?;
+        trash::restore_idempotent(
+            Path::new(&value.library_root),
+            &control,
+            &trash_id,
+            expected_revision,
+            &request_id,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn permanently_delete_trash_item(
+async fn permanently_delete_trash_item(
     trash_id: String,
     expected_revision: u64,
     request_id: String,
 ) -> Result<trash::TrashDeleteResult, String> {
-    let value = settings::load_settings()?;
-    let control = control::ControlDb::open_current()?;
-    trash::delete_idempotent(
-        Path::new(&value.library_root),
-        &control,
-        &trash_id,
-        expected_revision,
-        &request_id,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = settings::load_settings()?;
+        let control = control::ControlDb::open_current()?;
+        trash::delete_idempotent(
+            Path::new(&value.library_root),
+            &control,
+            &trash_id,
+            expected_revision,
+            &request_id,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn list_temporary_content() -> Result<Vec<temporary_content::TemporaryItem>, String> {
-    temporary_content::items()
+async fn list_temporary_content() -> Result<Vec<temporary_content::TemporaryItem>, String> {
+    tauri::async_runtime::spawn_blocking(temporary_content::items)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn get_companion_status(tool: String) -> Result<tools::ToolStatus, String> {
-    tools::status(&tool)
+async fn get_companion_status(tool: String) -> Result<tools::ToolStatus, String> {
+    // Locks TOOL_MANAGER + touches the control DB — never on the IPC thread.
+    tauri::async_runtime::spawn_blocking(move || tools::status(&tool))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn start_reader_session(
+async fn start_reader_session(
     book_id: String,
-    state: tauri::State<'_, reader_server::ReaderServiceState>,
+    state: tauri::State<'_, std::sync::Arc<reader_server::ReaderServiceState>>,
 ) -> Result<reader_server::ReaderSessionDescriptor, String> {
-    let value = settings::load_settings()?;
-    reader_server::start_session(&state, &value, &book_id)
+    // Server bind + reader template read are blocking IO — keep off IPC thread.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = settings::load_settings()?;
+        reader_server::start_session(&state, &value, &book_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn close_reader_session(
+async fn close_reader_session(
     session_id: String,
-    state: tauri::State<'_, reader_server::ReaderServiceState>,
+    state: tauri::State<'_, std::sync::Arc<reader_server::ReaderServiceState>>,
 ) -> Result<bool, String> {
-    reader_server::close_session(&state, &session_id)
+    // Session teardown joins the accept thread — keep off IPC thread.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        reader_server::close_session(&state, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn quit_app(app: tauri::AppHandle) {
+async fn quit_app(app: tauri::AppHandle) {
+    // Exit immediately without touching tool/engine locks: Job Objects reap the
+    // sidecars at process exit, and the frontend has already flushed its state.
     app.exit(0);
 }
 
@@ -898,78 +1092,109 @@ fn schedule_tray_exit_fallback(app: &tauri::AppHandle, delay: Duration) {
 }
 
 #[tauri::command]
-fn cancel_and_discard(app: tauri::AppHandle) -> Result<(), String> {
-    let locations = storage::StorageLocations::current()?;
-    let mut control = control::ControlDb::open_current()?;
-    control.capture_cancel_discard()?;
-    tools::stop_all()?;
-    control.cancel_active_tasks()?;
-    reconcile_cancel_and_discard(&locations, &control)?;
-    app.exit(0);
-    Ok(())
+async fn cancel_and_discard(app: tauri::AppHandle) -> Result<(), String> {
+    // Graceful flush (worker/engine stop + DB intent) happens on a blocking
+    // worker so the event loop stays responsive; the tray fallback still bounds
+    // total shutdown time if the tools lock is held elsewhere.
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let locations = storage::StorageLocations::current()?;
+        let mut control = control::ControlDb::open_current()?;
+        control.capture_cancel_discard()?;
+        tools::stop_all()?;
+        control.cancel_active_tasks()?;
+        reconcile_cancel_and_discard(&locations, &control)?;
+        app.exit(0);
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn start_podcast_task(task_id: String, app: tauri::AppHandle) -> Result<(), String> {
-    podcast::start_task(task_id, app)
+async fn start_podcast_task(task_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || podcast::start_task(task_id, app))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn create_zhihu_task(
+async fn create_zhihu_task(
     request: zhihu::CreateZhihuTaskRequest,
     app: tauri::AppHandle,
 ) -> Result<tasks::TaskSnapshot, String> {
-    let settings = settings::load_settings()?;
-    let snapshot = zhihu::create_task(&settings, &request)?;
-    let event = control::ControlDb::open_current()?
-        .task_events(&snapshot.id, 0, 1)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "TASK_EVENT_MISSING".to_string())?;
-    app.emit("acquisition://task-event", event)
-        .map_err(|error| error.to_string())?;
-    Ok(snapshot)
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<tasks::TaskSnapshot, String> {
+            let settings = settings::load_settings()?;
+            let snapshot = zhihu::create_task(&settings, &request)?;
+            let event = control::ControlDb::open_current()?
+                .task_events(&snapshot.id, 0, 1)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| "TASK_EVENT_MISSING".to_string())?;
+            app.emit("acquisition://task-event", event)
+                .map_err(|error| error.to_string())?;
+            Ok(snapshot)
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn get_zhihu_login_status() -> Result<zhihu::ZhihuLoginStatus, String> {
-    let settings = settings::load_settings()?;
-    zhihu::login_status(&settings)
+async fn get_zhihu_login_status() -> Result<zhihu::ZhihuLoginStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let settings = settings::load_settings()?;
+        zhihu::login_status(&settings)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn start_zhihu_login() -> Result<(), String> {
-    let settings = settings::load_settings()?;
-    zhihu::start_login(&settings)
+async fn start_zhihu_login() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let settings = settings::load_settings()?;
+        zhihu::start_login(&settings)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn start_zhihu_task(
+async fn start_zhihu_task(
     task_id: String,
     expected_revision: u64,
     app: tauri::AppHandle,
 ) -> Result<tasks::TaskSnapshot, String> {
-    let settings = settings::load_settings()?;
-    zhihu::start_task(&task_id, expected_revision, &settings, &app)
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = settings::load_settings()?;
+        zhihu::start_task(&task_id, expected_revision, &settings, &app)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn control_zhihu_task(
+async fn control_zhihu_task(
     task_id: String,
     action: String,
     expected_revision: u64,
     request_id: String,
     app: tauri::AppHandle,
 ) -> Result<tasks::TaskSnapshot, String> {
-    let settings = settings::load_settings()?;
-    zhihu::control_task(
-        &task_id,
-        &action,
-        expected_revision,
-        &request_id,
-        &settings,
-        &app,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = settings::load_settings()?;
+        zhihu::control_task(
+            &task_id,
+            &action,
+            expected_revision,
+            &request_id,
+            &settings,
+            &app,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -989,146 +1214,172 @@ async fn restart_podcast_task(
     .map_err(|error| format!("RETRY_JOIN_FAILED: {error}"))??;
 
     let (snapshot, kind) = result;
-    // Emit the latest event for the returned snapshot (republish or new queued task).
-    if let Ok(control) = control::ControlDb::open_current() {
-        let after = snapshot.last_sequence.saturating_sub(1);
-        if let Ok(events) = control.task_events(&snapshot.id, after, 1) {
-            if let Some(event) = events.into_iter().next() {
-                let _ = app_for_work.emit(podcast::TASK_EVENT_NAME, event);
+    // Emit the latest event for the returned snapshot (republish or new queued
+    // task), then auto-start — DB reads and worker spawn stay on a blocking
+    // worker, not the async runtime's IPC-facing threads.
+    let snapshot_for_work = snapshot.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        if let Ok(control) = control::ControlDb::open_current() {
+            let after = snapshot_for_work.last_sequence.saturating_sub(1);
+            if let Ok(events) = control.task_events(&snapshot_for_work.id, after, 1) {
+                if let Some(event) = events.into_iter().next() {
+                    let _ = app_for_work.emit(podcast::TASK_EVENT_NAME, event);
+                }
             }
         }
-    }
-    // Full restart creates a queued task — auto-start transcription immediately.
-    if matches!(kind, podcast::RetryKind::Restarted) {
-        if let Err(error) = podcast::start_task(snapshot.id.clone(), app_for_work.clone()) {
-            // Surface as soft error string rather than panicking the command.
-            return Err(format!(
-                "已创建新任务但自动开始失败：{error}。请在任务列表点击「开始」。"
-            ));
+        // Full restart creates a queued task — auto-start transcription immediately.
+        if matches!(kind, podcast::RetryKind::Restarted) {
+            if let Err(error) =
+                podcast::start_task(snapshot_for_work.id.clone(), app_for_work.clone())
+            {
+                // Surface as soft error string rather than panicking the command.
+                return Err(format!(
+                    "已创建新任务但自动开始失败：{error}。请在任务列表点击「开始」。"
+                ));
+            }
         }
-    }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     Ok(snapshot)
 }
 
 #[tauri::command]
-fn open_task_result(task_id: String) -> Result<library::BookDetail, String> {
-    crate::cache::validate_task_id(&task_id)?;
-    let snapshot = control::ControlDb::open_current()?
-        .task_snapshot(&task_id)?
-        .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
-    if !matches!(snapshot.outcome, tasks::TaskOutcome::Success) {
-        return Err("TASK_RESULT_NOT_READY".to_string());
-    }
-    let book_id = snapshot
-        .book_id
-        .clone()
-        .ok_or_else(|| "TASK_RESULT_BOOK_MISSING".to_string())?;
-    match open_book_detail(&book_id) {
-        Ok(detail) => Ok(detail),
-        Err(error) if error.starts_with("Book not found:") => {
-            // Recover: worker may have published to the wrong library root historically,
-            // or the shelf folder was removed. Re-publish from managed task output.
-            let locations = storage::StorageLocations::current_with_library_settings()?;
-            let mut control = control::ControlDb::open_current()?;
-            let transaction =
-                podcast::publish_task_result_at(&mut control, &locations, &task_id).map_err(
-                    |publish_error| {
+async fn open_task_result(task_id: String) -> Result<library::BookDetail, String> {
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<library::BookDetail, String> {
+            crate::cache::validate_task_id(&task_id)?;
+            let snapshot = control::ControlDb::open_current()?
+                .task_snapshot(&task_id)?
+                .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
+            if !matches!(snapshot.outcome, tasks::TaskOutcome::Success) {
+                return Err("TASK_RESULT_NOT_READY".to_string());
+            }
+            let book_id = snapshot
+                .book_id
+                .clone()
+                .ok_or_else(|| "TASK_RESULT_BOOK_MISSING".to_string())?;
+            match open_book_detail(&book_id) {
+                Ok(detail) => Ok(detail),
+                Err(error) if error.starts_with("Book not found:") => {
+                    // Recover: worker may have published to the wrong library root historically,
+                    // or the shelf folder was removed. Re-publish from managed task output.
+                    let locations = storage::StorageLocations::current_with_library_settings()?;
+                    let mut control = control::ControlDb::open_current()?;
+                    let transaction = podcast::publish_task_result_at(
+                        &mut control,
+                        &locations,
+                        &task_id,
+                    )
+                    .map_err(|publish_error| {
                         format!(
                             "书架中找不到已完成播客。已尝试从任务输出重新发布但失败：{publish_error}"
                         )
-                    },
-                )?;
-            if !matches!(transaction.phase, publish::PublishPhase::Committed) {
-                return Err(format!("重新发布未完成（{:?}）", transaction.phase));
+                    })?;
+                    if !matches!(transaction.phase, publish::PublishPhase::Committed) {
+                        return Err(format!("重新发布未完成（{:?}）", transaction.phase));
+                    }
+                    open_book_detail(&transaction.book_id)
+                        .map_err(|open_error| format!("重新发布后仍无法打开播客：{open_error}"))
+                }
+                Err(error) => Err(error),
             }
-            open_book_detail(&transaction.book_id)
-                .map_err(|open_error| format!("重新发布后仍无法打开播客：{open_error}"))
-        }
-        Err(error) => Err(error),
-    }
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn control_podcast_task(
+async fn control_podcast_task(
     task_id: String,
     action: String,
     expected_revision: u64,
     request_id: String,
     app: tauri::AppHandle,
 ) -> Result<tasks::TaskSnapshot, String> {
-    if request_id.trim().is_empty() {
-        return Err("INVALID_REQUEST_ID".to_string());
-    }
-    let input = serde_json::json!({
-        "taskId": task_id,
-        "action": action,
-        "expectedRevision": expected_revision,
-    });
-    let input_hash = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&input).map_err(|error| error.to_string())?)
-    );
-    let mut control = control::ControlDb::open_current()?;
-    match control.claim_command(&request_id, "control_podcast_task", &input_hash)? {
-        control::CommandClaim::Existing(record) => {
-            if let Some(error) = record.error_code {
-                return Err(error);
+    // Claim check, worker suspend/kill and DB writes all block — off IPC thread.
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<tasks::TaskSnapshot, String> {
+            if request_id.trim().is_empty() {
+                return Err("INVALID_REQUEST_ID".to_string());
             }
-            serde_json::from_str(
-                record
-                    .result_json
-                    .as_deref()
-                    .ok_or_else(|| "COMMAND_RESULT_MISSING".to_string())?,
-            )
-            .map_err(|error| error.to_string())
-        }
-        control::CommandClaim::New => {
-            let result = (|| {
-                control.validate_task_control(
-                    &task_id,
-                    tasks::TaskKind::Podcast,
-                    expected_revision,
-                )?;
-                match action.as_str() {
-                    "pause" => podcast::pause_task(&task_id)?,
-                    "resume" => podcast::resume_task(&task_id)?,
-                    "cancel" | "cancel_and_discard" => {
-                        if let Err(error) = podcast::cancel_task(&task_id) {
-                            if error != "WORKER_NOT_RUNNING" {
-                                return Err(error);
+            let input = serde_json::json!({
+                "taskId": task_id,
+                "action": action,
+                "expectedRevision": expected_revision,
+            });
+            let input_hash = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&input).map_err(|error| error.to_string())?)
+            );
+            let mut control = control::ControlDb::open_current()?;
+            match control.claim_command(&request_id, "control_podcast_task", &input_hash)? {
+                control::CommandClaim::Existing(record) => {
+                    if let Some(error) = record.error_code {
+                        return Err(error);
+                    }
+                    serde_json::from_str(
+                        record
+                            .result_json
+                            .as_deref()
+                            .ok_or_else(|| "COMMAND_RESULT_MISSING".to_string())?,
+                    )
+                    .map_err(|error| error.to_string())
+                }
+                control::CommandClaim::New => {
+                    let result = (|| {
+                        control.validate_task_control(
+                            &task_id,
+                            tasks::TaskKind::Podcast,
+                            expected_revision,
+                        )?;
+                        match action.as_str() {
+                            "pause" => podcast::pause_task(&task_id)?,
+                            "resume" => podcast::resume_task(&task_id)?,
+                            "cancel" | "cancel_and_discard" => {
+                                if let Err(error) = podcast::cancel_task(&task_id) {
+                                    if error != "WORKER_NOT_RUNNING" {
+                                        return Err(error);
+                                    }
+                                }
                             }
+                            _ => return Err("INVALID_TASK_CONTROL".to_string()),
+                        }
+                        let event =
+                            control.control_task(&task_id, &action, expected_revision)?;
+                        if action == "cancel_and_discard" {
+                            let locations = storage::StorageLocations::current()?;
+                            cache::discard_podcast_task_at(&locations, &task_id)?;
+                        }
+                        app.emit(podcast::TASK_EVENT_NAME, &event)
+                            .map_err(|error| error.to_string())?;
+                        Ok(event.snapshot)
+                    })();
+                    match result {
+                        Ok(snapshot) => {
+                            let json = serde_json::to_string(&snapshot)
+                                .map_err(|error| error.to_string())?;
+                            control.complete_command(
+                                &request_id,
+                                &json,
+                                None,
+                                i64::try_from(snapshot.revision).ok(),
+                            )?;
+                            Ok(snapshot)
+                        }
+                        Err(error) => {
+                            control.complete_command(&request_id, "{}", Some(&error), None)?;
+                            Err(error)
                         }
                     }
-                    _ => return Err("INVALID_TASK_CONTROL".to_string()),
-                }
-                let event = control.control_task(&task_id, &action, expected_revision)?;
-                if action == "cancel_and_discard" {
-                    let locations = storage::StorageLocations::current()?;
-                    cache::discard_podcast_task_at(&locations, &task_id)?;
-                }
-                app.emit(podcast::TASK_EVENT_NAME, &event)
-                    .map_err(|error| error.to_string())?;
-                Ok(event.snapshot)
-            })();
-            match result {
-                Ok(snapshot) => {
-                    let json =
-                        serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
-                    control.complete_command(
-                        &request_id,
-                        &json,
-                        None,
-                        i64::try_from(snapshot.revision).ok(),
-                    )?;
-                    Ok(snapshot)
-                }
-                Err(error) => {
-                    control.complete_command(&request_id, "{}", Some(&error), None)?;
-                    Err(error)
                 }
             }
-        }
-    }
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1208,7 +1459,9 @@ pub fn run() {
             control_podcast_task,
         ])
         .manage(podcast::PodcastPreviewStore::default())
-        .manage(reader_server::ReaderServiceState::default())
+        .manage(std::sync::Arc::new(
+            reader_server::ReaderServiceState::default(),
+        ))
         .setup(|app| {
             // Windows: file path passed as CLI argument
             let window = app.get_webview_window("main").unwrap();

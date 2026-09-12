@@ -1,6 +1,6 @@
 use crate::job_object::JobObject;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::{Child, ExitStatus};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -8,6 +8,19 @@ use std::process::{Child, ExitStatus};
 pub(super) enum EngineHealth {
     Ready,
     Exited,
+}
+
+/// Outcome of claiming the launch slot for an engine. A held claim marks the
+/// engine as "starting" so the manager mutex can be released while the caller
+/// performs the slow spawn/READY/health/DB pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LaunchClaim {
+    /// The caller owns this engine's launch attempt until `finish_launch`.
+    Acquired,
+    /// Another thread is already spawning or health-checking this engine.
+    AlreadyStarting,
+    /// A live managed process is already registered for this engine.
+    AlreadyRunning,
 }
 
 pub(super) struct ProcessDescriptor {
@@ -88,11 +101,38 @@ impl ManagedProcess {
 #[derive(Default)]
 pub(super) struct ToolManager {
     processes: HashMap<String, ManagedProcess>,
+    /// Engines whose launch slot is claimed but whose process is not yet
+    /// published. Entries appear in `processes` only after spawn, the READY
+    /// handshake, the HTTP health check, and the engine_instances write all
+    /// succeed; until then the claim itself deduplicates concurrent launchers.
+    starting: HashSet<String>,
 }
 
 impl ToolManager {
     pub(super) fn clear(&mut self) {
         self.processes.clear();
+    }
+
+    /// Claims the launch slot for `engine`, or reports why no launch is
+    /// needed. An exited process never blocks a new claim: its snapshot stays
+    /// queryable until the replacement publishes.
+    pub(super) fn begin_launch(&mut self, engine: &str) -> Result<LaunchClaim, String> {
+        if self.starting.contains(engine) {
+            return Ok(LaunchClaim::AlreadyStarting);
+        }
+        if let Some(existing) = self.processes.get_mut(engine) {
+            existing.refresh()?;
+            if existing.exit_status.is_none() {
+                return Ok(LaunchClaim::AlreadyRunning);
+            }
+        }
+        self.starting.insert(engine.to_string());
+        Ok(LaunchClaim::Acquired)
+    }
+
+    /// Releases a launch slot previously taken by `begin_launch`. Idempotent.
+    pub(super) fn finish_launch(&mut self, engine: &str) {
+        self.starting.remove(engine);
     }
 
     pub(super) fn insert(&mut self, process: ManagedProcess) -> Result<(), String> {
@@ -127,7 +167,7 @@ impl ToolManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineHealth, ManagedProcess, ProcessDescriptor, ToolManager};
+    use super::{EngineHealth, LaunchClaim, ManagedProcess, ProcessDescriptor, ToolManager};
     use crate::job_object::JobObject;
     use std::os::windows::process::CommandExt;
     use std::process::Command;
@@ -135,6 +175,83 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    fn test_descriptor(engine: &str) -> ProcessDescriptor {
+        ProcessDescriptor {
+            engine: engine.to_string(),
+            port: Some(43_210),
+            protocol_version: Some(1),
+            token: "memory-only-secret".to_string(),
+            started_at: "2026-07-12T06:30:00Z".to_string(),
+            health: EngineHealth::Ready,
+        }
+    }
+
+    #[test]
+    fn launch_claim_dedupes_and_releases() {
+        let mut manager = ToolManager::default();
+
+        assert_eq!(
+            manager.begin_launch("zhihu").expect("claim must load"),
+            LaunchClaim::Acquired
+        );
+        assert_eq!(
+            manager.begin_launch("zhihu").expect("claim must load"),
+            LaunchClaim::AlreadyStarting
+        );
+        manager.finish_launch("zhihu");
+        assert_eq!(
+            manager.begin_launch("zhihu").expect("claim must load"),
+            LaunchClaim::Acquired
+        );
+        manager.finish_launch("zhihu");
+        // Other engines are unaffected.
+        assert_eq!(
+            manager.begin_launch("podcast").expect("claim must load"),
+            LaunchClaim::Acquired
+        );
+        manager.finish_launch("podcast");
+    }
+
+    #[test]
+    fn launch_claim_reports_running_then_keeps_exited_queryable() {
+        let child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("test child must start");
+        let job = JobObject::kill_on_close().expect("job object must be created");
+        job.assign(&child).expect("child must join job");
+        let mut manager = ToolManager::default();
+        manager
+            .insert(ManagedProcess::new(child, job, test_descriptor("zhihu")))
+            .expect("process must be registered");
+
+        assert_eq!(
+            manager.begin_launch("zhihu").expect("claim must load"),
+            LaunchClaim::AlreadyRunning
+        );
+
+        let mut process = manager.processes.remove("zhihu").expect("process exists");
+        process.child.kill().expect("child must be killable");
+        let _ = process.child.wait();
+        manager
+            .processes
+            .insert("zhihu".to_string(), process);
+
+        assert_eq!(
+            manager.begin_launch("zhihu").expect("claim must load"),
+            LaunchClaim::Acquired
+        );
+        // The exited snapshot stays queryable until the replacement publishes.
+        let snapshot = manager
+            .refresh("zhihu")
+            .expect("process status must refresh")
+            .expect("exited process must remain registered");
+        assert_eq!(snapshot.health, EngineHealth::Exited);
+        assert!(snapshot.exit_status.is_some());
+        manager.finish_launch("zhihu");
+    }
 
     #[test]
     fn tracks_owned_process_and_refreshes_exit_status() {
