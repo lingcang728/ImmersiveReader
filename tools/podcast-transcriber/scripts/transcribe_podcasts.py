@@ -20,6 +20,20 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+# P0-2: the desktop host reads this worker's stdout/stderr as UTF-8, but on
+# zh-CN Windows a piped stdio defaults to cp936 (vendored Python 3.12 predates
+# PEP 686), so the first non-ASCII log/print line would emit GBK bytes and kill
+# the host's line reader. Force UTF-8 before anything — including the imports
+# below — can write to stdio. `podcast_transcriber.common._ensure_utf8_stdio`
+# is the shared version of this guard; it is inlined here because stdio must be
+# fixed before importing anything that might emit output.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+del _stream
+
 from deepseek_pricing import (
     DEEPSEEK_DEFAULT_MODEL,
     PodcastUpstreamError,
@@ -63,6 +77,7 @@ from podcast_transcriber.common import (  # noqa: E402, F401
     SUPPORTED_EXTENSIONS,
     VIDEO_EXTENSIONS,
     WORK,
+    _ensure_utf8_stdio,
     ensure_dirs,
     iso_now,
     load_json,
@@ -1705,6 +1720,9 @@ def has_usable_sidecar_subtitle(
 
 
 def setup_file_logger(name: str) -> logging.Logger:
+    # Guarantee the console handler below binds a UTF-8 stdout even if this
+    # module's top-level reconfigure was bypassed (e.g. stdout re-seated later).
+    _ensure_utf8_stdio()
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     logger.handlers.clear()

@@ -1,8 +1,10 @@
 """Project paths, directory bootstrap, and atomic JSON state IO."""
 from __future__ import annotations
 
+import io
 import json
 import os
+import sys
 import threading
 import time
 from datetime import datetime
@@ -176,3 +178,35 @@ def save_json(path: Path, data: Any) -> None:
 
 def iso_now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _ensure_utf8_stdio() -> None:
+    """Force ``sys.stdout``/``sys.stderr`` to UTF-8 with ``errors="replace"``.
+
+    The desktop host decodes worker stdio as UTF-8, but on zh-CN Windows a
+    piped stdio defaults to cp936 (vendored Python 3.12 predates PEP 686), so
+    the first non-ASCII line would emit GBK bytes and kill the host's line
+    reader (P0-2). Call this at the top of every entry point before any
+    logging/print. Idempotent: ``reconfigure`` on an already-UTF-8 stream is a
+    no-op; streams without ``reconfigure`` (e.g. ``io.StringIO`` under pytest
+    capture) are re-wrapped via their binary buffer when possible and
+    otherwise left untouched — stdio repair must never take the worker down.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        try:
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8", errors="replace")
+            elif (
+                getattr(stream, "buffer", None) is not None
+                and (getattr(stream, "encoding", None) or "").replace("-", "").lower() != "utf8"
+            ):
+                # Real binary pipe whose text layer lacks reconfigure: wrap it.
+                setattr(
+                    sys,
+                    name,
+                    io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace", line_buffering=True),
+                )
+        except Exception:
+            pass
