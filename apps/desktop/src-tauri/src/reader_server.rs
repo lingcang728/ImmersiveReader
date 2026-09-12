@@ -415,14 +415,7 @@ fn serve_connection(
         Err(_) => {
             let _ = write_response(
                 &mut writer,
-                ReaderResponse {
-                    status: 400,
-                    headers: vec![(
-                        "Content-Type".to_string(),
-                        "text/plain; charset=utf-8".to_string(),
-                    )],
-                    body: ReaderBody::Bytes(b"Bad request".to_vec()),
-                },
+                crate::reader_http::error_response(400, "Bad request"),
                 deadline,
             );
             // FIN first so the client can finish reading while we wait for

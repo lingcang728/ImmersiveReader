@@ -171,6 +171,13 @@ fn response(status: u16, body: impl Into<Vec<u8>>, content_type: &str) -> Reader
     }
 }
 
+/// Pre-routing error responses (e.g. a malformed request line) built by
+/// reader_server — they must carry the same hardening headers as routed
+/// responses, not a bare Content-Type.
+pub(crate) fn error_response(status: u16, message: &str) -> ReaderResponse {
+    response(status, message.as_bytes(), "text/plain; charset=utf-8")
+}
+
 /// The one document route (`GET /s/<token>/reader`) — the only response that
 /// is ever rendered as a page, so it carries the document-level CSP.
 fn document_response(status: u16, body: Arc<Vec<u8>>, content_type: &str) -> ReaderResponse {
