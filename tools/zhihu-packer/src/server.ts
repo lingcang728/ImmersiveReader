@@ -1,12 +1,24 @@
 import express from 'express';
-import { getTasks, saveTask, resetRunningTasks, getTask } from './db.js';
-import { cancelTask, createTask, queueTask } from './scheduler.js';
+import { getTasks, resetRunningTasks, getTask } from './db.js';
+import { cancelTask, createTask, pauseTask, queueTask } from './scheduler.js';
 import { logger } from './utils.js';
 import { getLoginStatus } from './browser.js';
 import { runLogin } from './login.js';
 import { randomBytes } from 'crypto';
 import { resolveSidecarPort, writeReady } from './sidecar-protocol.js';
 import { hasBearerToken } from './auth.js';
+
+// ── P1-7：进程级兜底 ──
+// 任何漏网的 Promise 拒绝 / 同步异常只记日志，不许直接杀掉 sidecar；
+// 否则一次抓取抖动会让宿主眼里整个引擎“崩退”，所有任务跟着挂。
+process.on('unhandledRejection', (reason) => {
+  const message = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
+  logger.error(`未处理的 Promise 拒绝（已拦截，进程保持运行）: ${message}`);
+});
+process.on('uncaughtException', (err) => {
+  const message = err instanceof Error ? (err.stack || err.message) : String(err);
+  logger.error(`未捕获异常（已拦截，进程保持运行）: ${message}`);
+});
 
 const app = express();
 const HOST = '127.0.0.1';
@@ -75,9 +87,19 @@ app.post('/api/login/start', requireLocalToken, (_req, res) => {
   if (loginPromise) {
     return res.json({ success: true, started: false, message: '登录流程已经在运行。' });
   }
-  loginPromise = runLogin().finally(() => {
-    loginPromise = null;
-  });
+  const currentLogin = runLogin();
+  loginPromise = currentLogin;
+  // 显式观察拒绝：登录流程任何逃逸的错误（含 finally 中的关闭异常）都已被
+  // closeBrowserContext 内部消化或在此落日志，绝不成为 unhandledRejection（P1-7）。
+  currentLogin
+    .catch((err) => {
+      logger.error(`登录流程异常结束: ${err?.message || err}`);
+    })
+    .finally(() => {
+      if (loginPromise === currentLogin) {
+        loginPromise = null;
+      }
+    });
   res.json({ success: true, started: true });
 });
 
@@ -128,6 +150,15 @@ app.get('/api/tasks/:id', requireLocalToken, (req, res) => {
 app.post('/api/tasks/:id/start', requireLocalToken, async (req, res) => {
   const taskId = String(req.params.id);
   try {
+    // 入队前校验：不存在的任务直接 404（P1-7），终态任务（cancelled/success）
+    // 409——它们永不再被调度（P1-9）。paused/failed/partial_success 走恢复语义。
+    const task = getTask(taskId);
+    if (!task) {
+      return res.status(404).json({ success: false, error: '任务不存在' });
+    }
+    if (task.status === 'cancelled' || task.status === 'success') {
+      return res.status(409).json({ success: false, error: `任务已是终态(${task.status})，不可再启动` });
+    }
     const queued = queueTask(taskId);
     res.json({ success: true, queued, message: queued ? 'Task queued' : 'Task already queued or running' });
   } catch (e: any) {
@@ -139,7 +170,13 @@ app.post('/api/tasks/:id/start', requireLocalToken, async (req, res) => {
 app.post('/api/tasks/:id/pause', requireLocalToken, async (req, res) => {
   const taskId = String(req.params.id);
   try {
-    saveTask({ id: taskId, status: 'paused' });
+    // 走调度器 pauseTask：统一语义，不存在的任务不再被 saveTask 误插成行（P1-9）。
+    if (!getTask(taskId)) {
+      return res.status(404).json({ success: false, error: '任务不存在' });
+    }
+    if (!pauseTask(taskId)) {
+      return res.status(409).json({ success: false, error: '任务已结束，无法暂停' });
+    }
     res.json({ success: true, message: 'Pause signal sent' });
   } catch (e: any) {
     res.status(500).json({ success: false, error: e.message });
@@ -149,6 +186,9 @@ app.post('/api/tasks/:id/pause', requireLocalToken, async (req, res) => {
 app.post('/api/tasks/:id/cancel', requireLocalToken, (req, res) => {
   const taskId = String(req.params.id);
   try {
+    if (!getTask(taskId)) {
+      return res.status(404).json({ success: false, error: '任务不存在' });
+    }
     const cancelled = cancelTask(taskId);
     if (!cancelled) return res.status(409).json({ success: false, error: '任务无法取消' });
     res.json({ success: true, message: 'Cancel signal sent' });

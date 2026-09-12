@@ -4,10 +4,11 @@ import { logger } from './utils.js';
 export async function runLogin(): Promise<void> {
   logger.info('正在开启有头浏览器以进行知乎登录，请在弹出的浏览器中手动完成登录。');
   
-  const context = await getBrowserContext(false); // 有头模式
-  const page = await context.newPage();
-  
   try {
+    // 浏览器启动/开页也可能抛错：必须进 try，否则 finally 的 closeBrowserContext
+    // 走不到，泄漏的有头窗口会一直被复用（P1-7/P1-8）。
+    const context = await getBrowserContext(false); // 有头模式
+    const page = await context.newPage();
     await page.goto('https://www.zhihu.com/signin', { waitUntil: 'domcontentloaded' });
     
     logger.info('已打开知乎登录页面。正在检测登录状态...');

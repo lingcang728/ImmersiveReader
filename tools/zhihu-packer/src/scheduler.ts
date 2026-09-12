@@ -32,29 +32,102 @@ import {
 let runQueue: Promise<void> = Promise.resolve();
 const queuedTaskIds = new Set<string>();
 
+/**
+ * 判断任务当前状态能否进入运行队列。
+ * - pending：直接可入队；
+ * - paused / failed / partial_success：复位为 pending 后入队（恢复 / 重跑失败条目）；
+ * - running / cancelled / success：拒绝（运行中或终态）。
+ * 返回 false 时任务不会被调度。
+ */
+export function markTaskQueueable(taskId: string): boolean {
+  const task = getTask(taskId);
+  if (!task) {
+    logger.warn(`无法入队，任务不存在: ${taskId}`);
+    return false;
+  }
+  if (task.status === 'running') {
+    logger.warn(`任务已经在运行中: ${taskId}`);
+    return false;
+  }
+  if (task.status === 'cancelled' || task.status === 'success') {
+    logger.warn(`任务已到达终态(${task.status})，不可再入队: ${taskId}`);
+    return false;
+  }
+  if (task.status !== 'pending') {
+    // paused/failed/partial_success → pending，这样 tryStartTask 的 pending→running 门槛才放行。
+    saveTask({ id: taskId, status: 'pending' });
+  }
+  return true;
+}
+
 export function queueTask(taskId: string): boolean {
   if (queuedTaskIds.has(taskId)) {
+    // 已在队列中等待执行：若期间被用户暂停，/start 恢复时把它翻回 pending，
+    // 使出队时 tryStartTask 正常放行（幂等恢复，不重复入队）。
+    const queued = getTask(taskId);
+    if (queued?.status === 'paused') {
+      saveTask({ id: taskId, status: 'pending' });
+      return true;
+    }
     logger.warn(`任务已经在运行队列中: ${taskId}`);
+    return false;
+  }
+  if (!markTaskQueueable(taskId)) {
     return false;
   }
 
   queuedTaskIds.add(taskId);
+  // 尾部必须带 .catch：runTaskInternal 任何逃逸的 rejection（含 try 外的
+  // 「任务不存在」与 finally 中的关闭异常）都不能成为未观察的 unhandledRejection，
+  // 也不能污染队列导致后续任务永不被执行（P1-7）。
   runQueue = runQueue
     .catch(err => logger.error(`任务队列上一个任务异常: ${err?.message || err}`))
     .then(() => runTaskInternal(taskId))
+    .catch(err => logger.error(`任务 ${taskId} 执行异常: ${err?.message || err}`))
     .finally(() => {
       queuedTaskIds.delete(taskId);
     });
   return true;
 }
 
+/** 任务终态：不再接受调度/暂停/取消。 */
+const TERMINAL_TASK_STATUSES: ReadonlySet<Task['status']> = new Set([
+  'success',
+  'partial_success',
+  'failed',
+  'cancelled',
+]);
+
 export function cancelTask(taskId: string): boolean {
   const task = getTask(taskId);
-  if (!task || task.status === 'success' || task.status === 'partial_success' || task.status === 'failed') {
+  if (!task) {
     return false;
   }
-  saveTask({ id: taskId, status: 'paused' });
+  if (task.status === 'cancelled') {
+    return true; // 幂等：已取消的任务再次取消视为成功
+  }
+  if (TERMINAL_TASK_STATUSES.has(task.status)) {
+    return false;
+  }
+  // cancelled 是真正的终态：运行循环会在下一个检查点停下，排队任务出队时被
+  // tryStartTask（pending→running）拒绝，永不再被调度执行（P1-9）。
+  saveTask({ id: taskId, status: 'cancelled' });
   return true;
+}
+
+export function pauseTask(taskId: string): boolean {
+  const task = getTask(taskId);
+  if (!task) {
+    return false;
+  }
+  if (task.status === 'paused') {
+    return true; // 幂等
+  }
+  if (task.status === 'running' || task.status === 'pending') {
+    saveTask({ id: taskId, status: 'paused' });
+    return true;
+  }
+  return false;
 }
 
 function emitProgress(taskId: string, status: string, message: string) {
@@ -90,6 +163,12 @@ async function handleCaptchaInteractively(taskId: string, targetUrl: string): Pr
   let success = false;
   
   while (elapsed < maxWait) {
+    // 暂停/取消要打断验证码等待，否则用户取消后仍要空等 5 分钟（P1-9）。
+    const stoppedDuringCaptcha = checkTaskStopped(taskId);
+    if (stoppedDuringCaptcha) {
+      emitProgress(taskId, stoppedDuringCaptcha, '人机验证等待期间任务被暂停或取消。');
+      break;
+    }
     try {
       if (page.isClosed()) {
         logger.warn('人机验证浏览器窗口已被关闭。');
@@ -190,7 +269,10 @@ async function runTaskInternal(taskId: string) {
   }
 
   if (!tryStartTask(taskId)) {
-    logger.warn(`任务已经在运行中: ${taskId}`);
+    // tryStartTask 只放行 pending→running；paused/cancelled/终态任务走到这里说明
+    // 是「入队后被暂停或取消」的排队任务——保持其状态原样返回，绝不翻回 running。
+    const current = getTask(taskId);
+    logger.warn(`任务跳过执行（当前状态: ${current?.status ?? 'missing'}）: ${taskId}`);
     return;
   }
 
@@ -279,8 +361,12 @@ async function runTaskInternal(taskId: string) {
         persistIndexProgress('answers', scrapedIndexes, `回答索引完成：${answers.length} 条`);
       }
 
-      // 如果有暂停，需要在这里检查
-      if (checkIsPaused(taskId)) return;
+      // 如果有暂停/取消，需要在这里检查
+      const stoppedAfterAnswers = checkTaskStopped(taskId);
+      if (stoppedAfterAnswers) {
+        emitProgress(taskId, stoppedAfterAnswers, stoppedAfterAnswers === 'paused' ? '任务已被用户手动暂停。' : '任务已被用户取消。');
+        return;
+      }
 
       if (task.item_types === 'articles' || task.item_types === 'all') {
         const articles = await scrapePeopleIndex(
@@ -301,8 +387,9 @@ async function runTaskInternal(taskId: string) {
       }
 
       if (scrapedIndexes.length === 0) {
-        emitProgress(taskId, 'failed', '未从答主主页中发现任何有效的回答或文章。');
-        saveTask({ id: taskId, status: 'failed' });
+        if (saveTaskStatusGuarded(taskId, 'failed')) {
+          emitProgress(taskId, 'failed', '未从答主主页中发现任何有效的回答或文章。');
+        }
         return;
       }
 
@@ -342,6 +429,12 @@ async function runTaskInternal(taskId: string) {
     // 4. 消费队列
     const incomingRoot = taskIncomingRoot(outputBaseDir, taskId);
 
+    // P1-10：归档目录名归一到任务 peopleId。抓取到的 authorId 可能混有
+    // 'unknown'/'anonymous'/真实 ID，若直接参与目录命名会产生多个作者目录，
+    // publishTaskStage 要求恰好一个作者目录 → 单条抖动整任务 failed。
+    // 目录名与 DB 身份统一用 task.author_id；authorName 仅作展示（任务级规范名）。
+    let archiveAuthorName = getTask(taskId)?.author_name || task.author_name || '';
+
     // 全局速率预算：滑动窗口记录最近条目成败，用于自适应冷却与保护性中止
     const recentResults: boolean[] = [];
     let consumedCount = 0;
@@ -352,9 +445,10 @@ async function runTaskInternal(taskId: string) {
     };
 
     for (let i = 0; i < pendingItems.length; i++) {
-      // 循环中首先检查状态是否被暂停
-      if (checkIsPaused(taskId)) {
-        emitProgress(taskId, 'paused', '任务已被用户手动暂停。');
+      // 循环中首先检查状态是否被暂停/取消
+      const stopped = checkTaskStopped(taskId);
+      if (stopped) {
+        emitProgress(taskId, stopped, stopped === 'paused' ? '任务已被用户手动暂停。' : '任务已被用户取消。');
         return;
       }
 
@@ -371,8 +465,9 @@ async function runTaskInternal(taskId: string) {
       const maxCaptchaAttempts = 1;
 
       while (retryCount <= maxRetries && !success) {
-        if (checkIsPaused(taskId)) {
-          emitProgress(taskId, 'paused', '任务在重试前被暂停。');
+        const stoppedBeforeRetry = checkTaskStopped(taskId);
+        if (stoppedBeforeRetry) {
+          emitProgress(taskId, stoppedBeforeRetry, stoppedBeforeRetry === 'paused' ? '任务在重试前被暂停。' : '任务在重试前被取消。');
           return;
         }
 
@@ -390,19 +485,35 @@ async function runTaskInternal(taskId: string) {
 
           let extracted;
           if (item.item_type === 'answer') {
-            extracted = await scrapeAnswer(page, item.url);
+            extracted = await scrapeAnswer(page, item.url, task.author_id);
           } else {
-            extracted = await scrapeArticle(page, item.url);
+            extracted = await scrapeArticle(page, item.url, task.author_id);
           }
 
-          const relativePath = await writeMarkdownFile(extracted, incomingRoot);
+          // P1-10：归一归档身份到任务 peopleId。目录名/DB author_id 一律用任务目标，
+          // 单条抓取回退（'unknown'/'anonymous'）或 API 返回的真实 ID 都不再分裂作者目录；
+          // authorName 取任务级规范名（索引阶段已持久化），抓取值仅作展示兜底。
+          if (!archiveAuthorName) {
+            archiveAuthorName = extracted.authorName || '未知作者';
+            saveTask({ id: taskId, author_name: archiveAuthorName });
+          }
+          const normalizedExtracted: typeof extracted = {
+            ...extracted,
+            authorId: task.author_id,
+            authorName: archiveAuthorName,
+          };
+
+          const relativePath = await writeMarkdownFile(normalizedExtracted, incomingRoot, {
+            id: task.author_id,
+            name: archiveAuthorName,
+          });
           
           // 更新数据库 items 属性缓存（例如最新的 voteup_count）
           saveItem({
-            id: extracted.id,
-            item_type: extracted.type,
-            author_id: extracted.authorId,
-            author_name: extracted.authorName,
+            id: normalizedExtracted.id,
+            item_type: normalizedExtracted.type,
+            author_id: normalizedExtracted.authorId,
+            author_name: normalizedExtracted.authorName,
             title: extracted.title,
             answer_id: extracted.answerId || null,
             question_id: extracted.questionId || null,
@@ -482,8 +593,10 @@ async function runTaskInternal(taskId: string) {
 
         // 如果是不可恢复的登录错误，我们建议直接中断整个大任务，不要傻傻等待后面几十个任务报错
         if (failureCode === 'LOGIN_REQUIRED' || failureCode === 'CAPTCHA_REQUIRED') {
-          saveTask({ id: taskId, status: 'failed' });
-          emitProgress(taskId, 'failed', `遇到登录障碍，任务终止: ${errorMessage}。请在沉浸阅读的知乎获取面板重新登录后再重试。`);
+          // 用户暂停/取消优先：不要把 cancelled/paused 覆盖成 failed（P1-9）。
+          if (saveTaskStatusGuarded(taskId, 'failed')) {
+            emitProgress(taskId, 'failed', `遇到登录障碍，任务终止: ${errorMessage}。请在沉浸阅读的知乎获取面板重新登录后再重试。`);
+          }
           return;
         }
       }
@@ -497,8 +610,9 @@ async function runTaskInternal(taskId: string) {
 
       const failuresInWindow = recentResults.filter(ok => !ok).length;
       if (recentResults.length >= 10 && failuresInWindow >= 8) {
-        saveTask({ id: taskId, status: 'failed' });
-        emitProgress(taskId, 'failed', '⛔ 最近 10 篇失败率过高，疑似触发站点风控，任务已保护性中止。请稍后用「重跑失败条目」恢复。');
+        if (saveTaskStatusGuarded(taskId, 'failed')) {
+          emitProgress(taskId, 'failed', '⛔ 最近 10 篇失败率过高，疑似触发站点风控，任务已保护性中止。请稍后用「重跑失败条目」恢复。');
+        }
         return;
       }
 
@@ -513,6 +627,12 @@ async function runTaskInternal(taskId: string) {
     }
 
     // 5. 循环结束，检查最终任务结果
+    // 发布前再检查一次：循环结束后用户仍可能暂停/取消，终态写入不得覆盖（P1-9）。
+    const stoppedBeforeFinish = checkTaskStopped(taskId);
+    if (stoppedBeforeFinish) {
+      emitProgress(taskId, stoppedBeforeFinish, stoppedBeforeFinish === 'paused' ? '任务已暂停，终止于收尾前。' : '任务已取消，终止于收尾前。');
+      return;
+    }
     const finalTask = getTask(taskId);
     if (finalTask) {
       const isComplete = finalTask.success_count + finalTask.failed_count === finalTask.total_count;
@@ -529,76 +649,102 @@ async function runTaskInternal(taskId: string) {
           const authorName = successfulItems.find(item => item.author_name)?.author_name
             || task.author_name
             || task.author_id;
-          publishTaskStage(outputBaseDir, taskId, task.author_id, {
+          const publishResult = publishTaskStage(outputBaseDir, taskId, task.author_id, {
             authorName,
             items: successfulItems,
           });
           const publishedItems = successfulItems
             .map(item => {
-              const outputPath = resolvePublishedTaskItemPath(outputBaseDir, taskId, item.output_path);
+              let outputPath = resolvePublishedTaskItemPath(outputBaseDir, taskId, item.output_path);
+              // P1-10：旧版本产生的多作者目录会被归并到规范目录，条目记录的旧目录名
+              // 可能不再存在——章节文件一律平铺在作者目录根部，回退按文件名定位。
+              if ((!outputPath || !fs.existsSync(outputPath)) && item.output_path) {
+                const flat = path.join(publishResult.finalRoot, path.basename(item.output_path));
+                if (fs.existsSync(flat)) {
+                  outputPath = flat;
+                }
+              }
               if (!outputPath || !fs.existsSync(outputPath)) {
                 throw new Error(`ZHIHU_PUBLISH_FAILED: published file missing for ${item.item_id}`);
               }
               return { ...item, output_path: outputPath, updated_at: Date.now() };
             });
           recordPublishedTaskItems(publishedItems);
-          const authors = new Map<string, string>();
-          for (const item of publishedItems) {
-            if (item.author_id && item.author_name) {
-              authors.set(item.author_id, item.author_name);
-            }
-          }
-          for (const [authId, authName] of authors.entries()) {
-            generateAuthorIndex(
-              authId,
-              authName,
-              outputBaseDir,
-              publishedItems.filter(item => item.author_id === authId),
-            );
-          }
+          // 归档身份已归一到任务 peopleId：一本书一个作者目录，index.md 写入
+          // 发布事务返回的真实目录，而不是按条目 author_id 重新推导（P1-10）。
+          generateAuthorIndex(
+            task.author_id,
+            authorName,
+            outputBaseDir,
+            publishedItems,
+            publishResult.authorDirectory,
+          );
         } catch (err: any) {
-          saveTask({ id: taskId, status: 'failed' });
-          emitProgress(taskId, 'failed', `发布归档失败，旧成功版本保持不变: ${err.message}`);
+          if (saveTaskStatusGuarded(taskId, 'failed')) {
+            emitProgress(taskId, 'failed', `发布归档失败，旧成功版本保持不变: ${err.message}`);
+          }
           return;
         }
       }
 
       // Only expose a terminal status after its publish transaction is durable. The desktop
       // poller treats terminal as final and refreshes the shelf immediately.
-      saveTask({ id: taskId, status });
-      emitProgress(taskId, status, `任务执行完毕。总数: ${finalTask.total_count}, 成功: ${finalTask.success_count}, 失败: ${finalTask.failed_count}`);
+      // 若收尾期间用户暂停/取消，则保持该状态（P1-9：取消是终态，不得覆盖）。
+      if (checkTaskStopped(taskId)) {
+        emitProgress(taskId, checkTaskStopped(taskId) || 'cancelled', '任务在收尾期间被暂停或取消，保持用户选择的状态。');
+      } else {
+        saveTask({ id: taskId, status });
+        emitProgress(taskId, status, `任务执行完毕。总数: ${finalTask.total_count}, 成功: ${finalTask.success_count}, 失败: ${finalTask.failed_count}`);
+      }
     }
 
   } catch (e: any) {
     logger.error(`任务执行过程严重崩溃: ${e.message}`);
-    saveTask({ id: taskId, status: 'failed' });
-    emitProgress(taskId, 'failed', `严重错误导致任务异常中止: ${e.message}`);
+    if (saveTaskStatusGuarded(taskId, 'failed')) {
+      emitProgress(taskId, 'failed', `严重错误导致任务异常中止: ${e.message}`);
+    }
   } finally {
     await closeBrowserContext();
   }
 }
 
 /**
- * 辅助方法：检查数据库状态是否要求暂停
+ * 辅助方法：检查数据库状态是否要求停止（暂停或取消）。
+ * 任务行被删除同样视为停止信号，避免对幽灵任务继续抓取。
  */
-function checkIsPaused(taskId: string): boolean {
+function checkTaskStopped(taskId: string): 'paused' | 'cancelled' | null {
   const task = getTask(taskId);
-  return task ? task.status === 'paused' : false;
+  if (!task) return 'cancelled';
+  return task.status === 'paused' || task.status === 'cancelled' ? task.status : null;
+}
+
+/**
+ * 工作器驱动的状态写入：用户暂停/取消优先，返回 false 表示未写入。
+ * 防止循环外层的失败/完成写入把 cancelled/paused 覆盖回 failed（P1-9）。
+ */
+function saveTaskStatusGuarded(taskId: string, status: Task['status']): boolean {
+  if (checkTaskStopped(taskId)) return false;
+  saveTask({ id: taskId, status });
+  return true;
 }
 
 /**
  * 为答主目录生成 Obsidian 双链导航索引 index.md
+ * @param authorDirectory 可选：发布事务实际落地的作者目录名。传入后 index.md
+ *   直接写进该目录，而不是按 authorName+authorId 重新推导（P1-10：推导名可能与
+ *   归一化后的真实目录不一致）。
  */
 export function generateAuthorIndex(
   authorId: string,
   authorName: string,
   outputBaseDir: string,
   publishedItems?: readonly (ReturnType<typeof getTaskItems>[number])[],
+  authorDirectory?: string,
 ) {
   const items = publishedItems || getAuthorSuccessItems(authorId);
   if (items.length === 0) return;
 
-  const authorDirName = sanitizeFilename(authorName, authorId);
+  const authorDirName = authorDirectory || sanitizeFilename(authorName, authorId);
   const authorPath = path.resolve(outputBaseDir, authorDirName);
   const indexPath = path.join(authorPath, 'index.md');
 

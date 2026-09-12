@@ -9,8 +9,24 @@ import { resolveBrowserCacheDir, resolveBrowserExecutable, resolveProfileDir } f
 let activeContext: BrowserContext | null = null;
 let activeBrowser: Browser | null = null;
 let activeObscuraProcess: ChildProcess | null = null;
+let obscuraSpawnError: string | null = null;
 let currentHeadlessMode: boolean | null = null;
 let currentBackend: 'obscura' | 'playwright' | null = null;
+
+/**
+ * 浏览器生命周期串行锁（promise mutex）。
+ * getBrowserContext / closeBrowserContext / getLoginStatus 的 check-then-act
+ * 曾经没有互斥：两个并发 launch 会同时争抢同一 profile 目录必炸一方；
+ * login-status 查询还会把进行中的有头登录/验证码窗口直接 close 掉（P1-8）。
+ * 所有生命周期操作一律经此锁串行化。
+ */
+let browserLifecycleQueue: Promise<unknown> = Promise.resolve();
+
+export function withBrowserLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = browserLifecycleQueue.then(fn, fn);
+  browserLifecycleQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
 
 let obscuraPort = process.env.OBSCURA_PORT ? Number(process.env.OBSCURA_PORT) : 0;
 const chromeProfileDir = resolveProfileDir({ cwd: process.cwd(), environment: process.env });
@@ -148,6 +164,13 @@ async function ensureObscuraPort(): Promise<void> {
 async function waitForObscuraReady(timeoutMs = 10000): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
+    // spawn 失败/进程早退时快速失败，不再空等整个超时窗口（P1-7）。
+    if (obscuraSpawnError) {
+      throw new Error(`Obscura 进程启动失败: ${obscuraSpawnError}`);
+    }
+    if (!activeObscuraProcess) {
+      throw new Error('Obscura 进程在等待 CDP 就绪期间退出。');
+    }
     if (await isObscuraReady()) {
       return;
     }
@@ -184,16 +207,34 @@ async function startObscuraServer(): Promise<void> {
     args.push('--stealth');
   }
 
+  obscuraSpawnError = null;
   activeObscuraProcess = spawn(executable, args, {
     stdio: 'ignore',
     windowsHide: true
+  });
+
+  // spawn 失败（如 ENOENT）会异步触发 'error' 事件；没有监听器的 'error'
+  // 事件会成为 uncaughtException 杀掉整个 sidecar（P1-7）。
+  activeObscuraProcess.on('error', (err) => {
+    obscuraSpawnError = err?.message || String(err);
+    logger.error(`Obscura 进程错误: ${obscuraSpawnError}`);
+    activeObscuraProcess = null;
   });
 
   activeObscuraProcess.on('exit', () => {
     activeObscuraProcess = null;
   });
 
-  await waitForObscuraReady();
+  try {
+    await waitForObscuraReady();
+  } catch (err) {
+    // CDP 就绪失败/超时时回收子进程，避免遗留孤儿浏览器进程（P1-7）。
+    if (activeObscuraProcess) {
+      activeObscuraProcess.kill();
+      activeObscuraProcess = null;
+    }
+    throw err;
+  }
   logger.info(`Obscura CDP 服务已启动: ${getCdpEndpoint()}`);
 }
 
@@ -290,13 +331,17 @@ async function injectStoredCookies(context: BrowserContext): Promise<void> {
   }
 }
 
-export async function getBrowserContext(headless = true): Promise<BrowserContext> {
+export function getBrowserContext(headless = true): Promise<BrowserContext> {
+  return withBrowserLock(() => getBrowserContextLocked(headless));
+}
+
+async function getBrowserContextLocked(headless: boolean): Promise<BrowserContext> {
   const backend = shouldUseObscura(headless) ? 'obscura' : 'playwright';
 
   // 如果已存在 Context 且 headless 模式与当前请求的不一致，我们需要先关闭旧的
   if (activeContext && (currentHeadlessMode !== headless || currentBackend !== backend)) {
     logger.info(`切换浏览器模式：从 ${currentBackend}/${currentHeadlessMode} 切换为 ${backend}/${headless}。正在重启浏览器...`);
-    await closeBrowserContext();
+    await closeBrowserContextLocked();
   }
 
   if (activeContext) {
@@ -394,30 +439,79 @@ export async function getBrowserContext(headless = true): Promise<BrowserContext
   throw new Error(`无法启动 Playwright 浏览器，已尝试系统 Chrome、Edge 及默认 Chromium。错误信息: ${lastError?.message}`);
 }
 
-export async function getLoginStatus(): Promise<{ loggedIn: boolean }> {
-  const wasActive = activeContext !== null;
-  const context = await getBrowserContext(true);
-  const cookies = await context.cookies();
-  if (!wasActive) {
-    await closeBrowserContext();
+/**
+ * 读取本地持久化登录凭据（.obscura-profile/cookies.json）中是否存在有效 z_c0。
+ * 每次成功的登录/人机验证流程都会通过 syncCookiesToObscuraStorage 刷新该文件，
+ * 因此它是 sidecar 侧的登录态事实来源，可用于无浏览器的只读判定。
+ */
+function hasStoredLoginCookie(): boolean {
+  const file = path.join(obscuraStorageDir, 'cookies.json');
+  if (!fs.existsSync(file)) {
+    return false;
   }
-  return { loggedIn: cookies.some(cookie => cookie.name === 'z_c0') };
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (!Array.isArray(parsed)) {
+      return false;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    return parsed.some((c: any) =>
+      c && c.name === 'z_c0'
+      && (typeof c.expires !== 'number' || !Number.isFinite(c.expires) || c.expires <= 0 || c.expires > now));
+  } catch (e: any) {
+    logger.warn(`解析登录凭据文件失败: ${e?.message || e}`);
+    return false;
+  }
 }
 
-export async function closeBrowserContext() {
+/**
+ * 只读登录态查询（P1-8）：
+ * - 绝不新建/切换 context——曾经有头登录或验证码窗口活跃时，这里的模式检查会
+ *   直接 closeBrowserContext，把用户正在验证的窗口杀掉并泄漏新 headless context；
+ * - 有活跃 context 时只读其 Cookie；没有活跃 context 时只读持久化凭据文件，
+ *   不为了一次状态查询拉起浏览器。
+ */
+export function getLoginStatus(): Promise<{ loggedIn: boolean }> {
+  return withBrowserLock(async () => {
+    if (activeContext) {
+      try {
+        const cookies = await activeContext.cookies();
+        return { loggedIn: cookies.some(cookie => cookie.name === 'z_c0') };
+      } catch (e: any) {
+        logger.warn(`读取活跃浏览器 Cookie 失败，改用本地登录凭据判断: ${e?.message || e}`);
+      }
+    }
+    return { loggedIn: hasStoredLoginCookie() };
+  });
+}
+
+export function closeBrowserContext(): Promise<void> {
+  return withBrowserLock(closeBrowserContextLocked);
+}
+
+/** 锁内关闭实现：必须容忍任何异常（常用于 finally），绝不能把 rejection 抛给调用方（P1-7）。 */
+async function closeBrowserContextLocked(): Promise<void> {
   const backend = currentBackend;
 
   try {
     if (backend === 'obscura') {
       if (activeBrowser) {
         await activeBrowser.close().catch(() => {});
+      } else if (activeContext) {
+        await activeContext.close().catch(() => {});
       }
     } else if (activeContext) {
-      await activeContext.close();
+      await activeContext.close().catch((e: any) => {
+        logger.warn(`关闭 Playwright Context 失败: ${e?.message || e}`);
+      });
     }
   } finally {
     if (activeObscuraProcess) {
-      activeObscuraProcess.kill();
+      try {
+        activeObscuraProcess.kill();
+      } catch {
+        // kill 不允许把异常带出清理路径（P1-7）。
+      }
       activeObscuraProcess = null;
     }
     activeContext = null;

@@ -254,8 +254,10 @@ export async function convertHtmlToMarkdown(page: Page, html: string): Promise<s
 
 /**
  * 抓取单个回答
+ * @param fallbackAuthorId 页面无法解析出作者 ID 时的兜底身份（P1-10：调度器传入
+ *   任务 peopleId，避免 'unknown'/'anonymous' 兜底把归档目录分裂成多个作者目录）
  */
-export async function scrapeAnswer(page: Page, targetUrl: string): Promise<ExtractedContent> {
+export async function scrapeAnswer(page: Page, targetUrl: string, fallbackAuthorId = 'anonymous'): Promise<ExtractedContent> {
   const norm = normalizeUrl(targetUrl);
   if (norm.type !== 'answer') {
     throw new Error(`链接不是知乎回答格式: ${targetUrl}`);
@@ -307,7 +309,7 @@ export async function scrapeAnswer(page: Page, targetUrl: string): Promise<Extra
   if (apiContent && apiData) {
     logger.info('成功通过拦截 API 数据解析回答！');
     const authorName = apiData.author?.name || '匿名用户';
-    const authorId = apiData.author?.id || 'anonymous';
+    const authorId = apiData.author?.id || fallbackAuthorId;
     const title = apiData.question?.title || '未命名问题';
     const createdTime = apiData.created_time || Math.floor(Date.now() / 1000);
     const updatedTime = apiData.updated_time || createdTime;
@@ -347,7 +349,7 @@ export async function scrapeAnswer(page: Page, targetUrl: string): Promise<Extra
         const content = answerData.content;
         const authorObj = answerData.author;
         const authorName = authorObj ? (hydration.initialState.entities.users[authorObj.id]?.name || authorObj.name) : '匿名用户';
-        const authorId = authorObj?.id || 'anonymous';
+        const authorId = authorObj?.id || fallbackAuthorId;
         
         const questionObj = answerData.question;
         const questionId = questionObj?.id;
@@ -453,7 +455,7 @@ export async function scrapeAnswer(page: Page, targetUrl: string): Promise<Extra
     id: norm.id,
     type: 'answer',
     title,
-    authorId: 'unknown',
+    authorId: fallbackAuthorId,
     authorName: authorName === '匿名' || authorName === '' ? '匿名用户' : authorName,
     contentHtml,
     contentMarkdown: markdown,
@@ -470,8 +472,9 @@ export async function scrapeAnswer(page: Page, targetUrl: string): Promise<Extra
 
 /**
  * 抓取单个文章
+ * @param fallbackAuthorId 页面无法解析出作者 ID 时的兜底身份（同 scrapeAnswer，P1-10）
  */
-export async function scrapeArticle(page: Page, targetUrl: string): Promise<ExtractedContent> {
+export async function scrapeArticle(page: Page, targetUrl: string, fallbackAuthorId = 'anonymous'): Promise<ExtractedContent> {
   const norm = normalizeUrl(targetUrl);
   if (norm.type !== 'article') {
     throw new Error(`链接不是知乎文章格式: ${targetUrl}`);
@@ -522,7 +525,7 @@ export async function scrapeArticle(page: Page, targetUrl: string): Promise<Extr
   if (apiContent && apiData) {
     logger.info('成功通过拦截 API 数据解析文章！');
     const authorName = apiData.author?.name || '匿名用户';
-    const authorId = apiData.author?.id || 'anonymous';
+    const authorId = apiData.author?.id || fallbackAuthorId;
     const title = apiData.title || '未命名文章';
     const createdTime = apiData.created || apiData.created_time || Math.floor(Date.now() / 1000);
     const updatedTime = apiData.updated || apiData.updated_time || createdTime;
@@ -562,7 +565,7 @@ export async function scrapeArticle(page: Page, targetUrl: string): Promise<Extr
         const content = articleData.content;
         const authorObj = articleData.author;
         const authorName = authorObj ? (hydration.initialState.entities.users[authorObj.id]?.name || authorObj.name) : '匿名用户';
-        const authorId = authorObj?.id || 'anonymous';
+        const authorId = authorObj?.id || fallbackAuthorId;
         const title = articleData.title || '未命名文章';
 
         const createdTime = articleData.createdTime || articleData.created || Math.floor(Date.now() / 1000);
@@ -637,7 +640,7 @@ export async function scrapeArticle(page: Page, targetUrl: string): Promise<Extr
     id: norm.id,
     type: 'article',
     title,
-    authorId: 'unknown',
+    authorId: fallbackAuthorId,
     authorName: authorName === '匿名' || authorName === '' ? '匿名用户' : authorName,
     contentHtml,
     contentMarkdown: markdown,
@@ -860,9 +863,25 @@ export async function archiveImagesLocally(markdown: string, authorPath: string)
   return result;
 }
 
-export async function writeMarkdownFile(extracted: ExtractedContent, outputBaseDir: string): Promise<string> {
-  // 1. 创建答主目录
-  const authorDirName = sanitizeFilename(extracted.authorName, extracted.authorId || 'anonymous');
+/**
+ * 归档目录使用的作者身份。调用方（调度器）传入任务级归一身份——
+ * id 为任务 peopleId、name 为任务级规范作者名——保证同一任务的所有条目
+ * 都写进同一个作者目录；extracted 的 per-item 值仅作展示兜底（P1-10）。
+ */
+export interface ArchiveAuthorDir {
+  id: string;
+  name: string;
+}
+
+export async function writeMarkdownFile(
+  extracted: ExtractedContent,
+  outputBaseDir: string,
+  archiveAuthor?: ArchiveAuthorDir
+): Promise<string> {
+  // 1. 创建答主目录（目录名归一到任务级身份，无归一身份时才回退到条目自身值）
+  const dirAuthorName = archiveAuthor?.name || extracted.authorName;
+  const dirAuthorId = archiveAuthor?.id || extracted.authorId || 'anonymous';
+  const authorDirName = sanitizeFilename(dirAuthorName, dirAuthorId);
   const authorPath = path.resolve(outputBaseDir, authorDirName);
   if (!fs.existsSync(authorPath)) {
     fs.mkdirSync(authorPath, { recursive: true });

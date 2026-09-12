@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { parseManifest } from "../../../packages/contracts/dist/index.js";
 import { buildZhihuManifest, type ArchivedItem } from "./library-manifest.js";
 import type { TaskItem } from "./db.js";
+import { logger, sanitizeFilename } from "./utils.js";
 
 export type ZhihuPublishPhase = "prepared" | "old_moved" | "new_moved" | "committed" | "rolled_back";
 
@@ -112,9 +113,21 @@ function writeMetadata(
     const relative = relativeWithAuthor.startsWith(authorPrefix)
       ? relativeWithAuthor.slice(authorPrefix.length)
       : relativeWithAuthor;
-    const filePath = path.resolve(incomingAuthor, relative);
-    const insideIncoming = filePath !== incomingAuthor && filePath.startsWith(`${incomingAuthor}${path.sep}`);
-    if (!relative || relative.startsWith("../") || path.isAbsolute(relative) || !insideIncoming || !fs.existsSync(filePath)) {
+    if (!relative || relative.startsWith("../") || path.isAbsolute(relative)) {
+      throw new Error(`ZHIHU_PUBLISH_FAILED: staged file missing for ${item.item_id}`);
+    }
+    let filePath = path.resolve(incomingAuthor, relative);
+    const insideIncoming = () =>
+      filePath !== incomingAuthor && filePath.startsWith(`${incomingAuthor}${path.sep}`);
+    if (!insideIncoming() || !fs.existsSync(filePath)) {
+      // P1-10：多作者目录归并后，条目 output_path 里仍可能记着旧目录名；
+      // 章节文件一律平铺在作者目录根部，按文件名回退定位。
+      const flat = path.join(incomingAuthor, path.basename(relative));
+      if (fs.existsSync(flat)) {
+        filePath = flat;
+      }
+    }
+    if (!insideIncoming() || !fs.existsSync(filePath)) {
       throw new Error(`ZHIHU_PUBLISH_FAILED: staged file missing for ${item.item_id}`);
     }
     const chapterPath = path.relative(incomingAuthor, filePath).replaceAll("\\", "/");
@@ -268,6 +281,50 @@ function listAuthorDirectories(incomingRoot: string): string[] {
   return entries.filter(isSafeDirectoryEntry).map(entry => entry.name);
 }
 
+/** 递归把 source 目录里目标处尚不存在的文件并入 destination（不覆盖已有文件）。 */
+function mergeDirectoryInto(source: string, destination: string): void {
+  ensureDirectory(destination);
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) {
+      throw new Error("ZHIHU_PUBLISH_FAILED: incoming directory contains a symlink");
+    }
+    const sourcePath = path.join(source, entry.name);
+    const destinationPath = path.join(destination, entry.name);
+    if (entry.isDirectory()) {
+      mergeDirectoryInto(sourcePath, destinationPath);
+    } else if (entry.isFile() && !fs.existsSync(destinationPath)) {
+      fs.renameSync(sourcePath, destinationPath);
+    }
+  }
+}
+
+/**
+ * P1-10：归档目录名归一到任务 peopleId 前的历史遗留，可能让 .incoming/<task>/
+ * 下同时存在多个作者目录（'unknown'/'anonymous'/真实 ID 混用），导致发布必败。
+ * 这里把多余目录的内容归并进任务级规范目录 sanitizeFilename(authorName, authorId)，
+ * 文件名冲突时保留先入目录的同名文件（文件名本身含条目 ID，冲突即同一条目）。
+ */
+function consolidateAuthorDirectories(
+  incomingRoot: string,
+  authorId: string,
+  authorName: string,
+  directories: readonly string[],
+): string {
+  const preferred = sanitizeFilename(authorName || '未知作者', authorId);
+  const target = path.join(incomingRoot, preferred);
+  const merged: string[] = [];
+  for (const dir of directories) {
+    if (dir === preferred) continue;
+    mergeDirectoryInto(path.join(incomingRoot, dir), target);
+    fs.rmSync(path.join(incomingRoot, dir), { recursive: true, force: true });
+    merged.push(dir);
+  }
+  if (merged.length > 0) {
+    logger.warn(`归档目录名已归一并合并到任务级规范目录 ${preferred}（来源: ${merged.join(', ')}）`);
+  }
+  return preferred;
+}
+
 function safePublishedRoot(root: string, relative: string): string {
   if (!relative || path.isAbsolute(relative)) {
     throw new Error("ZHIHU_PUBLISH_FAILED: unsafe published path");
@@ -348,9 +405,15 @@ export function publishTaskStage(
   const root = path.resolve(outputRoot);
   const incomingRoot = taskIncomingRoot(root, taskId);
   const existingResult = committedResult(root, taskId, authorId, metadata);
-  const authorDirectories = listAuthorDirectories(incomingRoot);
+  let authorDirectories = listAuthorDirectories(incomingRoot);
   if (authorDirectories.length === 0 && existingResult) {
     return existingResult;
+  }
+  if (authorDirectories.length > 1) {
+    // 旧版本混合 authorId 产生的多作者目录归并到任务级规范目录，避免整任务发布必败。
+    authorDirectories = [
+      consolidateAuthorDirectories(incomingRoot, authorId, metadata.authorName, authorDirectories),
+    ];
   }
   if (authorDirectories.length !== 1) {
     throw new Error("ZHIHU_PUBLISH_FAILED: expected exactly one author directory");

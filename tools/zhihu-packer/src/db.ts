@@ -4,7 +4,7 @@ import * as path from 'path';
 import { logger } from './utils.js';
 import { resolveDatabasePath } from './runtime-paths.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 let db: DatabaseSync | null = null;
 let transactionDepth = 0;
 
@@ -50,7 +50,7 @@ function createSchema(database: DatabaseSync) {
       output_dir TEXT NOT NULL DEFAULT 'output',
       sort_by TEXT NOT NULL DEFAULT 'time' CHECK(sort_by IN ('time', 'vote')),
       top_n INTEGER,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'paused', 'success', 'failed', 'partial_success')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'paused', 'cancelled', 'success', 'failed', 'partial_success')),
       index_status TEXT NOT NULL DEFAULT 'pending' CHECK(index_status IN ('pending', 'running', 'complete')),
       index_completed_at INTEGER,
       total_count INTEGER NOT NULL DEFAULT 0,
@@ -205,7 +205,7 @@ function migrateToV1(database: DatabaseSync, absolutePath: string) {
           COALESCE(NULLIF(output_dir, ''), 'output'),
           CASE WHEN sort_by IN ('time', 'vote') THEN sort_by ELSE 'time' END,
           top_n,
-          CASE WHEN status IN ('pending', 'running', 'paused', 'success', 'failed', 'partial_success') THEN status ELSE 'pending' END,
+          CASE WHEN status IN ('pending', 'running', 'paused', 'cancelled', 'success', 'failed', 'partial_success') THEN status ELSE 'pending' END,
           CASE WHEN total_count > 0 THEN 'complete' ELSE 'pending' END,
           CASE WHEN total_count > 0 THEN COALESCE(updated_at, created_at, strftime('%s','now') * 1000) ELSE NULL END,
           COALESCE(total_count, 0),
@@ -305,7 +305,7 @@ export interface Task {
   output_dir: string;
   sort_by: 'time' | 'vote';
   top_n: number | null;
-  status: 'pending' | 'running' | 'paused' | 'success' | 'failed' | 'partial_success';
+  status: 'pending' | 'running' | 'paused' | 'cancelled' | 'success' | 'failed' | 'partial_success';
   index_status: 'pending' | 'running' | 'complete';
   index_completed_at: number | null;
   total_count: number;
@@ -388,6 +388,7 @@ export function initDb(dbPath?: string) {
   db.exec('PRAGMA foreign_keys = ON');
   migrateToV1(db, absolutePath);
   migrateToV3(db, absolutePath);
+  migrateToV4(db, absolutePath);
   db.exec('PRAGMA foreign_keys = ON');
 }
 
@@ -421,6 +422,77 @@ function migrateToV3(database: DatabaseSync, absolutePath: string) {
   }
   database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   logger.info('数据库已升级到 schema v3（index_checkpoint / discovered_count）。');
+}
+
+/**
+ * v3 → v4: tasks.status CHECK 增加 'cancelled' 终态。
+ * SQLite 不支持修改 CHECK 约束，需要重建 tasks 表。
+ * 通过 sqlite_master 的建表 SQL 判定是否需要重建，与 user_version 无关，
+ * 因此对任意旧版本库都是幂等且可靠的。
+ */
+function migrateToV4(database: DatabaseSync, absolutePath: string) {
+  if (!tableExists(database, 'tasks')) {
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    return;
+  }
+  const def = database
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
+    .all()[0] as { sql?: string } | undefined;
+  if (typeof def?.sql === 'string' && def.sql.includes("'cancelled'")) {
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    return;
+  }
+
+  const versionRow = database.prepare('PRAGMA user_version').all()[0] as any;
+  backupDatabaseIfNeeded(absolutePath, `schema-v${Number(versionRow?.user_version || 0)}-to-v4-cancelled-status`);
+
+  // legacy_alter_table=ON 防止 RENAME 重写 task_items 的外键指向旧表；
+  // foreign_keys 必须在事务外关闭（事务内 PRAGMA 是 no-op）。
+  database.exec('PRAGMA foreign_keys = OFF');
+  database.exec('PRAGMA legacy_alter_table = ON');
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    database.exec('ALTER TABLE tasks RENAME TO tasks_v4_old');
+    createSchema(database);
+    database.exec(`
+      INSERT INTO tasks (
+        id, input_url, author_id, author_name, item_types, output_dir, sort_by, top_n,
+        status, index_status, index_completed_at, total_count, success_count, failed_count,
+        index_checkpoint_json, source_reported_count, discovered_count, created_at, updated_at
+      )
+      SELECT
+        id,
+        COALESCE(input_url, ''),
+        COALESCE(author_id, ''),
+        COALESCE(author_name, ''),
+        CASE WHEN item_types IN ('answers', 'articles', 'all') THEN item_types ELSE 'all' END,
+        COALESCE(NULLIF(output_dir, ''), 'output'),
+        CASE WHEN sort_by IN ('time', 'vote') THEN sort_by ELSE 'time' END,
+        top_n,
+        CASE WHEN status IN ('pending', 'running', 'paused', 'cancelled', 'success', 'failed', 'partial_success') THEN status ELSE 'pending' END,
+        CASE WHEN index_status IN ('pending', 'running', 'complete') THEN index_status ELSE 'pending' END,
+        index_completed_at,
+        COALESCE(total_count, 0),
+        COALESCE(success_count, 0),
+        COALESCE(failed_count, 0),
+        index_checkpoint_json,
+        source_reported_count,
+        COALESCE(discovered_count, 0),
+        COALESCE(created_at, strftime('%s','now') * 1000),
+        COALESCE(updated_at, strftime('%s','now') * 1000)
+      FROM tasks_v4_old;
+    `);
+    database.exec('DROP TABLE tasks_v4_old');
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec('COMMIT');
+  } catch (err) {
+    database.exec('ROLLBACK');
+    throw err;
+  } finally {
+    database.exec('PRAGMA legacy_alter_table = OFF');
+    database.exec('PRAGMA foreign_keys = ON');
+  }
+  logger.info('数据库已升级到 schema v4（tasks.status 支持 cancelled 终态）。');
 }
 
 export function closeDb() {
@@ -508,12 +580,17 @@ export function saveTask(task: Partial<Task> & { id: string }) {
   }
 }
 
+/**
+ * 仅允许 pending → running 的启动声明。
+ * 暂停（paused）/取消（cancelled）/终态任务必须显式回到 pending 才能被调度，
+ * 防止「已暂停/已取消的排队任务」被 runQueue 静默翻回 running 全量执行（P1-9）。
+ */
 export function tryStartTask(id: string): boolean {
   const database = getDb();
   const result = database.prepare(`
     UPDATE tasks
     SET status = 'running', updated_at = ?
-    WHERE id = ? AND status != 'running'
+    WHERE id = ? AND status = 'pending'
   `).run(Date.now(), id) as any;
   return Number(result?.changes || 0) > 0;
 }
@@ -847,7 +924,7 @@ export function deleteTask(id: string) {
 
 export function clearCompletedTasks(): number {
   const database = getDb();
-  const stmt = database.prepare("SELECT id FROM tasks WHERE status IN ('success', 'failed', 'paused', 'partial_success')");
+  const stmt = database.prepare("SELECT id FROM tasks WHERE status IN ('success', 'failed', 'paused', 'cancelled', 'partial_success')");
   const completed = stmt.all() as unknown as { id: string }[];
 
   runInTransaction(() => {
@@ -856,7 +933,7 @@ export function clearCompletedTasks(): number {
       deleteTaskStmt.run(t.id);
     }
   });
-  logger.info(`已清理数据库中所有已结束（含成功/失败/暂停/部分成功）的任务记录，共计 ${completed.length} 个`);
+  logger.info(`已清理数据库中所有已结束（含成功/失败/暂停/取消/部分成功）的任务记录，共计 ${completed.length} 个`);
   return completed.length;
 }
 
