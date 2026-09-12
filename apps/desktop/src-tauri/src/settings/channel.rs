@@ -26,10 +26,16 @@ impl AppChannel {
         Ok(Self::Production)
     }
 
+    /// Resolves the channel for the running process, honoring the same
+    /// `IMMERSIVE_QA_RUN_ID` environment variable `StorageLocations::current`
+    /// uses. Every secret/credential lookup goes through this — it must never
+    /// silently downgrade to Production while a QA run id is set, so an
+    /// invalid value is rejected (fail closed) instead of ignored.
     pub fn current() -> Self {
-        match Self::detect(None) {
+        let qa_run_id = std::env::var("IMMERSIVE_QA_RUN_ID").ok();
+        match Self::detect(qa_run_id.as_deref()) {
             Ok(channel) => channel,
-            Err(_) => Self::Production,
+            Err(message) => panic!("{message}"),
         }
     }
 

@@ -196,6 +196,54 @@ mod tests {
         assert!(error.contains("QA run id"));
     }
 
+    /// Restores `IMMERSIVE_QA_RUN_ID` even when the test panics so the env
+    /// mutation cannot leak into parallel tests.
+    struct QaRunIdEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl QaRunIdEnvGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os("IMMERSIVE_QA_RUN_ID");
+            std::env::set_var("IMMERSIVE_QA_RUN_ID", value);
+            Self { previous }
+        }
+    }
+
+    impl Drop for QaRunIdEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("IMMERSIVE_QA_RUN_ID", value),
+                None => std::env::remove_var("IMMERSIVE_QA_RUN_ID"),
+            }
+        }
+    }
+
+    #[test]
+    fn current_derives_the_qa_channel_from_the_run_id_environment() {
+        let _guard = QaRunIdEnvGuard::set("test-run-19");
+
+        let channel = AppChannel::current();
+
+        assert_eq!(channel, AppChannel::Qa("test-run-19".to_string()));
+        assert_eq!(
+            channel.local_data_directory_name(),
+            r"ImmersiveReader-QA\test-run-19"
+        );
+    }
+
+    #[test]
+    fn current_rejects_an_unsafe_run_id_instead_of_falling_back_to_production() {
+        let _guard = QaRunIdEnvGuard::set(r"..\production");
+
+        let result = std::panic::catch_unwind(|| AppChannel::current());
+
+        assert!(
+            result.is_err(),
+            "unsafe QA run id must not reach Production"
+        );
+    }
+
     #[test]
     fn settings_round_trip_outside_the_library() {
         let root = std::env::temp_dir().join(format!("immersive-settings-{}", std::process::id()));

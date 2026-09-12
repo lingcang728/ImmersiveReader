@@ -76,6 +76,26 @@ function Reset-AppDestination {
     }
 }
 
+function Assert-RuntimeNotInUse {
+    # Sidecars/workers keep runtime files open; deleting or swapping the
+    # runtime underneath them tears the install. Fail fast instead of killing
+    # them silently — callers must close the app/dev session first.
+    $prefix = $fullRuntime.TrimEnd('\') + [IO.Path]::DirectorySeparatorChar
+    $running = @()
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        $processPath = $null
+        try { $processPath = $process.Path } catch { $processPath = $null }
+        if ($processPath -and
+            (([IO.Path]::GetFullPath($processPath) + '\').StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))) {
+            $running += $process
+        }
+    }
+    if ($running.Count -gt 0) {
+        $names = ($running | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', '
+        throw "受管运行时正被以下进程占用，请先关闭沉浸阅读/开发会话后重试：$names"
+    }
+}
+
 function Get-CriticalRuntimeFiles {
     param([Parameter(Mandatory)][string]$RuntimeRoot)
 
@@ -138,14 +158,20 @@ function Write-CriticalRuntimeManifest {
 }
 
 if ($RefreshApps) {
+    # RefreshApps mirrors the built sidecar/contracts dist into the runtime —
+    # assert the sources exist so a clean checkout fails loudly instead of
+    # shipping a runtime without the zhihu sidecar entry point.
     foreach ($requiredRuntime in @(
         (Join-Path $runtime 'zhihu\node\node.exe'),
         (Join-Path $runtime 'podcast\python\python.exe'),
         (Join-Path $runtime 'podcast\models'),
+        (Join-Path $zhihuSource 'dist\server.js'),
+        (Join-Path $zhihuSource 'node_modules'),
         (Join-Path $contractsSource 'dist\index.js')
     )) {
         Require-Path -Path $requiredRuntime
     }
+    Assert-RuntimeNotInUse
     $zhihuApp = Join-Path $runtime 'zhihu\app'
     $podcastApp = Join-Path $runtime 'podcast\app'
     $contractsRuntime = Join-Path $runtime 'packages\contracts'
@@ -188,14 +214,21 @@ if ($ValidateOnly) {
 }
 
 $stagingRuntime = "$runtime.__staging__"
+$previousRuntime = "$runtime.__previous__"
 $fullStagingRuntime = [IO.Path]::GetFullPath($stagingRuntime)
+$fullPreviousRuntime = [IO.Path]::GetFullPath($previousRuntime)
 $fullRoot = [IO.Path]::GetFullPath($root) + [IO.Path]::DirectorySeparatorChar
 if (-not $fullRuntime.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCase) -or
-    -not $fullStagingRuntime.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    -not $fullStagingRuntime.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    -not $fullPreviousRuntime.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "拒绝清理工作区外的运行时目录：$fullRuntime"
 }
+Assert-RuntimeNotInUse
 if (Test-Path -LiteralPath $fullStagingRuntime) {
     Remove-Item -LiteralPath $fullStagingRuntime -Recurse -Force
+}
+if (Test-Path -LiteralPath $fullPreviousRuntime) {
+    Remove-Item -LiteralPath $fullPreviousRuntime -Recurse -Force
 }
 
 $zhihuRuntime = Join-Path $stagingRuntime 'zhihu'
@@ -223,8 +256,30 @@ Copy-Item -LiteralPath $ffprobe -Destination (Join-Path $podcastRuntime 'ffmpeg\
 Copy-Tree -Source $podcastModels -Destination (Join-Path $podcastRuntime 'models')
 
 Write-CriticalRuntimeManifest -RuntimeRoot $stagingRuntime
-if (Test-Path -LiteralPath $fullRuntime) {
-    Remove-Item -LiteralPath $fullRuntime -Recurse -Force
+
+# Swap staging in only after it is fully built and manifest-verified: move the
+# old runtime aside first so a failed swap can be rolled back, then delete the
+# previous tree. Never delete the live runtime before staging is ready.
+Assert-RuntimeNotInUse
+$hadCurrent = Test-Path -LiteralPath $fullRuntime
+if ($hadCurrent) {
+    Move-Item -LiteralPath $fullRuntime -Destination $fullPreviousRuntime
 }
-Move-Item -LiteralPath $fullStagingRuntime -Destination $fullRuntime
+try {
+    Move-Item -LiteralPath $fullStagingRuntime -Destination $fullRuntime
+} catch {
+    if ($hadCurrent -and
+        (Test-Path -LiteralPath $fullPreviousRuntime) -and
+        -not (Test-Path -LiteralPath $fullRuntime)) {
+        Move-Item -LiteralPath $fullPreviousRuntime -Destination $fullRuntime
+    }
+    throw
+}
+if (Test-Path -LiteralPath $fullPreviousRuntime) {
+    try {
+        Remove-Item -LiteralPath $fullPreviousRuntime -Recurse -Force -ErrorAction Stop
+    } catch {
+        Write-Warning "旧运行时目录清理失败（可手动删除）：$fullPreviousRuntime — $($_.Exception.Message)"
+    }
+}
 Write-Output "[runtime] prepared $runtime"

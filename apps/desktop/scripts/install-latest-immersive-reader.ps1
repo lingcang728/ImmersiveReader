@@ -7,7 +7,9 @@ param(
   [switch]$NoShortcuts,
   # Rebuild Start Menu / Search / Default Apps icons without running NSIS.
   [switch]$RepairShellIdentity,
-  # Default: monorepo root (easy to find and delete with the project).
+  # Default: %LOCALAPPDATA%\Programs\ImmersiveReader — a per-user install root
+  # outside the source tree. Installing into the monorepo root let
+  # robocopy /MIR and `git clean -xdf` tear the live production install.
   [string]$InstallDir = ""
 )
 
@@ -16,9 +18,18 @@ $desktopRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 # apps/desktop/scripts -> ImmersiveReader monorepo root
 $monorepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 if (-not $InstallDir) {
-  $InstallDir = $monorepoRoot
+  if (-not $env:LOCALAPPDATA) {
+    throw "LOCALAPPDATA is unavailable; pass -InstallDir explicitly."
+  }
+  $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\ImmersiveReader"
 }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
+$monorepoPrefix = $monorepoRoot.TrimEnd('\') + '\'
+if ($InstallDir -ieq $monorepoRoot -or
+    $InstallDir.StartsWith($monorepoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+  Write-Warning "InstallDir is inside the source tree ($InstallDir); runtime rebuilds and 'git clean -xdf' can destroy the installed app. Prefer an external per-user directory."
+}
+$sourceRuntime = Join-Path $monorepoRoot 'runtime'
 Set-Location $desktopRoot
 
 function Invoke-CheckedCommand {
@@ -276,15 +287,63 @@ function Update-ImmersiveReaderShellIdentity {
   }
 }
 
+function Get-ProcessesUnderDirectory {
+  param([Parameter(Mandatory)][string]$Root)
+
+  $prefix = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+  $found = @()
+  foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+    $processPath = $null
+    try { $processPath = $process.Path } catch { $processPath = $null }
+    if ($processPath -and
+        ([System.IO.Path]::GetFullPath($processPath) + '\').StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+      $found += $process
+    }
+  }
+  return ,$found
+}
+
+function Stop-ProcessesUnderDirectory {
+  param([Parameter(Mandatory)][string]$Root)
+
+  # The app's close handler flushes state before prevent_close hides the
+  # window to the tray, so give GUI processes a graceful window first, then
+  # force-kill: sidecars/workers keep runtime files open and a robocopy /MIR
+  # or NSIS overwrite against them produces a torn install.
+  $running = @(Get-ProcessesUnderDirectory -Root $Root)
+  if ($running.Count -eq 0) { return }
+  $names = ($running | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', '
+  Write-Warning "Stopping processes under $Root before replacing files: $names"
+  foreach ($process in $running) {
+    try { [void]$process.CloseMainWindow() } catch { }
+  }
+  Start-Sleep -Seconds 3
+  $running | Stop-Process -Force -ErrorAction SilentlyContinue
+  $deadline = (Get-Date).AddSeconds(15)
+  while ((Get-Date) -lt $deadline) {
+    $running = @(Get-ProcessesUnderDirectory -Root $Root)
+    if ($running.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 500
+  }
+  $names = ($running | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', '
+  throw "Processes are still running under $Root; close Immersive Reader and retry: $names"
+}
+
 function Assert-RuntimeAppHashes {
   $zhihuAppTemplate = Join-Path $monorepoRoot "runtime\zhihu\app\dist\reader-template.html"
   $zhihuSourceTemplate = Join-Path $monorepoRoot "tools\zhihu-packer\dist\reader-template.html"
+  $zhihuAppServer = Join-Path $monorepoRoot "runtime\zhihu\app\dist\server.js"
+  $zhihuSourceServer = Join-Path $monorepoRoot "tools\zhihu-packer\dist\server.js"
+  $contractsAppIndex = Join-Path $monorepoRoot "runtime\packages\contracts\dist\index.js"
+  $contractsSourceIndex = Join-Path $monorepoRoot "packages\contracts\dist\index.js"
   $podcastAppPolish = Join-Path $monorepoRoot "runtime\podcast\app\scripts\polish_interview_markdown.py"
   $podcastSourcePolish = Join-Path $monorepoRoot "tools\podcast-transcriber\scripts\polish_interview_markdown.py"
   $podcastAppLanguage = Join-Path $monorepoRoot "runtime\podcast\app\scripts\podcast_transcriber\language.py"
   $podcastSourceLanguage = Join-Path $monorepoRoot "tools\podcast-transcriber\scripts\podcast_transcriber\language.py"
   foreach ($pair in @(
     @{ Name = "Reader template"; Source = $zhihuSourceTemplate; Runtime = $zhihuAppTemplate },
+    @{ Name = "Zhihu sidecar server"; Source = $zhihuSourceServer; Runtime = $zhihuAppServer },
+    @{ Name = "Contracts runtime"; Source = $contractsSourceIndex; Runtime = $contractsAppIndex },
     @{ Name = "Podcast final markdown generator"; Source = $podcastSourcePolish; Runtime = $podcastAppPolish },
     @{ Name = "Podcast language classifier"; Source = $podcastSourceLanguage; Runtime = $podcastAppLanguage }
   )) {
@@ -320,13 +379,40 @@ if ($RepairShellIdentity) {
 }
 
 if ($Build) {
-  # Compile continuous-reader template, refresh managed runtime app code, then package.
+  # Clean checkouts ship neither the zhihu sidecar dist\server.js nor the
+  # contracts dist\ — prepare-runtime -RefreshApps mirrors them into the
+  # managed runtime, so build them first or the installed tools come out
+  # broken (require_runtime fails on the missing sidecar entry point).
+  $zhihuDist = Join-Path $monorepoRoot "tools\zhihu-packer\dist"
+  if (Test-Path -LiteralPath $zhihuDist) {
+    Remove-Item -LiteralPath $zhihuDist -Recurse -Force
+  }
+  $contractsDist = Join-Path $monorepoRoot "packages\contracts\dist"
+  if (Test-Path -LiteralPath $contractsDist) {
+    Remove-Item -LiteralPath $contractsDist -Recurse -Force
+  }
   Push-Location (Join-Path $monorepoRoot "tools\zhihu-packer")
   try {
+    Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "build")
+    # Compile continuous-reader template after tsc so dist holds both outputs.
     Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "compile-reader")
   } finally {
     Pop-Location
   }
+  # contracts has no local toolchain; reuse the desktop app's tsc like verify.ps1.
+  $contractsTsc = Join-Path $monorepoRoot "apps\desktop\node_modules\.bin\tsc.cmd"
+  if (-not (Test-Path -LiteralPath $contractsTsc -PathType Leaf)) {
+    throw "apps\desktop TypeScript compiler not found; run npm ci in apps\desktop first."
+  }
+  Push-Location (Join-Path $monorepoRoot "packages\contracts")
+  try {
+    Invoke-CheckedCommand -FilePath $contractsTsc -Arguments @("-p", "tsconfig.json")
+  } finally {
+    Pop-Location
+  }
+  # RefreshApps deletes code inside the repo runtime in place — stop any
+  # sidecar/worker still running from it first.
+  Stop-ProcessesUnderDirectory -Root $sourceRuntime
   $prepareRuntime = Join-Path $monorepoRoot "scripts\prepare-runtime.ps1"
   Invoke-CheckedCommand -FilePath "powershell.exe" -Arguments @(
     "-ExecutionPolicy", "Bypass",
@@ -359,10 +445,12 @@ if (-not (Test-Path -LiteralPath $InstallDir)) {
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
-$sourceRuntime = Join-Path $monorepoRoot 'runtime'
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRuntime 'manifest.json'))) {
   throw "Managed runtime is missing. Run scripts\prepare-runtime.ps1 first."
 }
+# Stop the installed app and any sidecars/workers before touching InstallDir:
+# robocopy /MIR and the NSIS overwrite both tear a running install.
+Stop-ProcessesUnderDirectory -Root $InstallDir
 $targetRuntime = Join-Path $InstallDir 'runtime'
 if ([System.IO.Path]::GetFullPath($sourceRuntime) -ne [System.IO.Path]::GetFullPath($targetRuntime)) {
   & robocopy $sourceRuntime $targetRuntime /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
@@ -385,6 +473,9 @@ if (-not (Test-Path -LiteralPath $installedExe)) {
 foreach ($required in @(
   'runtime\zhihu\node\node.exe',
   'runtime\zhihu\chromium\msedge.exe',
+  'runtime\zhihu\app\dist\server.js',
+  'runtime\zhihu\app\dist\reader-template.html',
+  'runtime\packages\contracts\dist\index.js',
   'runtime\podcast\python\python.exe',
   'runtime\podcast\ffmpeg\ffmpeg.exe',
   'runtime\podcast\models'
