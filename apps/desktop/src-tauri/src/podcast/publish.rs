@@ -266,6 +266,10 @@ fn write_book_metadata(input: BookMetadataInput<'_>) -> Result<(String, String),
         updated_at: now.clone(),
         chapters,
     };
+    // Self-check before persisting: an invalid manifest would publish a
+    // permanently broken book into the Library.
+    crate::contracts::validate_manifest(&manifest)
+        .map_err(|error| format!("PUBLISH_FAILED: invalid manifest: {error}"))?;
     atomic_file::write(
         &incoming.join("manifest.json"),
         &serde_json::to_vec_pretty(&manifest)

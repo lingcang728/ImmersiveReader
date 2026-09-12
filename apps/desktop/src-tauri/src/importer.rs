@@ -286,6 +286,10 @@ pub fn import_markdown_folder(source: &Path, library_root: &Path) -> Result<Impo
             updated_at: now,
             chapters,
         };
+        // Self-check before persisting: a manifest that fails validation
+        // would land on the shelf as a permanently broken book.
+        crate::contracts::validate_manifest(&manifest)
+            .map_err(|error| format!("Import produced an invalid manifest: {error}"))?;
         let data = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
         // atomic_file::write normalizes the path itself; still cheap.
         crate::atomic_write_file(&staging.join("manifest.json"), &data)?;
