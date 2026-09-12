@@ -1,0 +1,24 @@
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+  <!-- tauri-build's default manifest contents (Common-Controls v6 for the
+       dialog APIs) — preserved verbatim; do not drop it. -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+  <!-- P2-20: opt into Windows long paths (>260 chars) so deep Library
+       hierarchies don't hit MAX_PATH failures. This only lifts the app's
+       own opt-in gate; callers still need the \\?\ prefix or equivalent. -->
+  <asmv3:application>
+    <asmv3:windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <ws2:longPathAware>true</ws2:longPathAware>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+</assembly>

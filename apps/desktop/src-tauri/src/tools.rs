@@ -164,6 +164,20 @@ fn persist_engine_exit(
     Ok(())
 }
 
+/// P2-26: an exited process never blocks a new launch claim, so every launch
+/// path persists the previous instance's crash before spawning its
+/// replacement — otherwise a respawn would bury an unrecorded exit and its
+/// interrupted tasks. Idempotent: `mark_engine_crashed` is a no-op when the
+/// registered pid/status no longer matches, and a still-running snapshot
+/// returns early. Call with `TOOL_MANAGER` released.
+#[cfg(windows)]
+fn persist_pending_exit(kind: ToolKind) -> Result<(), String> {
+    if let Some(snapshot) = tool_manager()?.refresh(kind.key())? {
+        persist_engine_exit(kind, &snapshot)?;
+    }
+    Ok(())
+}
+
 /// Runtime health-gate outcome for one managed engine.
 #[cfg(windows)]
 enum HealthGate {
@@ -264,6 +278,11 @@ fn relaunch_after_kill(tool: &str) {
     }
 }
 
+/// Backing implementation for the `get_companion_status` Tauri command.
+/// P2-26: no frontend code calls it today — it is retained on purpose as a
+/// diagnostics/support surface (it is also the only caller that folds the
+/// health gate into a user-visible "unresponsive" state). If the command is
+/// ever unregistered in lib.rs, this function can go with it.
 pub fn status(tool: &str) -> Result<ToolStatus, String> {
     let kind = action_for(tool)?;
     let runtime_root = crate::settings::runtime_root()?;
@@ -441,6 +460,9 @@ fn launch(tool: &str, settings: &AppSettings) -> Result<(), String> {
         // write all run with TOOL_MANAGER released. The guard releases the
         // claim and notifies waiters on every exit path, including `?`.
         let _launch_guard = EngineLaunchGuard::new(key);
+        // P2-26: persist the exited instance the claim just let pass before
+        // the replacement spawns — see persist_pending_exit.
+        persist_pending_exit(kind)?;
         launch_claimed_engine(kind, &runtime_root, settings, token)?;
     }
     #[cfg(not(windows))]
@@ -483,6 +505,9 @@ pub fn request_engine_warmup(kind: ToolKind) {
                     .and_then(|settings| {
                         let runtime_root = crate::settings::runtime_root()?;
                         let token = uuid::Uuid::new_v4().simple().to_string();
+                        // P2-26: record the exited instance this warmup is
+                        // about to replace — same rule as `launch`.
+                        persist_pending_exit(kind)?;
                         launch_claimed_engine(kind, &runtime_root, &settings, token)
                     });
                 if let Err(error) = result {

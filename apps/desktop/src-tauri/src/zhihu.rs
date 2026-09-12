@@ -15,6 +15,15 @@ use tauri::{AppHandle, Emitter};
 
 const TASK_EVENT_NAME: &str = "acquisition://task-event";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// P2-25: consecutive `fetch_remote_task` failures back off exponentially
+/// (`POLL_INTERVAL * 2^(failures-1)`, capped) instead of hammering a dead
+/// sidecar every 2 s.
+const POLL_MAX_BACKOFF: Duration = Duration::from_secs(60);
+const POLL_BACKOFF_MAX_SHIFT: u32 = 5;
+/// Consecutive failures after which the supervisor circuit-breaks and exits.
+/// A later `start`/reconcile re-arms `ensure_poller` on demand; polling a
+/// permanently dead sidecar forever would just be noise.
+const POLL_FAILURE_LIMIT: u32 = 30;
 const HEARTBEAT_EMIT_INTERVAL: Duration = Duration::from_secs(5);
 /// Hard wall-clock cap for one `reconcile_active_tasks` pass. The reconcile
 /// runs on the acquisition-snapshot path and must never scale with the number
@@ -47,6 +56,17 @@ static ACTIVE_POLLERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn active_pollers() -> &'static Mutex<HashSet<String>> {
     ACTIVE_POLLERS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Poll interval after `failures` consecutive fetch failures: 2 s, 4 s, 8 s,
+/// … capped at [`POLL_MAX_BACKOFF`]. `failures == 0` is the healthy cadence.
+fn poll_backoff(failures: u32) -> Duration {
+    if failures == 0 {
+        return POLL_INTERVAL;
+    }
+    POLL_INTERVAL
+        .saturating_mul(1u32 << (failures - 1).min(POLL_BACKOFF_MAX_SHIFT))
+        .min(POLL_MAX_BACKOFF)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -353,10 +373,21 @@ pub fn control_task(
                         .error
                         .unwrap_or_else(|| "ZHIHU_TASK_CONTROL_FAILED".to_string()));
                 }
-                let event = control.control_task(task_id, action, expected_revision)?;
-                app.emit(TASK_EVENT_NAME, event.clone())
-                    .map_err(|error| error.to_string())?;
-                Ok(event.snapshot)
+                // The sidecar already applied the action at this point. A
+                // poller heartbeat or progress event may have bumped the
+                // revision mid-flight, so the local transition is persisted
+                // against the freshest revision rather than failing.
+                match persist_control_event(&mut control, task_id, action, expected_revision) {
+                    Ok(event) => {
+                        app.emit(TASK_EVENT_NAME, event.clone())
+                            .map_err(|error| error.to_string())?;
+                        Ok(event.snapshot)
+                    }
+                    Err(error) if is_transient_persist_conflict(&error) => control
+                        .task_snapshot(task_id)?
+                        .ok_or_else(|| "TASK_NOT_FOUND".to_string()),
+                    Err(error) => Err(error),
+                }
             })();
             match result {
                 Ok(snapshot) => {
@@ -371,12 +402,57 @@ pub fn control_task(
                     Ok(snapshot)
                 }
                 Err(error) => {
-                    control.complete_command(request_id, "{}", Some(&error), None)?;
+                    // P2-26: REVISION_CONFLICT / EVENT_SEQUENCE_CONFLICT are
+                    // transient, not terminal results. The claim is left
+                    // un-completed so claim_command's abandoned-claim window
+                    // reclaims it for a retry instead of replaying a cached
+                    // failure forever.
+                    if !is_transient_persist_conflict(&error) {
+                        control.complete_command(request_id, "{}", Some(&error), None)?;
+                    }
                     Err(error)
                 }
             }
         }
     }
+}
+
+/// Conflicts produced by a concurrent writer (poller heartbeat, reconcile,
+/// another control call) landing between the pre-flight revision check and
+/// the local persist. They describe a race, not a final outcome — the caller
+/// must never cache them as the command's terminal result.
+fn is_transient_persist_conflict(error: &str) -> bool {
+    matches!(error, "REVISION_CONFLICT" | "EVENT_SEQUENCE_CONFLICT")
+}
+
+/// P2-26: persist the local transition after the sidecar has already applied
+/// the action. Each attempt re-checks against the *current* revision — a
+/// concurrent event bump must not turn an applied action into a bogus
+/// REVISION_CONFLICT. After the retry budget is exhausted the conflict is
+/// returned for the caller to fall back to the freshest snapshot.
+fn persist_control_event(
+    control: &mut ControlDb,
+    task_id: &str,
+    action: &str,
+    expected_revision: u64,
+) -> Result<TaskEvent, String> {
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut revision = expected_revision;
+    for attempt in 0..MAX_ATTEMPTS {
+        match control.control_task(task_id, action, revision) {
+            Err(error) if is_transient_persist_conflict(&error) => {
+                revision = control
+                    .task_snapshot(task_id)?
+                    .ok_or_else(|| "TASK_NOT_FOUND".to_string())?
+                    .revision;
+                if attempt + 1 == MAX_ATTEMPTS {
+                    return Err(error);
+                }
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
 }
 
 fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
@@ -587,6 +663,7 @@ pub fn ensure_poller(task_id: String, settings: AppSettings, app: AppHandle) {
         let mut last_heartbeat_emit = Instant::now()
             .checked_sub(HEARTBEAT_EMIT_INTERVAL)
             .unwrap_or_else(Instant::now);
+        let mut consecutive_failures: u32 = 0;
         loop {
             let local_terminal = ControlDb::open_current()
                 .ok()
@@ -601,6 +678,7 @@ pub fn ensure_poller(task_id: String, settings: AppSettings, app: AppHandle) {
 
             match fetch_remote_task(&settings, &task_id) {
                 Ok(remote) => {
+                    consecutive_failures = 0;
                     let remote_terminal = matches!(
                         remote.status.as_str(),
                         "success" | "partial_success" | "failed" | "cancelled"
@@ -630,10 +708,20 @@ pub fn ensure_poller(task_id: String, settings: AppSettings, app: AppHandle) {
                     }
                 }
                 Err(_) => {
-                    // Keep supervising; transient sidecar/network blips should not stop the loop.
+                    // Keep supervising; transient sidecar/network blips
+                    // should not stop the loop — but a sidecar that never
+                    // answers backs off exponentially and eventually trips
+                    // the circuit instead of polling every 2 s forever.
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    if consecutive_failures >= POLL_FAILURE_LIMIT {
+                        eprintln!(
+                            "[zhihu] task {task_id} supervisor stopped after {consecutive_failures} consecutive fetch failures"
+                        );
+                        break;
+                    }
                 }
             }
-            thread::sleep(POLL_INTERVAL);
+            thread::sleep(poll_backoff(consecutive_failures));
         }
         if let Ok(mut guard) = active_pollers().lock() {
             guard.remove(&task_id);

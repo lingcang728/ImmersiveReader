@@ -2,15 +2,29 @@ use crate::contracts::{is_safe_relative_path, Manifest, ReadingProgress};
 use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tiny_http::{Header, Method, Request, Response, ResponseBox, StatusCode};
 
 const MAX_PROGRESS_BODY: usize = 64 * 1024;
+/// Largest request body the server will buffer. `PUT /progress` is the only
+/// route that carries a body; anything larger is rejected before the body is
+/// ever read.
+pub(crate) const MAX_REQUEST_BODY: u64 = MAX_PROGRESS_BODY as u64;
 pub(crate) const MAX_READER_SESSIONS: usize = 16;
 pub(crate) const READER_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// P2-23: the reader document is a compiled single-file bundle whose whole
+/// resource surface is inline <script>/<style> blocks, same-origin fetches
+/// (`manifest`/`progress`/`content`/`heartbeat`) and same-origin or https
+/// images. Everything else is denied. `frame-ancestors` names every parent
+/// origin that legitimately embeds the reader iframe: the vite dev origin,
+/// and the Tauri production origins (Windows uses http://tauri.localhost).
+const READER_DOCUMENT_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors http://localhost:1420 http://tauri.localhost https://tauri.localhost tauri://localhost";
+/// Non-document routes (JSON, progress, chapter bytes) get the strictest
+/// policy — it also defangs scriptable payloads such as image/svg+xml when
+/// a content URL is navigated to directly instead of loaded via <img>.
+const CONTENT_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
 
 #[derive(Clone)]
 pub struct ReaderSession {
@@ -19,7 +33,56 @@ pub struct ReaderSession {
 }
 
 pub type Sessions = Arc<RwLock<HashMap<String, (ReaderSession, Instant)>>>;
-type HttpResponse = ResponseBox;
+
+/// A fully parsed HTTP request. All socket IO lives in `reader_server`; this
+/// module only routes and builds responses, which keeps every handler pure
+/// and unit-testable.
+pub(crate) struct ReaderRequest {
+    /// Uppercase method token from the request line ("GET", "PUT", ...).
+    pub method: String,
+    /// Raw request target, e.g. `/s/<token>/progress?x=1`.
+    pub target: String,
+    /// (name, value) header pairs with lower-cased names.
+    pub headers: Vec<(String, String)>,
+    /// Advertised Content-Length when the header was present and parseable —
+    /// lets the progress route reject oversized bodies that were never read.
+    pub content_length: Option<u64>,
+    /// Body bytes actually read (server-capped at [`MAX_REQUEST_BODY`]).
+    pub body: Vec<u8>,
+}
+
+impl ReaderRequest {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+pub(crate) enum ReaderBody {
+    Bytes(Vec<u8>),
+    /// Shared immutable payload (the compiled reader HTML) — cloned by
+    /// reference so each response does not copy the template.
+    Shared(Arc<Vec<u8>>),
+    File(fs::File),
+}
+
+impl ReaderBody {
+    pub(crate) fn len(&self) -> Option<u64> {
+        match self {
+            Self::Bytes(body) => Some(body.len() as u64),
+            Self::Shared(body) => Some(body.len() as u64),
+            Self::File(file) => file.metadata().ok().map(|meta| meta.len()),
+        }
+    }
+}
+
+pub(crate) struct ReaderResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: ReaderBody,
+}
 
 fn prune_expired_sessions(sessions: &mut HashMap<String, (ReaderSession, Instant)>, now: Instant) {
     sessions.retain(|_, (_, last_access)| now.duration_since(*last_access) < READER_SESSION_TTL);
@@ -59,44 +122,46 @@ fn session_for(sessions: &Sessions, session_id: &str) -> Option<ReaderSession> {
     Some(session.clone())
 }
 
-fn add_common_headers<R: Read>(mut value: Response<R>, content_type: &str) -> Response<R> {
-    if let Ok(header) = Header::from_bytes("Content-Type", content_type) {
-        value.add_header(header);
-    }
-    if let Ok(header) = Header::from_bytes("X-Content-Type-Options", "nosniff") {
-        value.add_header(header);
-    }
-    if let Ok(header) = Header::from_bytes("Referrer-Policy", "no-referrer") {
-        value.add_header(header);
-    }
-    value
+fn common_headers(content_type: &str, csp: &str) -> Vec<(String, String)> {
+    vec![
+        ("Content-Type".to_string(), content_type.to_string()),
+        ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
+        ("Referrer-Policy".to_string(), "no-referrer".to_string()),
+        ("Content-Security-Policy".to_string(), csp.to_string()),
+    ]
 }
 
-fn response(status: u16, body: impl Into<Vec<u8>>, content_type: &str) -> HttpResponse {
-    add_common_headers(
-        Response::from_data(body).with_status_code(StatusCode(status)),
-        content_type,
-    )
-    .boxed()
+fn response(status: u16, body: impl Into<Vec<u8>>, content_type: &str) -> ReaderResponse {
+    ReaderResponse {
+        status,
+        headers: common_headers(content_type, CONTENT_CSP),
+        body: ReaderBody::Bytes(body.into()),
+    }
 }
 
-fn file_response(file: fs::File, content_type: &str) -> HttpResponse {
-    add_common_headers(Response::from_file(file), content_type).boxed()
+/// The one document route (`GET /s/<token>/reader`) — the only response that
+/// is ever rendered as a page, so it carries the document-level CSP.
+fn document_response(status: u16, body: Arc<Vec<u8>>, content_type: &str) -> ReaderResponse {
+    ReaderResponse {
+        status,
+        headers: common_headers(content_type, READER_DOCUMENT_CSP),
+        body: ReaderBody::Shared(body),
+    }
 }
 
-fn json<T: serde::Serialize>(value: &T) -> HttpResponse {
+fn file_response(file: fs::File, content_type: &str) -> ReaderResponse {
+    ReaderResponse {
+        status: 200,
+        headers: common_headers(content_type, CONTENT_CSP),
+        body: ReaderBody::File(file),
+    }
+}
+
+fn json<T: serde::Serialize>(value: &T) -> ReaderResponse {
     match serde_json::to_vec(value) {
         Ok(body) => response(200, body, "application/json; charset=utf-8"),
         Err(error) => response(500, error.to_string(), "text/plain; charset=utf-8"),
     }
-}
-
-fn request_origin(request: &Request) -> Option<&str> {
-    request
-        .headers()
-        .iter()
-        .find(|header| header.field.equiv("Origin"))
-        .map(|header| header.value.as_str())
 }
 
 fn mime_type(path: &Path) -> &'static str {
@@ -139,7 +204,7 @@ fn is_book_resource(relative: &str, manifest: &Manifest) -> bool {
     )
 }
 
-fn content_response(session: &ReaderSession, raw_relative: &str) -> HttpResponse {
+fn content_response(session: &ReaderSession, raw_relative: &str) -> ReaderResponse {
     let decoded = match percent_decode_str(raw_relative).decode_utf8() {
         Ok(value) => value.into_owned(),
         Err(_) => return response(400, "Invalid encoded path", "text/plain; charset=utf-8"),
@@ -175,93 +240,105 @@ fn content_response(session: &ReaderSession, raw_relative: &str) -> HttpResponse
     }
 }
 
-fn progress_put(request: &mut Request, origin: &str, session: &ReaderSession) -> HttpResponse {
-    if request_origin(request) != Some(origin) {
+/// P2-21 read-merge-write — mirrors `library::merge_progress` exactly so both
+/// writers (the Svelte 精读 workspace via `save_book_progress` and this
+/// reader via PUT /progress) converge on the same `.reading.json` instead of
+/// losing each other's update. The `read` set is a union; the cursor
+/// (current/position/updated) goes to whichever side saved most recently,
+/// ordered by the RFC-3339 `updated` stamp.
+fn merge_progress(existing: &ReadingProgress, incoming: &ReadingProgress) -> ReadingProgress {
+    let mut merged = incoming.clone();
+    for id in &existing.read {
+        if !merged.read.iter().any(|known| known == id) {
+            merged.read.push(id.clone());
+        }
+    }
+    if existing.updated > merged.updated {
+        merged.current = existing.current.clone();
+        merged.position = existing.position;
+        merged.updated = existing.updated.clone();
+    }
+    merged
+}
+
+fn progress_put(request: &ReaderRequest, origin: &str, session: &ReaderSession) -> ReaderResponse {
+    if request.header("origin") != Some(origin) {
         return response(
             403,
             "Cross-origin progress writes are rejected",
             "text/plain; charset=utf-8",
         );
     }
-    if request.body_length().unwrap_or(0) > MAX_PROGRESS_BODY {
-        return response(
-            413,
-            "Progress request is too large",
-            "text/plain; charset=utf-8",
-        );
-    }
-    let mut body = Vec::new();
-    if request
-        .as_reader()
-        .take((MAX_PROGRESS_BODY + 1) as u64)
-        .read_to_end(&mut body)
-        .is_err()
+    // The declared length is checked even when the body was never read, so a
+    // chunked/oversized write gets the same answer as a small one.
+    if request.content_length.unwrap_or(0) > MAX_PROGRESS_BODY as u64
+        || request.body.len() > MAX_PROGRESS_BODY
     {
         return response(
-            400,
-            "Progress request could not be read",
-            "text/plain; charset=utf-8",
-        );
-    }
-    if body.len() > MAX_PROGRESS_BODY {
-        return response(
             413,
             "Progress request is too large",
             "text/plain; charset=utf-8",
         );
     }
-    let progress: ReadingProgress = match serde_json::from_slice(&body) {
+    let progress: ReadingProgress = match serde_json::from_slice(&request.body) {
         Ok(value) => value,
         Err(error) => return response(400, error.to_string(), "text/plain; charset=utf-8"),
     };
-    match crate::progress::save_progress(&session.book_root, &session.manifest, &progress) {
+    // P2-21: read-merge-write. If the disk state is unreadable (load_progress
+    // already quarantined it), keep the writer's payload rather than dropping
+    // the update entirely.
+    let merged = match crate::progress::load_progress(&session.book_root, &session.manifest) {
+        Ok(existing) => merge_progress(&existing, &progress),
+        Err(_) => progress,
+    };
+    match crate::progress::save_progress(&session.book_root, &session.manifest, &merged) {
         Ok(()) => response(204, Vec::new(), "text/plain; charset=utf-8"),
         Err(error) => response(400, error, "text/plain; charset=utf-8"),
     }
 }
 
-pub fn handle(mut request: Request, origin: &str, sessions: &Sessions, reader_html: &str) {
-    let path = request.url().split('?').next().unwrap_or("");
+pub(crate) fn handle(
+    request: &ReaderRequest,
+    origin: &str,
+    sessions: &Sessions,
+    reader_html: &Arc<Vec<u8>>,
+) -> ReaderResponse {
+    let path = request.target.split('?').next().unwrap_or("");
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if parts.len() < 3 || parts[0] != "s" {
-        let _ = request.respond(response(404, "Not found", "text/plain; charset=utf-8"));
-        return;
+        return response(404, "Not found", "text/plain; charset=utf-8");
     }
     let session = session_for(sessions, parts[1]);
     let Some(session) = session else {
-        let _ = request.respond(response(
-            403,
-            "Invalid reader session",
-            "text/plain; charset=utf-8",
-        ));
-        return;
+        return response(403, "Invalid reader session", "text/plain; charset=utf-8");
     };
     let route = parts[2..].join("/");
-    let value = match (request.method(), route.as_str()) {
-        (&Method::Get, "reader") => {
-            response(200, reader_html.as_bytes(), "text/html; charset=utf-8")
-        }
-        (&Method::Get, "manifest") => json(&session.manifest),
-        (&Method::Get, "progress") => {
+    match (request.method.as_str(), route.as_str()) {
+        ("GET", "reader") => document_response(
+            200,
+            Arc::clone(reader_html),
+            "text/html; charset=utf-8",
+        ),
+        ("GET", "manifest") => json(&session.manifest),
+        ("GET", "progress") => {
             match crate::progress::load_progress(&session.book_root, &session.manifest) {
                 Ok(progress) => json(&progress),
                 Err(error) => response(500, error, "text/plain; charset=utf-8"),
             }
         }
-        (&Method::Get, "heartbeat") => response(204, Vec::new(), "text/plain; charset=utf-8"),
-        (&Method::Put, "progress") => progress_put(&mut request, origin, &session),
-        (&Method::Get, value) if value.starts_with("content/") => {
+        ("GET", "heartbeat") => response(204, Vec::new(), "text/plain; charset=utf-8"),
+        ("PUT", "progress") => progress_put(request, origin, &session),
+        ("GET", value) if value.starts_with("content/") => {
             content_response(&session, value.trim_start_matches("content/"))
         }
         _ => response(404, "Not found", "text/plain; charset=utf-8"),
-    };
-    let _ = request.respond(value);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_book_resource, prune_expired_sessions, ReaderSession, READER_SESSION_TTL};
-    use crate::contracts::Manifest;
+    use super::{is_book_resource, merge_progress, prune_expired_sessions, ReaderSession, READER_SESSION_TTL};
+    use crate::contracts::{Manifest, ReadingProgress};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::time::Instant;
@@ -299,5 +376,33 @@ mod tests {
         );
         prune_expired_sessions(&mut sessions, now);
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn merge_unions_read_marks_and_prefers_the_fresher_cursor() {
+        let progress = |current: &str, position: f64, read: &[&str], updated: &str| {
+            ReadingProgress {
+                schema_version: 1,
+                current: current.to_string(),
+                position,
+                read: read.iter().map(|id| id.to_string()).collect(),
+                updated: updated.to_string(),
+            }
+        };
+        // The reader surface saved later: its cursor wins, but the earlier
+        // surface's `read` mark survives the merge.
+        let existing = progress("ch-1", 0.2, &["ch-1"], "2026-07-15T10:00:00Z");
+        let incoming = progress("ch-2", 0.7, &["ch-2"], "2026-07-15T11:00:00Z");
+        let merged = merge_progress(&existing, &incoming);
+        assert_eq!(merged.current, "ch-2");
+        assert_eq!(merged.position, 0.7);
+        assert!(merged.read.iter().any(|id| id == "ch-1"));
+        assert!(merged.read.iter().any(|id| id == "ch-2"));
+        // Stale cursor, fresh mark: cursor stays with `existing`, reads union.
+        let incoming_stale = progress("ch-3", 0.9, &["ch-3"], "2026-07-15T09:00:00Z");
+        let merged = merge_progress(&existing, &incoming_stale);
+        assert_eq!(merged.current, "ch-1");
+        assert_eq!(merged.position, 0.2);
+        assert_eq!(merged.read.len(), 2);
     }
 }

@@ -28,7 +28,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset: tauri:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*; frame-src 'self' http://127.0.0.1:*; img-src 'self' asset: tauri: data: blob: http: https:; style-src 'self' 'unsafe-inline' asset: tauri:; script-src 'self' asset: tauri:; font-src 'self' asset: tauri: data:",
+      "csp": "default-src 'self' asset: tauri:; connect-src 'self' ipc: http://ipc.localhost; frame-src 'self' http://127.0.0.1:21743 http://127.0.0.1:21744 http://127.0.0.1:21745 http://127.0.0.1:21746 http://127.0.0.1:21747 http://127.0.0.1:21748 http://127.0.0.1:21749 http://127.0.0.1:21750; img-src 'self' asset: tauri: data: blob: https: http://asset.localhost https://asset.localhost; style-src 'self' 'unsafe-inline' asset: tauri:; script-src 'self' asset: tauri:; font-src 'self' asset: tauri: data:; object-src 'none'; base-uri 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": []

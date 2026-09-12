@@ -121,12 +121,15 @@ pub(super) fn command_for(
                     "PATH",
                     std::env::join_paths(path_parts).map_err(|error| error.to_string())?,
                 );
+            // P2-22: the DeepSeek key is scoped to the Podcast transcriber —
+            // the Zhihu Chromium sidecar must not inherit a credential it
+            // never uses.
+            if let Some(api_key) =
+                crate::secrets::deepseek_api_key(&crate::settings::AppChannel::current())?
+            {
+                command.env("DEEPSEEK_API_KEY", api_key);
+            }
         }
-    }
-    if let Some(api_key) =
-        crate::secrets::deepseek_api_key(&crate::settings::AppChannel::current())?
-    {
-        command.env("DEEPSEEK_API_KEY", api_key);
     }
     Ok(command)
 }
