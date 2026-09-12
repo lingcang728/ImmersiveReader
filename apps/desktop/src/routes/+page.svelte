@@ -232,6 +232,9 @@
 	let focusBlockMetrics: { top: number; bottom: number; center: number }[] = [];
 	let focusMetricsValid = false;
 	let focusUpdateFrame: number | null = null;
+	let focusInteractionFrame: number | null = null;
+	// One-shot fade-out timers from releaseFocusUnit — tracked for teardown.
+	const focusReleaseTimers = new Set<ReturnType<typeof setTimeout>>();
 	let queuedFocusIndex: number | undefined;
 	let isFocusScrollActive = false;
 	let focusScrollEndTimer: ReturnType<typeof setTimeout> | null = null;
@@ -385,15 +388,26 @@
 	function postFlowFontScale(scale: number) {
 		const win = flowIframeEl?.contentWindow;
 		if (!win || !flowReaderSession) return;
+		if (lastPostedFontScale === scale) return;
+		lastPostedFontScale = scale;
 		try {
 			win.postMessage(createFlowSetFontScaleMessage(scale), "*");
 		} catch {
-			// iframe may be mid-navigation
+			// iframe may be mid-navigation — the load handler re-sends on arrival
+			lastPostedFontScale = null;
 		}
 	}
 
 	let windowMaximized = false;
 	let lastPostedLayoutWide: boolean | null = null;
+	let lastPostedFontScale: number | null = null;
+	let flowSyncTarget: {
+		session: { sessionId: string; url: string };
+		iframe: HTMLIFrameElement;
+	} | null = null;
+	// Restore frames scheduled by handleWindowMaximizedChange — tracked so
+	// teardown can cancel a frame that has not run yet.
+	const maximizedScrollFrames = new Set<number>();
 
 	function postFlowLayoutMode(wide: boolean) {
 		const win = flowIframeEl?.contentWindow;
@@ -420,7 +434,8 @@
 				Math.max(1, contentEl.scrollHeight - contentEl.clientHeight)
 			: readingProgress;
 		windowMaximized = maximized;
-		requestAnimationFrame(() => {
+		const frame = requestAnimationFrame(() => {
+			maximizedScrollFrames.delete(frame);
 			if (!contentEl || !$currentFilePath) return;
 			contentEl.scrollTop =
 				progress * Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
@@ -429,6 +444,7 @@
 				scheduleFocusUpdate(lastFocusedIdx >= 0 ? lastFocusedIdx : undefined);
 			}
 		});
+		maximizedScrollFrames.add(frame);
 		if (flowReaderSession) postFlowLayoutMode(maximized);
 	}
 
@@ -446,10 +462,21 @@
 	}
 
 	// Keep the continuous-reader iframe in sync with settings / store updates.
+	// A new session/iframe re-sends both messages; between those, each postFlow*
+	// dedups on its own last-sent value so unrelated store changes are no-ops.
 	$: if (flowReaderSession && flowIframeEl) {
+		if (
+			flowSyncTarget?.session !== flowReaderSession ||
+			flowSyncTarget.iframe !== flowIframeEl
+		) {
+			flowSyncTarget = { session: flowReaderSession, iframe: flowIframeEl };
+			lastPostedFontScale = null;
+			lastPostedLayoutWide = null;
+		}
 		postFlowFontScale($fontScale);
-		lastPostedLayoutWide = null;
 		postFlowLayoutMode(windowMaximized);
+	} else {
+		flowSyncTarget = null;
 	}
 
 	function adjustFontScale(direction: number) {
@@ -679,17 +706,27 @@
 	let lightboxSrc = "";
 	let lightboxAlt = "";
 	let lightboxScale = 1;
+	let lightboxCloseEl: HTMLButtonElement | null = null;
+	let lightboxReturnFocus: HTMLElement | null = null;
 
 	function openLightbox(img: HTMLImageElement) {
 		lightboxSrc = img.currentSrc || img.src;
 		lightboxAlt = img.alt || "";
 		lightboxScale = 1;
+		// Keyboard path: move focus onto the close button (Esc is handled by the
+		// global keydown) and restore it when the lightbox goes away.
+		lightboxReturnFocus =
+			document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		void tick().then(() => lightboxCloseEl?.focus());
 	}
 
 	function closeLightbox() {
 		lightboxSrc = "";
 		lightboxAlt = "";
 		lightboxScale = 1;
+		const returnTo = lightboxReturnFocus;
+		lightboxReturnFocus = null;
+		if (returnTo?.isConnected) returnTo.focus();
 	}
 
 	function handleLightboxWheel(e: WheelEvent) {
@@ -705,7 +742,6 @@
 	let chromeState: ChromeState = createChromeState("library");
 	let chromeHideTimer: ReturnType<typeof setTimeout> | null = null;
 	let chromeStackEl: HTMLElement | null = null;
-	let chromeTitle = "沉浸阅读";
 	let flowIframeEl: HTMLIFrameElement | null = null;
 	let readingCursorState: ReadingCursorState = createReadingCursorState();
 	let readingCursorHideTimer: ReturnType<typeof setTimeout> | null = null;
@@ -894,6 +930,19 @@
 		return lower.endsWith('.md') || lower.endsWith('.markdown');
 	}
 
+	// Read one 0-based line without materializing a full split("\n") array —
+	// the edit-save path only needs the lines adjacent to the edited block.
+	function sourceLineAt(source: string, lineIndex: number): string | null {
+		let start = 0;
+		for (let i = 0; i < lineIndex; i += 1) {
+			const next = source.indexOf("\n", start);
+			if (next === -1) return null;
+			start = next + 1;
+		}
+		const end = source.indexOf("\n", start);
+		return source.slice(start, end === -1 ? source.length : end);
+	}
+
 	function rejectPendingMarkdownRenders(error: Error) {
 		pendingMarkdownRenders.forEach(({ reject }) => reject(error));
 		pendingMarkdownRenders.clear();
@@ -953,16 +1002,26 @@
 		const worker = getMarkdownWorker();
 		if (worker) {
 			const id = nextRenderRequestId++;
+			// A synchronous postMessage throw must not leave a dead pending
+			// entry — remove it before rejecting; postFailed keeps the catch
+			// below treating it as a transport failure (not a document error).
+			let postFailed = false;
 			try {
 				const rendered = await new Promise<RenderedMarkdownDocument>((resolve, reject) => {
 					pendingMarkdownRenders.set(id, { resolve, reject });
-					worker.postMessage({ id, source });
+					try {
+						worker.postMessage({ id, source });
+					} catch (postErr) {
+						postFailed = true;
+						pendingMarkdownRenders.delete(id);
+						reject(postErr instanceof Error ? postErr : new Error(String(postErr)));
+					}
 				});
 				markdownWorkerTransportFailures = 0;
 				return rendered;
 			} catch (err) {
 				const orphanedRequest = pendingMarkdownRenders.delete(id);
-				if (!orphanedRequest && markdownWorker === worker) {
+				if (!orphanedRequest && !postFailed && markdownWorker === worker) {
 					// Document-level failure: the worker answered {id,error}, so it
 					// is healthy and stays alive. The same source would fail the
 					// same way on the main thread — propagate instead of retrying.
@@ -1140,8 +1199,7 @@
 	}
 
 	function updateWindowTitle(name: string) {
-		chromeTitle = "沉浸阅读";
-		const nativeTitle = name ? `${name} — 沉浸阅读` : chromeTitle;
+		const nativeTitle = name ? `${name} — 沉浸阅读` : "沉浸阅读";
 		void getCurrentWebviewWindow()
 			.setTitle(nativeTitle)
 			.catch(() => {});
@@ -1162,6 +1220,18 @@
 			firstOpenHintVisible = false;
 			firstOpenHintTimer = null;
 		}, 9000);
+	}
+
+	// First-run hint: the window X hides to the tray (tasks keep running) — it
+	// does not quit. Shown once per install via a localStorage flag.
+	function maybeShowTrayHint() {
+		try {
+			if (localStorage.getItem("mmbook-tray-hint-shown")) return;
+			localStorage.setItem("mmbook-tray-hint-shown", "1");
+		} catch {
+			return;
+		}
+		showAppNotice("提示：右上角 X 会把窗口最小化到系统托盘（任务继续运行），托盘菜单选「退出」才会真正关闭");
 	}
 
 	// Quiet transient notice (e.g. "updated in background").
@@ -1215,33 +1285,30 @@
 	// resolved out of order used to make the bookshelf flash a stale list.
 	// Only the latest call may land its results.
 	let libraryRefreshNonce = 0;
+	let libraryLoadedOnce = false;
 	async function refreshLibrary() {
 		const nonce = ++libraryRefreshNonce;
-		libraryLoading = true;
+		// Runs on every task event — only the first load may flip the view to a
+		// spinner; later refreshes update in place so the resume card doesn't flash.
+		if (!libraryLoadedOnce) libraryLoading = true;
 		try {
-			const settings = await invoke<AppSettings>("get_app_settings");
-			const scan = await invoke<{ books: BookSummary[]; issues: LibraryIssue[]; writable: boolean }>("scan_library");
+			// The trash list is only read while its panel is open — the bookshelf
+			// badge follows the panel's own refreshes instead.
+			const [settings, scan, nextTemporaryItems, nextTrashItems] = await Promise.all([
+				invoke<AppSettings>("get_app_settings"),
+				invoke<{ books: BookSummary[]; issues: LibraryIssue[]; writable: boolean }>("scan_library"),
+				invoke<TemporaryItem[]>("list_temporary_content").catch(() => [] as TemporaryItem[]),
+				trashOpen
+					? invoke<TrashItem[]>("list_trash").catch(() => [] as TrashItem[])
+					: Promise.resolve(null),
+			]);
 			if (nonce !== libraryRefreshNonce) return;
 			appSettings = settings;
 			libraryBooks = scan.books;
 			libraryIssues = scan.issues;
 			libraryWritable = scan.writable;
-			let nextTemporaryItems: TemporaryItem[] = [];
-			try {
-				nextTemporaryItems = await invoke<TemporaryItem[]>("list_temporary_content");
-			} catch {
-				nextTemporaryItems = [];
-			}
-			if (nonce !== libraryRefreshNonce) return;
 			temporaryItems = nextTemporaryItems;
-			let nextTrashItems: TrashItem[] = [];
-			try {
-				nextTrashItems = await invoke<TrashItem[]>("list_trash");
-			} catch {
-				nextTrashItems = [];
-			}
-			if (nonce !== libraryRefreshNonce) return;
-			trashItems = nextTrashItems;
+			if (nextTrashItems !== null) trashItems = nextTrashItems;
 		} catch (error) {
 			if (nonce !== libraryRefreshNonce) return;
 			libraryBooks = [];
@@ -1249,6 +1316,7 @@
 			libraryWritable = false;
 		} finally {
 			if (nonce === libraryRefreshNonce) {
+				libraryLoadedOnce = true;
 				libraryLoading = false;
 			}
 		}
@@ -1523,11 +1591,18 @@
 		if (url) void openUrl(url).catch((error) => showAppNotice(`无法打开来源链接：${String(error)}`));
 	}
 
-	async function openLibraryBook(bookId: string) {
+	// chapterIndex comes from a detail-dialog chapter click: open that chapter
+	// from its top; without it, resume at saved progress.
+	async function openLibraryBook(bookId: string, chapterIndex?: number) {
 		if ((await requestNavigationGuard("切换书目")) === "cancel") return;
 		try {
 			const detail = await invoke<BookDetail>("open_book", { bookId });
-			const index = resolveChapterIndex(detail.manifest.chapters, detail.progress.current, detail.progress.read);
+			const index =
+				chapterIndex !== undefined &&
+				chapterIndex >= 0 &&
+				chapterIndex < detail.manifest.chapters.length
+					? chapterIndex
+					: resolveChapterIndex(detail.manifest.chapters, detail.progress.current, detail.progress.read);
 			if (index < 0) {
 				showAppNotice("这本文集还没有可读章节");
 				return;
@@ -1536,10 +1611,13 @@
 			const path = await invoke<string>("get_book_chapter_path", { bookId, chapterId: chapter.id });
 			const opened = await openFile(path, {
 				bookChapter: true,
-				restoreRatio: detail.progress.position,
+				restoreRatio: chapterIndex !== undefined ? 0 : detail.progress.position,
 				suppressRecent: true,
 			});
 			if (!opened) return;
+			// Opening from the details dialog dismisses it — a stale detail must
+			// not keep the modal drop guard engaged while reading.
+			selectedBookDetail = null;
 			activeBook = detail;
 			activeChapterIndex = index;
 			tocItems = chapterTocItems(detail.manifest.chapters);
@@ -1937,7 +2015,7 @@
 			}
 		};
 		checkInitialFile();
-		setTimeout(checkInitialFile, 200);
+		const initialFileTimer = setTimeout(checkInitialFile, 200);
 
 		const handleKeydown = (e: KeyboardEvent) => {
 			// While a modal layer is open it owns the keyboard: global shortcuts
@@ -2253,29 +2331,45 @@
 			scheduleFocusWheelStep(stepDirection);
 		};
 
+		// Track the revealed originals instead of rescanning the whole article on
+		// every selectionchange tick — the event also fires for plain caret moves.
+		let selectionRevealedOriginals: Element[] = [];
 		const clearPodcastSelectionReveal = () => {
-			contentEl?.querySelectorAll("blockquote.podcast-original.is-selection-revealed").forEach((node) => {
+			if (selectionRevealedOriginals.length === 0) return;
+			for (const node of selectionRevealedOriginals) {
 				node.classList.remove("is-selection-revealed");
-			});
+			}
+			selectionRevealedOriginals = [];
 		};
 
 		const handlePodcastSelectionChange = () => {
-			clearPodcastSelectionReveal();
 			const selection = window.getSelection();
-			if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+			if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+				clearPodcastSelectionReveal();
+				return;
+			}
 			const getTranslation = (node: Node | null) => {
 				const element = node instanceof Element ? node : node?.parentElement;
 				return element?.closest("p.podcast-translation") as HTMLElement | null;
 			};
 			const translation = getTranslation(selection.anchorNode) ?? getTranslation(selection.focusNode);
-			if (!translation || !contentEl?.contains(translation)) return;
+			if (!translation || !contentEl?.contains(translation)) {
+				clearPodcastSelectionReveal();
+				return;
+			}
 			const bilingualId = translation.dataset.bilingualId;
-			if (!bilingualId) return;
-			contentEl.querySelectorAll("blockquote.podcast-original").forEach((node) => {
-				if ((node as HTMLElement).dataset.bilingualId === bilingualId) {
-					node.classList.add("is-selection-revealed");
-				}
+			if (!bilingualId) {
+				clearPodcastSelectionReveal();
+				return;
+			}
+			clearPodcastSelectionReveal();
+			const originals = contentEl.querySelectorAll(
+				`blockquote.podcast-original[data-bilingual-id="${CSS.escape(bilingualId)}"]`,
+			);
+			originals.forEach((node) => {
+				node.classList.add("is-selection-revealed");
 			});
+			selectionRevealedOriginals = Array.from(originals);
 		};
 
 		const handleContentClick = (e: MouseEvent) => {
@@ -2325,6 +2419,15 @@
 		const appWindow = getCurrentWebviewWindow();
 		const unlistenDrop = appWindow.onDragDropEvent((event) => {
 			if (event.payload.type === 'drop') {
+				// A modal layer owns the surface while it is open — a dropped file
+				// must not swap the document out from under it.
+				if (
+					podcastWorkflowOpen ||
+					zhihuWorkflowOpen ||
+					navigationGuardOpen ||
+					selectedBookDetail !== null ||
+					trashOpen
+				) return;
 				const mdFile = event.payload.paths.find(
 					(p: string) => isMarkdownPath(p)
 				);
@@ -2447,6 +2550,25 @@
 		// Window X / chrome close: save reading state and hide to tray so acquisition
 		// tasks keep running. Only tray "退出" ends the process (preserve / cleanup).
 		let isClosing = false;
+		// One-shot race timeouts below are tracked so teardown can cancel a
+		// pending exit flow instead of letting callbacks fire post-destroy.
+		const exitTimers = new Set<ReturnType<typeof setTimeout>>();
+		const raceWithTimeout = <T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> => {
+			let timer: ReturnType<typeof setTimeout> | null = null;
+			const timeout = new Promise<T>((resolve) => {
+				timer = setTimeout(() => {
+					if (timer) exitTimers.delete(timer);
+					resolve(fallback);
+				}, ms);
+			});
+			if (timer) exitTimers.add(timer);
+			return Promise.race([promise, timeout]).finally(() => {
+				if (timer) {
+					clearTimeout(timer);
+					exitTimers.delete(timer);
+				}
+			});
+		};
 		const finishExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
 			try {
 				try {
@@ -2458,15 +2580,9 @@
 					console.warn("Window hide failed; continuing exit cleanup.", hideErr);
 				}
 				if (editingParagraph) {
-					await Promise.race([
-						finishEdit(),
-						new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1200)),
-					]);
+					await raceWithTimeout(finishEdit(), 1200, false);
 				}
-				await Promise.race([
-					flushSaveState(),
-					new Promise<void>((resolve) => setTimeout(resolve, 500)),
-				]);
+				await raceWithTimeout(flushSaveState(), 500, undefined);
 				await closeFlowReader();
 				if (mode === "preserve") {
 					await invoke("quit_app");
@@ -2520,6 +2636,23 @@
 			recentFiles = files;
 		});
 		void hydrateDurableReaderPreferences();
+		maybeShowTrayHint();
+
+		// Prewarm the markdown worker off the critical path: the first render
+		// then only pays postMessage latency, not worker script load/eval.
+		let workerPrewarmIdleId: number | null = null;
+		let workerPrewarmTimer: ReturnType<typeof setTimeout> | null = null;
+		if (typeof requestIdleCallback === "function") {
+			workerPrewarmIdleId = requestIdleCallback(() => {
+				workerPrewarmIdleId = null;
+				getMarkdownWorker();
+			}, { timeout: 3000 });
+		} else {
+			workerPrewarmTimer = setTimeout(() => {
+				workerPrewarmTimer = null;
+				getMarkdownWorker();
+			}, 0);
+		}
 
 		// 外部变更自动重载：每 2s 轮询当前文件 mtime；
 		// 内容与内存一致（如刚由本应用保存）或正在编辑时不打断。
@@ -2528,6 +2661,7 @@
 		let watchedMtime = 0;
 		let pollTick = 0;
 		let fileWatchInFlight = false;
+		let fileMissingNotified = false;
 		const fileWatchTimer = window.setInterval(async () => {
 			pollTick += 1;
 			if (!document.hasFocus() && pollTick % 5 !== 0) return;
@@ -2546,6 +2680,8 @@
 					return;
 				}
 				const mtime = await invoke<number>("get_file_mtime", { path });
+				// File readable again — allow a future disappearance notice.
+				fileMissingNotified = false;
 				if (!isCurrentNavigation(navigationAtStart, {
 					generation: navigationGeneration,
 					path: $currentFilePath ?? "",
@@ -2582,7 +2718,19 @@
 				}
 				if (contentEl) contentEl.scrollTop = scrollTop;
 			} catch {
-				// 文件被移动/删除等情况：静默忽略，下次轮询再试
+				// A moved/deleted file must surface — otherwise the reader keeps
+				// showing a stale copy forever. Notify once per disappearance.
+				if (
+					path &&
+					!fileMissingNotified &&
+					isCurrentNavigation(navigationAtStart, {
+						generation: navigationGeneration,
+						path: $currentFilePath ?? "",
+					})
+				) {
+					fileMissingNotified = true;
+					showAppNotice("文件已被移动或删除，当前显示的是旧内容");
+				}
 			} finally {
 				fileWatchInFlight = false;
 			}
@@ -2590,6 +2738,24 @@
 
 		return () => {
 			window.clearInterval(fileWatchTimer);
+			clearTimeout(initialFileTimer);
+			if (workerPrewarmIdleId !== null) cancelIdleCallback(workerPrewarmIdleId);
+			if (workerPrewarmTimer) clearTimeout(workerPrewarmTimer);
+			exitTimers.forEach((timer) => clearTimeout(timer));
+			exitTimers.clear();
+			maximizedScrollFrames.forEach((frame) => cancelAnimationFrame(frame));
+			maximizedScrollFrames.clear();
+			focusReleaseTimers.forEach((timer) => clearTimeout(timer));
+			focusReleaseTimers.clear();
+			if (focusInteractionFrame !== null) {
+				cancelAnimationFrame(focusInteractionFrame);
+				focusInteractionFrame = null;
+			}
+			if (editOrbitFrame !== null) {
+				cancelAnimationFrame(editOrbitFrame);
+				editOrbitFrame = null;
+			}
+			cancelChapterBoundaryRestore();
 			unlistenDrop.then(fn => fn());
 			unlistenOpenFile.then(fn => fn());
 			unlistenTaskEvents.then(fn => fn());
@@ -2692,13 +2858,21 @@
 		};
 	});
 
+	let fileDialogOpen = false;
 	async function openFileDialog() {
-		const selected = await open({
-			multiple: false,
-			filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-		});
-		if (selected) {
-			openFile(selected as string);
+		// Re-entry (repeat Ctrl+O / double activation) must not stack dialogs.
+		if (fileDialogOpen) return;
+		fileDialogOpen = true;
+		try {
+			const selected = await open({
+				multiple: false,
+				filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+			});
+			if (selected) {
+				openFile(selected as string);
+			}
+		} finally {
+			fileDialogOpen = false;
 		}
 	}
 
@@ -2908,7 +3082,7 @@
 
 		el.addEventListener("blur", finishEdit, { once: true });
 		el.addEventListener("keydown", handleEditKeydown);
-		el.addEventListener("input", updateEditOrbitPosition);
+		el.addEventListener("input", scheduleEditOrbitUpdate);
 
 		if ($focusMode) {
 			focusBlockFromInteraction(el);
@@ -2918,6 +3092,17 @@
 		if ($focusMode && isDark) {
 			updateEditOrbitPosition();
 		}
+	}
+
+	// Keystroke input events fire far more often than once per frame — batch the
+	// rect read + style write so each frame pays at most one layout pass.
+	let editOrbitFrame: number | null = null;
+	function scheduleEditOrbitUpdate() {
+		if (editOrbitFrame !== null) return;
+		editOrbitFrame = requestAnimationFrame(() => {
+			editOrbitFrame = null;
+			updateEditOrbitPosition();
+		});
 	}
 
 	function updateEditOrbitPosition() {
@@ -2977,6 +3162,10 @@
 	function cleanupEditOrbit() {
 		isEditingInDarkFocus = false;
 		editOrbitParticles = [];
+		if (editOrbitFrame !== null) {
+			cancelAnimationFrame(editOrbitFrame);
+			editOrbitFrame = null;
+		}
 	}
 
 	function teardownEdit(el: HTMLElement) {
@@ -2984,7 +3173,7 @@
 		originalMarkdownBlock = "";
 		el.removeEventListener("blur", finishEdit);
 		el.removeEventListener("keydown", handleEditKeydown);
-		el.removeEventListener("input", updateEditOrbitPosition);
+		el.removeEventListener("input", scheduleEditOrbitUpdate);
 		el.removeAttribute("contenteditable");
 		el.classList.remove("editing");
 		el.classList.remove("editing-markdown-source");
@@ -3083,13 +3272,15 @@
 		}
 
 		// The block must stay isolated by blank lines (or document edges), or it
-		// could merge with a neighbour when the full document is parsed.
-		const lines = $markdownSource.split("\n");
+		// could merge with a neighbour when the full document is parsed. Only
+		// the two boundary lines are needed — read them without splitting the
+		// whole source into a per-line array.
 		const newLines = newBlockSource.split("\n");
 		const beforeIdx = sourceStart - 2;
-		if (beforeIdx >= 0 && (lines[beforeIdx] ?? "").trim() !== "") return false;
+		if (beforeIdx >= 0 && (sourceLineAt($markdownSource, beforeIdx) ?? "").trim() !== "") return false;
 		const afterIdx = sourceStart - 1 + newLines.length;
-		if (afterIdx < lines.length && (lines[afterIdx] ?? "").trim() !== "") return false;
+		const afterLine = sourceLineAt($markdownSource, afterIdx);
+		if (afterLine !== null && afterLine.trim() !== "") return false;
 
 		let rendered: RenderedMarkdownDocument;
 		try {
@@ -3219,23 +3410,31 @@
 		}
 	}
 
+	// saveState fires every few seconds while scrolling — surface a failure once
+	// (not per tick) so a dead backend can't silently drop reading progress.
+	let saveStateFailureNotified = false;
 	async function saveState() {
 		if (!$currentFilePath || !contentEl) return;
 		try {
 			if (activeBook) {
 				await persistActiveBookProgress();
-				return;
+			} else {
+				await invoke("save_reading_state", {
+					path: $currentFilePath,
+					state: {
+						scroll_position: contentEl.scrollTop,
+						bookmarks: [],
+						progress: readingProgress,
+					},
+				});
 			}
-			await invoke("save_reading_state", {
-				path: $currentFilePath,
-				state: {
-					scroll_position: contentEl.scrollTop,
-					bookmarks: [],
-					progress: readingProgress,
-				},
-			});
+			saveStateFailureNotified = false;
 		} catch (e) {
 			console.error("Failed to save state:", e);
+			if (!saveStateFailureNotified) {
+				saveStateFailureNotified = true;
+				showAppNotice("阅读进度保存失败，退出前请确认进度已记录");
+			}
 		}
 	}
 
@@ -3645,12 +3844,16 @@
 		updateFocusParagraph(index);
 		scrollUnitToFocusPosition(unit, index);
 
-		requestAnimationFrame(() => {
-			updateSpotlightPosition();
-			if (editingParagraph && isEditingInDarkFocus) {
-				updateEditOrbitPosition();
-			}
-		});
+		// Both updates are idempotent — collapse repeat calls into one frame.
+		if (focusInteractionFrame === null) {
+			focusInteractionFrame = requestAnimationFrame(() => {
+				focusInteractionFrame = null;
+				updateSpotlightPosition();
+				if (editingParagraph && isEditingInDarkFocus) {
+					updateEditOrbitPosition();
+				}
+			});
+		}
 		return true;
 	}
 
@@ -3878,11 +4081,13 @@
 			// Still visible (focus jumped far away): fade to the hidden state first,
 			// then drop inline styles once the transition has finished.
 			applyStylesToBlock(block, FOCUS_HIDDEN_STYLES);
-			setTimeout(() => {
+			const timer = setTimeout(() => {
+				focusReleaseTimers.delete(timer);
 				const index = Number(block.dataset.focusIndex ?? "-1");
 				if (block.dataset.focusBlock === "true" && styledFocusIndices.has(index)) return;
 				clearBlockFocusStyle(block);
 			}, FOCUS_RELEASE_FADE_MS);
+			focusReleaseTimers.add(timer);
 		}
 	}
 
@@ -4336,7 +4541,13 @@
 	}
 
 	function navigateSearch(direction: number) {
-		if (searchMatches.length === 0) return;
+		if (searchMatches.length === 0) {
+			// Enter/next on an empty result set used to be a dead key — say so.
+			if ($searchQuery.trim()) {
+				showAppNotice(`没有找到「${$searchQuery.trim()}」`);
+			}
+			return;
+		}
 		clearCurrentSearchMark();
 		currentMatchIndex =
 			(currentMatchIndex + direction + searchMatches.length) %
@@ -4491,10 +4702,18 @@
 	let lastStatusChapterUpdate = 0;
 
 	// Mixed-language reading speed: ~400 CJK chars/min + ~230 latin words/min.
+	// exec-loop counting keeps this O(1) memory — String.match would build a
+	// per-CJK-char array over the whole document on every open and save.
+	const CJK_CHAR_RE = /[一-鿿぀-ヿ가-힯]/g;
+	const LATIN_WORD_RE = /[A-Za-z0-9]+/g;
+	function countMatches(re: RegExp, text: string): number {
+		re.lastIndex = 0;
+		let count = 0;
+		while (re.exec(text) !== null) count += 1;
+		return count;
+	}
 	function estimateReadingMinutes(text: string): number {
-		const cjk = text.match(/[一-鿿぀-ヿ가-힯]/g)?.length ?? 0;
-		const words = text.match(/[A-Za-z0-9]+/g)?.length ?? 0;
-		return cjk / 400 + words / 230;
+		return countMatches(CJK_CHAR_RE, text) / 400 + countMatches(LATIN_WORD_RE, text) / 230;
 	}
 
 	$: totalReadingMinutes = estimateReadingMinutes($markdownSource);
@@ -4661,7 +4880,7 @@
 		{:else if showFlowContext}
 			<header class="flow-context-bar context-bar" role="toolbar" aria-label="连续阅读">
 				<div class="flow-context-left">
-					<BackButton label="返回书库" onClick={() => void closeFlowReader()} />
+					<BackButton label="返回书架" onClick={() => void closeFlowReader()} />
 					<div>
 						<strong>连续阅读</strong>
 						<span>所有章节留在沉浸阅读窗口内</span>
@@ -4714,6 +4933,8 @@
 					src={flowReaderSession.url}
 					sandbox="allow-same-origin allow-scripts allow-forms"
 					on:load={() => {
+						// Frame (re)loaded: force both messages to re-send.
+						lastPostedFontScale = null;
 						lastPostedLayoutWide = null;
 						postFlowFontScale($fontScale);
 						postFlowLayoutMode(windowMaximized);
@@ -4781,7 +5002,7 @@
 				loading={libraryLoading || importFolderBusy}
 				writable={libraryWritable}
 				libraryRoot={appSettings?.libraryRoot ?? ""}
-				onOpenBook={(bookId) => void openLibraryBook(bookId)}
+				onOpenBook={(bookId, chapterIndex) => void openLibraryBook(bookId, chapterIndex)}
 				onOpenDetails={(bookId) => void openBookDetails(bookId)}
 				onOpenSource={(source, sourceId) => openBookSource(source, sourceId)}
 				onCloseDetails={() => (selectedBookDetail = null)}
@@ -4828,7 +5049,10 @@
 		{/if}
 	</ReaderWorkspace>
 
-	<!-- Spotlight overlays for focus mode -->
+	<!-- Spotlight overlays for focus mode. The dust/beam layer is a permanent
+	     GPU cost while focus mode is on (80 particles + masked, blurred beams) —
+	     the fan noise in focus mode comes from here. Locked visuals, kept
+	     intentionally (P3-10). -->
 	{#if $focusMode && $renderedHtml}
 		<div class="stage-spotlight-layer">
 			<div class="dust-container">
@@ -4879,16 +5103,19 @@
 		<div class="zoom-indicator app-notice" role="status" aria-live="polite">{appNoticeText}</div>
 	{/if}
 
-	<!-- Search hit tick marks along the right edge -->
+	<!-- Search hit tick marks along the right edge: pointer-only markers —
+	     keyboard users navigate hits with Enter / Shift+Enter instead, so the
+	     9×3px ticks stay out of the tab order and the a11y tree. -->
 	{#if searchTickPositions.length > 0}
-		<div class="search-ticks">
+		<div class="search-ticks" aria-hidden="true">
 			{#each searchTickPositions as pos, i (i)}
-				<button
+				<!-- svelte-ignore a11y-click-events-have-key-events -->
+				<!-- svelte-ignore a11y-no-static-element-interactions -->
+				<span
 					class="search-tick"
 					style="top: {pos * 100}%"
-					aria-label="搜索命中位置"
 					on:click={() => jumpToSearchTick(pos)}
-				></button>
+				></span>
 			{/each}
 		</div>
 	{/if}
@@ -4919,7 +5146,10 @@
 		<!-- svelte-ignore a11y-no-static-element-interactions -->
 		<div
 			class="lightbox-overlay"
-			role="presentation"
+			role="dialog"
+			aria-modal="true"
+			aria-label="图片预览"
+			tabindex="-1"
 			on:click={closeLightbox}
 			on:wheel={handleLightboxWheel}
 		>
@@ -4929,6 +5159,16 @@
 				alt={lightboxAlt}
 				style="transform: scale({lightboxScale})"
 			/>
+			<button
+				type="button"
+				class="lightbox-close"
+				aria-label="关闭图片预览"
+				title="关闭 (Esc)"
+				bind:this={lightboxCloseEl}
+				on:click={closeLightbox}
+			>
+				×
+			</button>
 		</div>
 	{/if}
 
@@ -5535,6 +5775,12 @@
 		transition: opacity 0.2s ease, color 0.2s ease;
 		animation: fadeIn 0.15s ease;
 	}
+	/* Expand the tap target past the visual pill without changing its look. */
+	.code-copy-btn::before {
+		content: '';
+		position: absolute;
+		inset: -8px;
+	}
 	.code-copy-btn:hover {
 		color: var(--text);
 		opacity: 1;
@@ -5580,6 +5826,27 @@
 		border-radius: 6px;
 		box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
 		transition: transform 0.15s ease;
+	}
+	.lightbox-close {
+		position: fixed;
+		top: 18px;
+		right: 18px;
+		width: 36px;
+		height: 36px;
+		border: 1px solid var(--hr);
+		border-radius: 50%;
+		background: var(--bg-secondary);
+		color: var(--text-secondary);
+		font-size: 18px;
+		line-height: 1;
+		cursor: pointer;
+	}
+	.lightbox-close:hover {
+		color: var(--text);
+	}
+	.lightbox-close:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: 2px;
 	}
 
 	:global(.article .mermaid-diagram) {
@@ -5727,6 +5994,13 @@
 		font-size: 14px;
 		line-height: 1;
 		cursor: pointer;
+		position: relative;
+	}
+	/* Expand the tap target to ~32px without changing the 20px visual. */
+	.first-hint-close::before {
+		content: '';
+		position: absolute;
+		inset: -6px;
 	}
 	.first-hint-close:hover {
 		color: var(--text);
@@ -6079,6 +6353,7 @@
 		color: var(--text-secondary);
 		padding: 8px 12px;
 		font-size: 12px;
+		min-height: 32px;
 		cursor: pointer;
 	}
 	.navigation-guard-actions button:hover {
