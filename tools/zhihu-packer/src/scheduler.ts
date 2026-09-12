@@ -1,3 +1,4 @@
+import type { Page } from 'playwright-core';
 import { getBrowserContext, closeBrowserContext, syncCookiesToObscuraStorage } from './browser.js';
 import { scanLimitForSelection, scrapePeopleIndex, ScrapedIndexItem, selectIndexItems } from './indexer.js';
 import { scrapeAnswer, scrapeArticle, writeMarkdownFile } from './extractor.js';
@@ -156,6 +157,30 @@ async function randomSleepUnlessStopped(taskId: string, min: number, max: number
 
 function reportStopped(taskId: string, stopped: 'paused' | 'cancelled', context: string) {
   emitProgress(taskId, stopped, stopped === 'paused' ? `任务已被用户手动暂停（${context}）。` : `任务已被用户取消（${context}）。`);
+}
+
+/**
+ * P3-28：页面回收 —— 曾经一个 page 从索引滚动一路复用到正文队列末尾，
+ * 中途的页面崩溃/卡死/残留 response 监听器会污染后续所有抓取。
+ * 有界恢复策略（不建页面池）：阶段边界与可重试异常时关掉旧页、从当前
+ * 活跃 context 开新页；浏览器/context 生命周期仍由 getBrowserContext 单例
+ * 与 finally 的 closeBrowserContext 管理。回收失败只降级记日志，不炸任务。
+ */
+async function recycleTaskPage(page: Page | null): Promise<Page> {
+  if (page && !page.isClosed()) {
+    await page.close().catch(() => {});
+  }
+  const context = await getBrowserContext(true);
+  return context.newPage();
+}
+
+async function tryRecycleTaskPage(page: Page, reason: string): Promise<Page> {
+  try {
+    return await recycleTaskPage(page);
+  } catch (err: any) {
+    logger.warn(`页面回收失败（${reason}），继续使用当前页面: ${err?.message || err}`);
+    return page;
+  }
 }
 
 /**
@@ -444,6 +469,10 @@ async function runTaskInternal(taskId: string) {
       });
       taskItems = getTaskItems(taskId);
       emitProgress(taskId, 'running', `列表扫描完毕。共发现 ${taskItems.length} 个条目，开始消费正文队列...`);
+
+      // P3-28：阶段边界回收页面 —— 索引滚动在页面上累积了 response 监听与大量
+      // DOM 状态，不带进正文抓取阶段；失败仅降级复用旧页。
+      page = await tryRecycleTaskPage(page, '索引→正文阶段切换');
     } else {
       emitProgress(taskId, 'running', '检测到已存在的内容列表，恢复/断点续爬队列中...');
     }
@@ -586,6 +615,7 @@ async function runTaskInternal(taskId: string) {
         } catch (e: any) {
           logger.error(`抓取单篇发生异常: ${e.message}`);
           errorMessage = e.message || 'Unknown error';
+          const lowerError = errorMessage.toLowerCase();
 
           // 分析错误类型
           if (errorMessage.includes('LOGIN_REQUIRED')) {
@@ -613,10 +643,20 @@ async function runTaskInternal(taskId: string) {
             failureCode = 'DOM_NOT_FOUND';
           } else if (errorMessage.includes('CONTENT_EMPTY')) {
             failureCode = 'CONTENT_EMPTY';
-          } else if (errorMessage.includes('timeout') || errorMessage.includes('Navigation')) {
+          } else if (lowerError.includes('timeout') || lowerError.includes('navigation')) {
+            // P3-28：Playwright 报的是 'Timeout 30000ms exceeded'（大写 T），
+            // 旧代码用大小写敏感的 includes('timeout') 永远命不中，NETWORK_ERROR
+            // 曾是死代码——统一转小写再匹配。
             failureCode = 'NETWORK_ERROR';
           } else {
             failureCode = 'UNKNOWN';
+          }
+
+          // P3-28：可重试的抓取异常之后回收页面 —— 半崩溃/卡死/被重定向到验证页
+          // 的旧页面不带到下一次重试里（验证码路径已由 handleCaptchaInteractively
+          // 换新 context+page，经 continue 跳过了这里；不可重试错误也不必换页）。
+          if (retryCount < maxRetries) {
+            page = await tryRecycleTaskPage(page, '抓取异常重试前');
           }
 
           retryCount++;
@@ -782,6 +822,15 @@ function saveTaskStatusGuarded(taskId: string, status: Task['status']): boolean 
 }
 
 /**
+ * P3-28：Obsidian wikilink 组件转义。`[[file|title]]` 语法里 `|` 会切开
+ * target/alias、`]` 会提前终止链接（sanitizeFilename 只剥 Windows 非法字符，
+ * 标题里的 `|`/`]`/`[` 原样保留）——生成链接前必须反斜杠转义。
+ */
+function escapeWikilinkComponent(value: string): string {
+  return value.replace(/[[\]|]/g, (ch) => `\\${ch}`);
+}
+
+/**
  * 为答主目录生成 Obsidian 双链导航索引 index.md
  * @param authorDirectory 可选：发布事务实际落地的作者目录名。传入后 index.md
  *   直接写进该目录，而不是按 authorName+authorId 重新推导（P1-10：推导名可能与
@@ -816,7 +865,7 @@ export function generateAuthorIndex(
       if (!item.output_path) continue;
       const fileName = path.basename(item.output_path);
       const dateStr = new Date(item.created_time * 1000).toISOString().split('T')[0];
-      md += `- [[${fileName}|${item.title}]] (发布于: ${dateStr} | 赞同数: ${item.voteup_count})\n`;
+      md += `- [[${escapeWikilinkComponent(fileName)}|${escapeWikilinkComponent(item.title)}]] (发布于: ${dateStr} | 赞同数: ${item.voteup_count})\n`;
     }
     md += `\n`;
   }
@@ -829,7 +878,7 @@ export function generateAuthorIndex(
       if (!item.output_path) continue;
       const fileName = path.basename(item.output_path);
       const dateStr = new Date(item.created_time * 1000).toISOString().split('T')[0];
-      md += `- [[${fileName}|${item.title}]] (发布于: ${dateStr} | 赞同数: ${item.voteup_count})\n`;
+      md += `- [[${escapeWikilinkComponent(fileName)}|${escapeWikilinkComponent(item.title)}]] (发布于: ${dateStr} | 赞同数: ${item.voteup_count})\n`;
     }
     md += `\n`;
   }

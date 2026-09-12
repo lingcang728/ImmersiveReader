@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { parseManifest } from "../../../packages/contracts/dist/index.js";
 import { buildZhihuManifest, type ArchivedItem } from "./library-manifest.js";
 import type { TaskItem } from "./db.js";
-import { logger, sanitizeFilename } from "./utils.js";
+import { countWordChars, logger, sanitizeFilename } from "./utils.js";
 
 export type ZhihuPublishPhase = "prepared" | "old_moved" | "new_moved" | "committed" | "rolled_back";
 
@@ -192,7 +192,8 @@ function writeMetadata(
       createdTime: item.created_time,
       voteCount: item.voteup_count,
       outputPath: chapterPath,
-      wordCount: fs.readFileSync(filePath, "utf8").replace(/\s+/g, "").length,
+      // P3-29：wordCount 规范口径 = Unicode 标量数（与 Rust 端一致），不按 UTF-16 码元。
+      wordCount: countWordChars(fs.readFileSync(filePath, "utf8")),
     };
   });
   const manifest = parseManifest(buildZhihuManifest({
@@ -334,12 +335,48 @@ function listAuthorDirectories(incomingRoot: string): string[] {
   return entries.filter(isSafeDirectoryEntry).map(entry => entry.name);
 }
 
+/**
+ * P3-28：临时残片（图片下载的 `.<hash>.tmp-<pid>-<ts>`、JSON 原子写的
+ * `*.tmp-<pid>` 等）在进程崩溃后会以孤儿形式留在 assets/ 等目录里，
+ * 绝不能被拷进发布树。判定口径：文件名含 `.tmp-` 或以 `.tmp` 开头。
+ */
+function isTransientArtifactName(name: string): boolean {
+  return name.startsWith(".tmp") || name.includes(".tmp-");
+}
+
+/** 发布前清掉 incoming 树里的临时残片孤儿（递归，含 assets/ 子目录）。 */
+function pruneTransientArtifacts(dir: string): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue;
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      pruneTransientArtifacts(entryPath);
+    } else if (entry.isFile() && isTransientArtifactName(entry.name)) {
+      try {
+        fs.rmSync(entryPath, { force: true });
+        logger.warn(`已清理发布树中的临时残片: ${entryPath}`);
+      } catch {
+        // 清理失败不阻断发布——该文件最多以孤儿形式存在。
+      }
+    }
+  }
+}
+
 /** 递归把 source 目录里目标处尚不存在的文件并入 destination（不覆盖已有文件）。 */
 function mergeDirectoryInto(source: string, destination: string): void {
   ensureDirectory(destination);
   for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
     if (entry.isSymbolicLink()) {
       throw new Error("ZHIHU_PUBLISH_FAILED: incoming directory contains a symlink");
+    }
+    if (entry.isFile() && isTransientArtifactName(entry.name)) {
+      continue; // P3-28：临时残片不并入规范目录
     }
     const sourcePath = path.join(source, entry.name);
     const destinationPath = path.join(destination, entry.name);
@@ -397,6 +434,9 @@ function copyPublishedTree(source: string, destination: string, root = true): vo
     }
     if (root && (entry.name === "manifest.json" || entry.name === "provenance.json")) {
       continue;
+    }
+    if (entry.isFile() && isTransientArtifactName(entry.name)) {
+      continue; // P3-28：旧发布树里的临时残片不拷回新一轮暂存
     }
     const sourcePath = path.join(source, entry.name);
     const destinationPath = path.join(destination, entry.name);
@@ -475,6 +515,9 @@ export function publishTaskStage(
   }
   const [authorDirectory] = authorDirectories;
   const incomingAuthor = path.join(incomingRoot, authorDirectory);
+  // P3-28：发布即把 incomingAuthor 整树 rename 进最终目录——先清掉 assets/ 等处
+  // 残留的 `.tmp-*`/`.tmp*` 孤儿残片，否则它们会被一并搬进发布树。
+  pruneTransientArtifacts(incomingAuthor);
   const finalRoot = path.join(root, authorDirectory);
   const previousTransaction = readTransaction(root, taskId);
   if (previousTransaction?.phase === "committed" && previousTransaction.authorId === authorId) {

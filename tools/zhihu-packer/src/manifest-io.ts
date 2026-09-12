@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { parseManifest, type BookManifest, type Chapter } from "../../../packages/contracts/dist/index.js";
 import type { Item } from "./db.js";
 import { buildZhihuManifest, inferOrphanChapter, type ArchivedItem } from "./library-manifest.js";
-import { sanitizeFilename } from "./utils.js";
+import { countWordChars, sanitizeFilename } from "./utils.js";
 
 export type SuccessItem = Item & { readonly output_path: string };
 
@@ -93,7 +93,8 @@ export function generateAuthorManifest(input: GenerateAuthorManifestInput): Mani
       createdTime: item.created_time,
       voteCount: item.voteup_count,
       outputPath: relativePath,
-      wordCount: markdown.replace(/\s+/g, "").length,
+      // P3-29：wordCount 规范口径 = Unicode 标量数（与 Rust 端一致），不按 UTF-16 码元。
+      wordCount: countWordChars(markdown),
     });
   }
 

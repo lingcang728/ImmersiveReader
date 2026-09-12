@@ -169,7 +169,10 @@ export function extractMetadata(
     .trim();
 
   const summary = cleanSummaryText.slice(0, 150) + (cleanSummaryText.length > 150 ? '...' : '');
-  const wordCount = bodyText.replace(/\s+/g, '').length;
+  // P3-29：wordCount 规范口径 = Unicode 标量数（与 Rust 端一致）。
+  // 展开迭代按 code point 计数，不用 UTF-16 码元的 .length（本文件会被 esbuild
+  // 打进浏览器包，不能引 node 侧 utils，故内联实现）。
+  const wordCount = [...bodyText.replace(/\s+/g, '')].length;
 
   const articleId = calculateHash(relativePath);
 

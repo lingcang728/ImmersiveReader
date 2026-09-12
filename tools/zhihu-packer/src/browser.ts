@@ -262,11 +262,19 @@ function toObscuraCookie(cookie: Cookie) {
 export async function syncCookiesToObscuraStorage(context: BrowserContext): Promise<void> {
   const cookies = await context.cookies();
   fs.mkdirSync(obscuraStorageDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(obscuraStorageDir, 'cookies.json'),
-    JSON.stringify(cookies.map(toObscuraCookie), null, 2),
-    'utf-8'
-  );
+  // P3-28：cookies.json 是登录凭据——写入必须原子化（tmp+rename），否则进程在
+  // writeFileSync 中途被杀会留下半截 JSON，下次 injectStoredCookies 解析失败即丢登录态。
+  // 明文存储本身是 Cookie 缓存的固有形态，这里额外把文件权限收紧到属主读写（0o600；
+  // Windows 上 chmod 只影响只读位、属主写位仍在，所以是无害的最佳努力收紧）。
+  const cookieFile = path.join(obscuraStorageDir, 'cookies.json');
+  const tempFile = `${cookieFile}.tmp-${process.pid}`;
+  fs.writeFileSync(tempFile, JSON.stringify(cookies.map(toObscuraCookie), null, 2), 'utf-8');
+  fs.renameSync(tempFile, cookieFile);
+  try {
+    fs.chmodSync(cookieFile, 0o600);
+  } catch {
+    // 权限收紧失败不影响凭据本身可用性。
+  }
   logger.info(`已同步 ${cookies.length} 个 Cookie 到 Obscura 存储目录: ${obscuraStorageDir}`);
 }
 

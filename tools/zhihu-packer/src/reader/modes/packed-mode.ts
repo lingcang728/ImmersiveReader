@@ -24,7 +24,8 @@ export function getPackedArticles(): ArticleMetadata[] | null {
         timestamp: art.timestamp || Date.parse(art.date) || Date.now(),
         author: art.author || '老丹尼',
         summary: art.summary || (art.htmlContent ? art.htmlContent.replace(/<[^>]+>/g, '').slice(0, 150) : ''),
-        wordCount: art.wordCount || (art.htmlContent ? art.htmlContent.length : 0),
+        // P3-29：兜底字数同样按 Unicode 标量计，不用 UTF-16 码元 .length。
+        wordCount: art.wordCount || (art.htmlContent ? [...art.htmlContent].length : 0),
         upvoteCount: art.upvoteCount,
         frontMatter: art.frontMatter || {},
         // 预存的 htmlContent

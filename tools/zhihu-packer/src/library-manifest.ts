@@ -3,6 +3,8 @@ import * as path from "node:path";
 
 import type { BookManifest, Chapter } from "../../../packages/contracts/dist/index.js";
 
+import { countWordChars } from "./utils.js";
+
 export type ArchivedItem = {
   readonly id: string;
   readonly authorId: string;
@@ -68,7 +70,8 @@ export function inferOrphanChapter(relativePath: string, markdown: string): Chap
     title,
     ...(date === undefined ? {} : { date }),
     voteCount: 0,
-    wordCount: markdown.replace(/\s+/g, "").length,
+    // P3-29：wordCount 规范口径 = Unicode 标量数（与 Rust 端一致），不按 UTF-16 码元。
+    wordCount: countWordChars(markdown),
     metadataStatus: "inferred",
   };
 }

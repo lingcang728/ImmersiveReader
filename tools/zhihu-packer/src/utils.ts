@@ -22,6 +22,16 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * P3-29：wordCount 的规范口径 = Unicode 标量（code point）数。
+ * String.prototype.length 数的是 UTF-16 码元，星外来字（如 emoji、生僻字）会
+ * 被数成 2，与 Rust 端按 scalar 统计的口径分叉。用展开迭代按 code point 计数。
+ * 同时剥掉全部空白——与既有的 `.replace(/\s+/g, '').length` 语义一致。
+ */
+export function countWordChars(text: string): number {
+  return [...text.replace(/\s+/g, '')].length;
+}
+
 export function randomSleep(min = 2000, max = 5000): Promise<void> {
   const ms = Math.floor(Math.random() * (max - min + 1) + min);
   return sleep(ms);

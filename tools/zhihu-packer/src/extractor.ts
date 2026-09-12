@@ -8,6 +8,7 @@ import { request } from 'node:https';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { logger, sanitizeFilename, evaluateClean } from './utils.js';
+import { resolveBrowserCacheDir } from './runtime-paths.js';
 
 export interface ExtractedContent {
   id: string; // answer:12345 或 article:67890
@@ -392,8 +393,13 @@ export async function scrapeAnswer(page: Page, targetUrl: string, fallbackAuthor
   const answerEl = await page.$(answerSelector) || await page.$('.AnswerCard') || await page.$('.Post-RichTextContainer') || await page.$('.RichText');
   
   if (!answerEl) {
-    const screenshotPath = path.resolve(process.cwd(), 'debug-answer.png');
+    // P3-28：调试残片不落运行目录（cwd 会随调用方变化且可能入库），统一写到
+    // 受管浏览器缓存目录 —— 与 indexer.ts 的 debug-people-*.html 同一位置，
+    // 该目录已被 .gitignore 覆盖、也不会进 runtime 拷贝/发布 bundle。
     try {
+      const debugDir = resolveBrowserCacheDir({ cwd: process.cwd(), environment: process.env });
+      fs.mkdirSync(debugDir, { recursive: true });
+      const screenshotPath = path.join(debugDir, 'debug-answer.png');
       await page.screenshot({ path: screenshotPath });
       logger.error(`已将调试截图保存至: ${screenshotPath}`);
     } catch {
@@ -406,7 +412,10 @@ export async function scrapeAnswer(page: Page, targetUrl: string, fallbackAuthor
   const title = await page.$eval('.QuestionHeader-title', el => el.textContent?.trim()).catch(() => '未命名问题');
   let authorName = '匿名用户';
   try {
-    authorName = await page.$eval('[meta[itemprop="name"]]', el => el.getAttribute('content') || '');
+    // P3-28：原写法 '[meta[itemprop="name"]]' 是畸形选择器（属性选择器里套了
+    // 一层元素+属性），page.$eval 每次都抛 SyntaxError，恒落入 catch —— 死代码。
+    // 正确目标是页面 <meta itemprop="name" content="作者名"> 标签。
+    authorName = await page.$eval('meta[itemprop="name"]', el => el.getAttribute('content') || '');
   } catch (e) {
     try {
       authorName = await page.$eval('.AuthorInfo-name', el => el.textContent?.trim() || '');

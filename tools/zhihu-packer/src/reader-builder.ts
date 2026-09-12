@@ -56,7 +56,8 @@ export async function renderMarkdownArticle(
     pinyinAbbr,
     author,
     summary: plainText.slice(0, 150) + (plainText.length > 150 ? "..." : ""),
-    wordCount: chapter.wordCount || body.replace(/\s+/g, "").length,
+    // P3-29：wordCount 规范口径 = Unicode 标量数（与 Rust 端一致），不按 UTF-16 码元。
+    wordCount: chapter.wordCount || countWordChars(body),
     frontMatter: {
       path: chapter.path,
       voteup_count: String(chapter.voteCount),
@@ -121,5 +122,7 @@ import { marked } from "marked";
 import { pinyin } from "pinyin-pro";
 
 import type { Chapter } from "../../../packages/contracts/dist/index.js";
+
+import { countWordChars } from "./utils.js";
 
 const DOM_PURIFY = DOMPurifyFactory(new JSDOM("").window);

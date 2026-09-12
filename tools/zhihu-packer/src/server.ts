@@ -25,6 +25,29 @@ const HOST = '127.0.0.1';
 const localToken = process.env.ZHIHU_PACKER_TOKEN || randomBytes(24).toString('hex');
 const localHosts = new Set(['127.0.0.1', 'localhost', '::1']);
 
+// P3-28：不对外暴露 Express 指纹。
+app.disable('x-powered-by');
+
+// P3-28：请求级超时兜底 —— sidecar API 全是短请求，挂死的连接（客户端停读、
+// 半截请求体）不许无限占用 socket/处理线程；默认 60s，可用 env 覆盖。
+const REQUEST_TIMEOUT_MS = Number(process.env.ZHIHU_PACKER_REQUEST_TIMEOUT_MS) || 60_000;
+app.use((req, res, next) => {
+  req.setTimeout(REQUEST_TIMEOUT_MS);
+  res.setTimeout(REQUEST_TIMEOUT_MS, () => {
+    if (!res.headersSent) {
+      res.status(408).json({ success: false, error: '请求处理超时' });
+    }
+    // 冲刷完已写入的响应再断开，避免半截 socket 永久悬挂。
+    const socket = req.socket as unknown as { destroySoon?: () => void; destroy: () => void };
+    if (typeof socket.destroySoon === 'function') {
+      socket.destroySoon();
+    } else {
+      socket.destroy();
+    }
+  });
+  next();
+});
+
 app.use(express.json());
 
 function parseHost(hostHeader: string | undefined): string {
@@ -207,6 +230,22 @@ app.post('/api/tasks/:id/cancel', requireLocalToken, (req, res) => {
   } catch (e: any) {
     res.status(500).json({ success: false, error: e.message });
   }
+});
+
+// P3-28：统一错误出口 —— express.json 解析失败（entity.parse.failed 等带
+// err.status 的 body-parser 错误）或任何路由里逃逸的异常，一律返回与现有 API
+// 一致的 { success:false, error } JSON，绝不再吐 Express 默认的 HTML 堆栈页。
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+  const status = typeof err?.status === 'number' && err.status >= 400 && err.status < 600
+    ? err.status
+    : 500;
+  if (status >= 500) {
+    logger.error(`请求处理异常: ${err?.stack || err?.message || err}`);
+  }
+  res.status(status).json({ success: false, error: err?.message || '内部错误' });
 });
 
 export function startServer(port = 3000) {
