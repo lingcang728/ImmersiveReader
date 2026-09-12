@@ -73,7 +73,31 @@ fn collect_markdown(
         if file_type.is_symlink() {
             continue;
         }
+        // P3-14: dot-prefixed entries are hidden from the library scan
+        // (`collect_manifests` skips them) and `trash::parse_relative`
+        // refuses dot-leading segments — importing one would create an
+        // invisible, undeletable book. Hidden files are not book content.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         if file_type.is_dir() {
+            // P2-20: junctions/mount points are reparse points that
+            // `is_symlink` misses — a junction loop would otherwise recurse
+            // up to the depth cap through the same tree.
+            let reparse = match entry.metadata() {
+                Ok(metadata) => crate::atomic_file::is_reparse_point(&metadata),
+                Err(error) => {
+                    issue(
+                        issues,
+                        &entry.path(),
+                        format!("条目元数据无法读取：{error}"),
+                    );
+                    continue;
+                }
+            };
+            if reparse {
+                continue;
+            }
             collect_markdown(root, &entry.path(), output, issues, depth + 1);
             continue;
         }
@@ -104,12 +128,20 @@ fn stable_chapter_id(relative: &str) -> String {
 }
 
 fn unique_target(manual_root: &Path, title: &str) -> PathBuf {
-    let base = if title.trim().is_empty() {
-        "未命名书目"
-    } else {
-        title
-    };
-    let direct = manual_root.join(base);
+    // P3-14: the shelf name must stay visible to the library scan and
+    // deletable through `trash::parse_relative`. Strip characters Win32 would
+    // silently normalize — leading dots hide the directory from the scan and
+    // trailing dots/spaces are trimmed on create — and sidestep reserved
+    // device names (a folder literally named `CON` cannot be created).
+    let mut base = title
+        .trim_matches(|c: char| c == '.' || c == ' ')
+        .to_string();
+    if base.is_empty() {
+        base = "未命名书目".to_string();
+    } else if crate::contracts::is_reserved_device_name(&base) {
+        base.push('_');
+    }
+    let direct = manual_root.join(&base);
     if !crate::atomic_file::long_path(&direct).exists() {
         return direct;
     }
@@ -381,6 +413,35 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.message == "IMPORT_DEPTH_LIMIT"));
+        fs::remove_dir_all(root).expect("temp directory must be removed");
+    }
+
+    #[test]
+    fn dot_prefixed_source_and_entries_stay_shelvable_and_deletable() {
+        // P3-14: a `.`-prefixed source dir used to land as `手动/.foo` —
+        // invisible to the scan and undeletable via trash::parse_relative.
+        // Now the shelf name is sanitized and dot entries inside are skipped.
+        let root =
+            std::env::temp_dir().join(format!("immersive-import-dot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join(".hidden-book");
+        let library = root.join("library");
+        fs::create_dir_all(source.join(".git")).expect("source must be created");
+        fs::write(source.join("01.md"), "visible").expect("fixture must write");
+        fs::write(source.join(".git/x.md"), "hidden").expect("fixture must write");
+        fs::write(source.join(".dotfile.md"), "hidden file").expect("fixture must write");
+
+        let outcome = import_markdown_folder(&source, &library).expect("import must succeed");
+
+        assert_eq!(outcome.manifest.chapters.len(), 1);
+        assert_eq!(outcome.manifest.chapters[0].path, "01.md");
+        // The sanitized shelf dir is visible to the scan and deletable.
+        let shelved = library.join("手动/hidden-book");
+        assert!(shelved.join("manifest.json").exists());
+        let scan = crate::library::scan_library(&library).expect("scan");
+        assert_eq!(scan.books.len(), 1);
+        crate::trash::move_book(&library, &shelved, &outcome.manifest)
+            .expect("imported book must be trashable");
         fs::remove_dir_all(root).expect("temp directory must be removed");
     }
 

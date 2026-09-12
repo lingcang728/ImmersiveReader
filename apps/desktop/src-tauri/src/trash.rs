@@ -10,6 +10,11 @@ pub use commands::{delete_idempotent, restore_idempotent};
 const ENTRY_FILE: &str = "trash-entry.json";
 const JOURNAL_DIR: &str = ".journal";
 
+/// P3-22: bound the `measure` walk the same way the importer bounds its
+/// source walk — a planted junction loop or pathological nesting inside a
+/// trashed tree must not recurse forever.
+const MAX_TRASH_WALK_DEPTH: usize = 64;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrashItem {
@@ -61,19 +66,16 @@ fn validate_id(value: &str) -> Result<(), String> {
 
 /// Strict superset of `contracts::is_safe_relative_path` / TS
 /// `requireRelativePath`: everything those reject (blank, leading `/`, drive
-/// prefix, `\`, NUL, empty/`.`/`..` segments) is rejected here too, and trash
-/// additionally rejects `.`-leading segments so a stored path can never point
-/// back into managed directories (`.trash`, `.journal`, `.incoming`, ...).
+/// prefix, `\`, NUL/`:<>|?*`, empty/`.`/`..` segments, trailing `.`/` `,
+/// reserved device names) is rejected here too, and trash additionally
+/// rejects `.`-leading segments so a stored path can never point back into
+/// managed directories (`.trash`, `.journal`, `.incoming`, ...).
 fn parse_relative(value: &str) -> Result<PathBuf, String> {
     // Segment checks happen on the raw string: `Path::components()` silently
     // normalizes away repeated separators and interior `.` segments, which
     // would let strings the contract rejects slip through.
-    if value.trim().is_empty()
-        || value.contains('\\')
-        || value.contains('\0')
-        || value
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
+    if !crate::contracts::is_safe_relative_path(value)
+        || value.split('/').any(|part| part.starts_with('.'))
     {
         return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
     }
@@ -84,13 +86,8 @@ fn parse_relative(value: &str) -> Result<PathBuf, String> {
     let mut safe = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::Normal(part) if !part.to_string_lossy().starts_with('.') => safe.push(part),
-            Component::Normal(_) | Component::CurDir => {
-                return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string())
-            }
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string())
-            }
+            Component::Normal(part) => safe.push(part),
+            _ => return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string()),
         }
     }
     if safe.as_os_str().is_empty() {
@@ -167,9 +164,24 @@ fn reconcile_journal(root: &Path, trash_root: &Path, journal: &TrashJournal) -> 
         "move" => {
             let original = parse_relative(&journal.item.original_relative_path)?;
             if item_root.is_dir() {
+                // The rename already ran — complete the move by (re)writing
+                // the entry the journal carries.
                 write_entry(&item_root, &journal.item)?;
                 remove_journal(root, &journal.trash_id);
-            } else if root.join(original).exists() {
+            } else if root.join(&original).exists() {
+                // The rename never ran: the book is still on the shelf, but a
+                // crash between the pre-rename entry write and the rename can
+                // leave an inert `trash-entry.json` inside it — drop it before
+                // retiring the journal (P3-15).
+                let _ = fs::remove_file(root.join(&original).join(ENTRY_FILE));
+                remove_journal(root, &journal.trash_id);
+            } else {
+                // Neither shelf copy nor trash copy exists — the book is gone
+                // and the journal can only retry a lost book forever.
+                eprintln!(
+                    "trash reconcile: dropping journal {} — book missing from both shelf and trash",
+                    journal.trash_id
+                );
                 remove_journal(root, &journal.trash_id);
             }
         }
@@ -183,9 +195,33 @@ fn reconcile_journal(root: &Path, trash_root: &Path, journal: &TrashJournal) -> 
                     write_entry(&item_root, &journal.item)?;
                 }
                 remove_journal(root, &journal.trash_id);
+            } else {
+                // Nothing at the destination and nothing in trash — the
+                // content is gone; a stuck journal would retry it forever.
+                eprintln!(
+                    "trash reconcile: dropping journal {} — trashed content is gone",
+                    journal.trash_id
+                );
+                remove_journal(root, &journal.trash_id);
             }
         }
-        "permanent_delete" if !item_root.exists() => {
+        "permanent_delete" => {
+            if item_root.exists() {
+                // P3-15: a crash inside `remove_dir_all` left a half-removed
+                // item that `list` can neither show nor delete. Finish the
+                // delete now; on failure keep the journal for the next pass.
+                let removed = if item_root.is_dir() {
+                    fs::remove_dir_all(&item_root)
+                } else {
+                    fs::remove_file(&item_root)
+                };
+                if let Err(error) = removed {
+                    return Err(format!(
+                        "cannot finish permanent delete of {}: {error}",
+                        journal.trash_id
+                    ));
+                }
+            }
             remove_journal(root, &journal.trash_id);
         }
         _ => {}
@@ -235,6 +271,30 @@ pub fn reconcile(root: &Path) -> Result<(), String> {
             eprintln!(
                 "trash reconcile: skipping journal {}: {error}",
                 entry.path().display()
+            );
+        }
+    }
+    // P3-15: report `.trash/<id>` directories that can never be listed — no
+    // `trash-entry.json` inside and no journal left to rebuild it from.
+    // They are kept (the contents may be the only copy) but logged so the
+    // orphan is diagnosable instead of silently stuck.
+    if let Ok(children) = fs::read_dir(&trash_root) {
+        for child in children.flatten() {
+            let is_dir = child.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            if !is_dir {
+                continue;
+            }
+            let name = child.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if validate_id(name).is_err()
+                || child.path().join(ENTRY_FILE).exists()
+                || journal_root.join(format!("{name}.json")).exists()
+            {
+                continue;
+            }
+            eprintln!(
+                "trash reconcile: {} has no entry and no journal; kept for manual recovery",
+                child.path().display()
             );
         }
     }
@@ -304,6 +364,12 @@ pub fn move_book(root: &Path, book_root: &Path, manifest: &Manifest) -> Result<T
             item: item.clone(),
         },
     )?;
+    // P3-15: write the entry BEFORE the rename so it travels with the
+    // directory — no crash window can produce a `.trash/<id>` without its
+    // `trash-entry.json`. A crash before the rename leaves an inert stray
+    // entry inside the shelf book plus the prepared journal; reconcile
+    // removes both.
+    write_entry(book_root, &item)?;
     fs::rename(book_root, &destination).map_err(|error| error.to_string())?;
     let _ = write_journal(
         root,
@@ -315,7 +381,6 @@ pub fn move_book(root: &Path, book_root: &Path, manifest: &Manifest) -> Result<T
             item: item.clone(),
         },
     );
-    write_entry(&destination, &item)?;
     remove_journal(root, &trash_id);
     Ok(item)
 }
@@ -335,6 +400,15 @@ pub fn list(root: &Path) -> Result<Vec<TrashItem>, String> {
             .map_err(|error| error.to_string())?
             .is_symlink()
         {
+            continue;
+        }
+        // P3-22: junctions/mount points are reparse points that `is_symlink`
+        // misses — never treat one as a trash item.
+        let reparse = entry
+            .metadata()
+            .map(|metadata| crate::atomic_file::is_reparse_point(&metadata))
+            .unwrap_or(true);
+        if reparse {
             continue;
         }
         let trash_id = entry.file_name().to_string_lossy().into_owned();
@@ -404,15 +478,25 @@ pub fn restore(
     })
 }
 
-fn measure(path: &Path) -> Result<(u64, u64), String> {
+fn measure(path: &Path, depth: usize) -> Result<(u64, u64), String> {
+    // P3-22: stop descending past the cap — undercounting a byte total must
+    // not block a delete.
+    if depth > MAX_TRASH_WALK_DEPTH {
+        return Ok((0, 0));
+    }
     let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if metadata.file_type().is_symlink() || metadata.is_file() {
+    // Reparse points (junctions, mount points) count as leaves: `is_symlink`
+    // alone misses them and descending would follow the loop.
+    if metadata.file_type().is_symlink()
+        || metadata.is_file()
+        || crate::atomic_file::is_reparse_point(&metadata)
+    {
         return Ok((1, metadata.len()));
     }
     let mut totals = (1_u64, 0_u64);
     for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
-        let measured = measure(&entry.path())?;
+        let measured = measure(&entry.path(), depth + 1)?;
         totals.0 = totals.0.saturating_add(measured.0);
         totals.1 = totals.1.saturating_add(measured.1);
     }
@@ -439,7 +523,7 @@ pub fn permanently_delete(
             item,
         },
     )?;
-    let (deleted_items, released_bytes) = measure(&source)?;
+    let (deleted_items, released_bytes) = measure(&source, 0)?;
     fs::remove_dir_all(source).map_err(|error| error.to_string())?;
     remove_journal(root, trash_id);
     Ok(TrashDeleteResult {

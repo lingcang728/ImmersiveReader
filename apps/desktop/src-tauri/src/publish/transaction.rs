@@ -80,7 +80,7 @@ pub fn list_transactions(root: &Path) -> Result<Vec<PublishTransaction>, String>
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
-    entries
+    let transactions = entries
         .into_iter()
         .filter(|entry| {
             entry
@@ -88,16 +88,34 @@ pub fn list_transactions(root: &Path) -> Result<Vec<PublishTransaction>, String>
                 .extension()
                 .is_some_and(|value| value == "json")
         })
-        .map(|entry| {
+        // P3-18: per-entry tolerance (same skip-and-log pattern as
+        // `trash::reconcile` / `LibraryIssue`) — one corrupt journal must not
+        // hide every other transaction.
+        .filter_map(|entry| {
             let id = entry
                 .path()
                 .file_stem()
                 .and_then(|value| value.to_str())
-                .ok_or_else(|| "Invalid publish journal file name".to_string())?
-                .to_string();
-            load_transaction(root, &id)
+                .map(str::to_string);
+            match id {
+                Some(id) => match load_transaction(root, &id) {
+                    Ok(transaction) => Some(transaction),
+                    Err(error) => {
+                        eprintln!("list_transactions: skipping unreadable journal {id}: {error}");
+                        None
+                    }
+                },
+                None => {
+                    eprintln!(
+                        "list_transactions: skipping journal with invalid file name {}",
+                        entry.path().display()
+                    );
+                    None
+                }
+            }
         })
-        .collect()
+        .collect();
+    Ok(transactions)
 }
 
 fn ensure_single_book_transaction(

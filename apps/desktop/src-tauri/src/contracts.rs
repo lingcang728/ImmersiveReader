@@ -30,6 +30,11 @@ pub struct Chapter {
     // `voteCount`/`wordCount` are `required` in manifest.schema.json — do not
     // silently default what the other implementations treat as an error.
     pub vote_count: u64,
+    // Canonical counting (P3-29): non-whitespace Unicode scalar values —
+    // `content.chars().filter(|c| !c.is_whitespace()).count()` in importer.rs
+    // and podcast/publish.rs. zhihu-packer historically counted UTF-16 code
+    // units, which differs for non-BMP characters; the Rust scalar count is
+    // the canonical form (note for the contracts/TS side).
     pub word_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_status: Option<String>,
@@ -64,6 +69,14 @@ pub struct ReadingProgress {
 }
 
 impl ReadingProgress {
+    /// In-memory default returned by `load_progress` before validation.
+    /// `updated` is an intentional empty sentinel for "never persisted":
+    /// `scan_library` maps it to `last_read_at: None` and `merge_progress`
+    /// orders it oldest. `validate_reading` (and therefore `save_progress`)
+    /// still requires a real RFC-3339 timestamp — an empty `updated` must
+    /// never reach disk because the schema and TS `parseReadingState` reject
+    /// it (P3-16: this is the "callers skip validation" semantic the rest of
+    /// the codebase already assumes).
     pub fn empty(first_chapter: &str) -> Self {
         Self {
             schema_version: 1,
@@ -93,6 +106,10 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
         return Err("Manifest generatedAt and updatedAt must be RFC-3339 date-times".to_string());
     }
     let mut ids = HashSet::new();
+    // P3-29: NTFS is case-insensitive — `a.md` and `A.MD` address the same
+    // file — so path uniqueness is enforced on the case-folded form, not the
+    // raw string.
+    let mut paths = HashSet::new();
     for chapter in &manifest.chapters {
         if chapter.id.trim().is_empty() || chapter.title.trim().is_empty() {
             return Err("Chapter id and title are required".to_string());
@@ -102,6 +119,9 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
         }
         if !is_safe_relative_path(&chapter.path) {
             return Err(format!("Unsafe chapter path: {}", chapter.path));
+        }
+        if !paths.insert(chapter.path.to_lowercase()) {
+            return Err(format!("Duplicate chapter path: {}", chapter.path));
         }
         if let Some(date) = chapter.date.as_deref() {
             if !is_iso_calendar_date(date) {
@@ -239,21 +259,54 @@ fn is_rfc3339_date_time(value: &str) -> bool {
     )
 }
 
+/// P3-19: Windows reserved device base names — `CON`, `PRN`, `AUX`, `NUL`,
+/// `COM1`..`COM9`, `LPT1`..`LPT9` — matched case-insensitively against the
+/// segment text before the first `.` (`con.md` still resolves to the CON
+/// device, not a file). Keep in lockstep with the identical list in TS
+/// `requireRelativePath` (packages/contracts/src/index.ts).
+pub(crate) fn is_reserved_device_name(segment: &str) -> bool {
+    let base = segment.split('.').next().unwrap_or(segment);
+    let upper = base.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && matches!(upper.as_bytes()[3], b'1'..=b'9'))
+}
+
+/// P3-19: one `/`-separated segment must be a usable Win32 file name —
+/// non-empty, not `.`/`..`, free of `\` NUL `:` `<` `>` `|` `?` `*`, not
+/// ending in `.` or ` ` (Win32 silently strips those, producing a name the
+/// stored relative path no longer matches), and not a reserved device name
+/// (a `canonicalize`/CreateFile on one opens the device node — these are
+/// refused before any path is resolved). Shared by `is_safe_relative_path`
+/// for chapter paths and publish/trash managed paths; identical rules live
+/// in TS `requireRelativePath`.
+fn is_safe_path_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment
+            .bytes()
+            .any(|byte| matches!(byte, b'\\' | 0 | b':' | b'<' | b'>' | b'|' | b'?' | b'*'))
+        && !segment.ends_with('.')
+        && !segment.ends_with(' ')
+        && !is_reserved_device_name(segment)
+}
+
 /// Mirrors `requireRelativePath` in packages/contracts/src/index.ts and the
 /// `path` pattern in manifest.schema.json: forward-slash relative paths only —
-/// non-blank, no leading `/`, no drive prefix, no `\`, no NUL, and no empty /
-/// `.` / `..` segments. Keep all implementations in lockstep.
+/// non-blank (not empty or whitespace-only), no leading `/`, no drive prefix,
+/// and every `/`-separated segment satisfying `is_safe_path_segment` (no
+/// empty / `.` / `..` segments, no `\` NUL `:` `<` `>` `|` `?` `*`, no
+/// trailing `.`/` `, no reserved device names). Keep all implementations in
+/// lockstep.
 pub fn is_safe_relative_path(value: &str) -> bool {
     let bytes = value.as_bytes();
     let drive_prefixed = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     !value.trim().is_empty()
         && !value.starts_with('/')
         && !drive_prefixed
-        && !value.contains('\\')
-        && !value.contains('\0')
-        && value
-            .split('/')
-            .all(|part| !part.is_empty() && part != "." && part != "..")
+        && value.split('/').all(is_safe_path_segment)
 }
 
 #[cfg(test)]
@@ -407,18 +460,70 @@ mod tests {
             "../a.md",
             "a/../b.md",
             "a/",
+            // P3-19 additions: Win32-forbidden characters, segments Win32
+            // would silently rewrite, and reserved device names in both bare
+            // and `name.ext` forms — all rejected before any canonicalize.
+            "a:b.md",
+            "a<b.md",
+            "a>b.md",
+            "a|b.md",
+            "a?b.md",
+            "a*b.md",
+            "a./b.md",
+            "a /b.md",
+            "trail./x.md",
+            "dir /x.md",
+            "con.md",
+            "CON",
+            "nul/sub.md",
+            "aux.txt",
+            "com1",
+            "LpT9/001.md",
         ] {
             assert!(
                 !super::is_safe_relative_path(path),
                 "path must be rejected: {path:?}"
             );
         }
-        for path in ["001.md", "sub/002.md", ".hidden/001.md", "第一篇 .md"] {
+        for path in [
+            "001.md",
+            "sub/002.md",
+            ".hidden/001.md",
+            "第一篇 .md",
+            // P3-19: outside the reserved set — only COM1..COM9/LPT1..LPT9 are
+            // device names, and dots inside a name are legal.
+            "com0.md",
+            "COM10.md",
+            "lpt0.md",
+            "content.md",
+            "a..b.md",
+        ] {
             assert!(
                 super::is_safe_relative_path(path),
                 "path must be accepted: {path:?}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_case_insensitive_duplicate_chapter_paths() {
+        // P3-29: `a.md` and `A.MD` collide on NTFS — the manifest must refuse
+        // both spellings of one file.
+        let mut manifest = fixture_manifest();
+        let mut second = manifest.chapters[0].clone();
+        second.id = "answer:fixture-2".to_string();
+        second.path = manifest.chapters[0].path.to_uppercase();
+        manifest.chapters.push(second);
+        let error = validate_manifest(&manifest).expect_err("duplicate path must fail");
+        assert!(error.contains("Duplicate chapter path"));
+
+        // Distinct names still pass.
+        let mut manifest = fixture_manifest();
+        let mut second = manifest.chapters[0].clone();
+        second.id = "answer:fixture-2".to_string();
+        second.path = "002.md".to_string();
+        manifest.chapters.push(second);
+        assert!(validate_manifest(&manifest).is_ok());
     }
 
     #[test]

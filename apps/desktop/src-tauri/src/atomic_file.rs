@@ -103,6 +103,66 @@ impl AtomicReplacer for PlatformReplacer {
     }
 }
 
+/// P3-22: true when the entry is any kind of reparse point — junction,
+/// mount point, or symlink. `FileType::is_symlink` misses junctions and
+/// mount points on Windows, but they can still form directory loops, so
+/// recursive walks must not descend through them. `metadata` must come from
+/// a non-following lookup (`symlink_metadata` / `DirEntry::metadata`).
+pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+/// P3-21: an orphaned `*.tmp.<uuid>` sibling is left behind whenever the
+/// process dies between temp-file create and the atomic replace. Every write
+/// sweeps its own directory for temp files older than a day — residue is
+/// collected lazily, exactly where it is produced, with one bounded
+/// `read_dir` per write.
+const STALE_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Matches only the temp names `TempFileGuard` produces — the suffix after
+/// `.tmp.` must be a uuid, so a user's real `notes.tmp.backup` is untouched.
+fn is_own_tmp_name(name: &str) -> bool {
+    name.rsplit_once(".tmp.")
+        .is_some_and(|(_, suffix)| uuid::Uuid::parse_str(suffix).is_ok())
+}
+
+fn sweep_tmps_older_than(dir: &Path, min_age: std::time::Duration) {
+    let now = std::time::SystemTime::now();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_own_tmp_name(name) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= min_age);
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn sweep_stale_tmps(dir: &Path) {
+    sweep_tmps_older_than(dir, STALE_TMP_AGE);
+}
+
 struct TempFileGuard {
     path: PathBuf,
     armed: bool,
@@ -145,6 +205,9 @@ fn write_with(path: &Path, data: &[u8], replacer: &impl AtomicReplacer) -> Resul
         .parent()
         .ok_or_else(|| "Atomic write target has no parent directory".to_string())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    // P3-21: collect orphaned temp files left by earlier crashes before
+    // creating this write's own temp sibling (fresh — never swept).
+    sweep_stale_tmps(parent);
     let (mut guard, mut file) = TempFileGuard::create(path).map_err(|error| error.to_string())?;
     file.write_all(data).map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
@@ -215,6 +278,32 @@ mod tests {
 
         assert_eq!(fs::read(&target).expect("target must remain"), b"new");
         fs::remove_file(target).expect("fixture must be removed");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sweep_removes_only_own_stale_tmp_names() {
+        // P3-21: orphaned `<name>.<ext>.tmp.<uuid>` siblings are collected;
+        // same-shaped foreign files (non-uuid suffix) are left alone.
+        let dir =
+            std::env::temp_dir().join(format!("immersive-atomic-sweep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("dir must exist");
+        let orphan = dir.join(format!("old.md.tmp.{}", uuid::Uuid::new_v4()));
+        fs::write(&orphan, b"orphan").expect("orphan must write");
+        let lookalike = dir.join("notes.tmp.backup");
+        fs::write(&lookalike, b"keep").expect("lookalike must write");
+        let plain = dir.join("chapter.md");
+        fs::write(&plain, b"keep").expect("plain must write");
+
+        // Zero min_age = everything matching is "stale" — the 24h threshold is
+        // exercised through the public write() path in production.
+        super::sweep_tmps_older_than(&dir, std::time::Duration::ZERO);
+
+        assert!(!orphan.exists(), "stale own tmp must be swept");
+        assert!(lookalike.exists(), "foreign tmp name must stay");
+        assert!(plain.exists(), "regular file must stay");
+        fs::remove_dir_all(dir).expect("dir must be removed");
     }
 
     #[test]

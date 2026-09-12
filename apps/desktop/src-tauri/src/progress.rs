@@ -15,7 +15,14 @@ fn progress_path(book_root: &Path) -> PathBuf {
 }
 
 fn backup_corrupt(path: &Path) -> Result<(), String> {
-    let backup = path.with_file_name(format!(".reading.{}.corrupt", now_marker()));
+    // P3-16: millisecond timestamps can collide (two corrupt loads inside one
+    // ms would make `fs::rename` fail on the existing name) — a uuid suffix
+    // keeps the backup name unique.
+    let backup = path.with_file_name(format!(
+        ".reading.{}-{}.corrupt",
+        now_marker(),
+        uuid::Uuid::new_v4().simple()
+    ));
     fs::rename(path, backup).map_err(|error| error.to_string())
 }
 

@@ -239,13 +239,18 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
     // the `\\?\` spelling when the library lives near/over MAX_PATH.
     let root = &crate::atomic_file::long_path(root);
     fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    // P3-17: unique probe name — a fixed `.write-test` could clobber a real
+    // user file of the same name, and concurrent scans could race on it.
+    // `create_new` never opens foreign content; the probe is removed after.
+    let probe = root.join(format!(".write-test-{}", uuid::Uuid::new_v4().simple()));
     let writable = fs::OpenOptions::new()
-        .create(true)
+        .create_new(true)
         .write(true)
-        .truncate(true)
-        .open(root.join(".write-test"))
-        .and_then(|_| fs::remove_file(root.join(".write-test")))
+        .open(&probe)
         .is_ok();
+    if writable {
+        let _ = fs::remove_file(&probe);
+    }
     let mut paths = Vec::new();
     let mut issues = Vec::new();
     collect_manifests(root, 0, &mut paths, &mut issues);
@@ -300,6 +305,10 @@ fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingPr
         &mut paths,
         &mut Vec::new(),
     );
+    // P3-17: when two shelf dirs carry the same book_id, resolve
+    // deterministically — the first match in sorted (lexicographic) manifest
+    // path order wins, independent of filesystem enumeration order.
+    paths.sort();
     for path in paths {
         let Ok(manifest) = read_manifest(&path) else {
             continue;
@@ -317,7 +326,18 @@ fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingPr
 
 pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
     let (book_root, manifest, progress) = find_book(root, book_id)?;
-    let provenance = read_provenance(&book_root, &manifest.book_id)?;
+    // P3-17: provenance is advisory metadata — a corrupt or mismatched
+    // provenance.json degrades to `None` instead of killing the open.
+    let provenance = match read_provenance(&book_root, &manifest.book_id) {
+        Ok(provenance) => provenance,
+        Err(error) => {
+            eprintln!(
+                "open_book: ignoring unreadable provenance for {}: {error}",
+                manifest.book_id
+            );
+            None
+        }
+    };
     Ok(BookDetail {
         manifest,
         progress,
@@ -334,6 +354,9 @@ pub fn find_book_by_source_id(root: &Path, source_id: &str) -> Result<Option<Man
         &mut paths,
         &mut Vec::new(),
     );
+    // P3-17: same deterministic ordering as find_book — first match in
+    // sorted manifest path order wins.
+    paths.sort();
     for path in paths {
         let Ok(manifest) = read_manifest(&path) else {
             continue;
@@ -360,6 +383,10 @@ pub fn chapter_path(root: &Path, book_id: &str, chapter_id: &str) -> Result<Path
         .find(|item| item.id == chapter_id)
         .ok_or_else(|| format!("Chapter not found: {chapter_id}"))?;
     let candidate = book_root.join(chapter.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    // P3-19: `chapter.path` was already checked by `validate_manifest`
+    // (`is_safe_relative_path`) inside `read_manifest` — device-name or
+    // normalizable segments are refused before this `canonicalize` can open
+    // them.
     let canonical_root = crate::atomic_file::long_path(&book_root)
         .canonicalize()
         .map_err(|error| error.to_string())?;

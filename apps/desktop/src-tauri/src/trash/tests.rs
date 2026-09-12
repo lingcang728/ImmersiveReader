@@ -179,6 +179,86 @@ fn reconcile_removes_completed_delete_journal() {
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
 
+#[test]
+fn reconcile_finishes_a_half_completed_permanent_delete() {
+    // P3-15: a crash inside `remove_dir_all` leaves `.trash/<id>` partially
+    // deleted — entry gone, content left — plus the delete journal. Reconcile
+    // must finish the delete instead of leaving an unloadable orphan.
+    let (root, book, manifest) = fixture("partial-delete");
+    let moved = move_book(&root, &book, &manifest).expect("book must move to trash");
+    let item_root = root.join(".trash").join(&moved.trash_id);
+    fs::remove_file(item_root.join("trash-entry.json"))
+        .expect("entry must be removed for crash simulation");
+    fs::remove_file(item_root.join("manifest.json")).expect("partial delete simulation");
+    super::write_journal(
+        &root,
+        &super::TrashJournal {
+            schema_version: 1,
+            operation: "permanent_delete".to_string(),
+            trash_id: moved.trash_id.clone(),
+            phase: "prepared".to_string(),
+            item: moved.clone(),
+        },
+    )
+    .expect("journal must write");
+
+    reconcile(&root).expect("reconciliation must finish the delete");
+
+    assert!(!item_root.exists(), "half-deleted item must be removed");
+    assert!(!root
+        .join(".trash")
+        .join(".journal")
+        .join(format!("{}.json", moved.trash_id))
+        .exists());
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn reconcile_cleans_stray_entry_after_pre_rename_move_crash() {
+    // P3-15: the entry is written into the book dir before the rename so it
+    // travels into `.trash`. A crash in that window leaves the book on the
+    // shelf with a stray `trash-entry.json` and the prepared journal —
+    // reconcile must remove both and keep the book listed.
+    let (root, book, manifest) = fixture("pre-rename-crash");
+    let moved = super::TrashItem {
+        schema_version: 1,
+        trash_id: "orphan-move1".to_string(),
+        book_id: manifest.book_id.clone(),
+        title: manifest.title.clone(),
+        original_relative_path: "手动/测试书目".to_string(),
+        trash_relative_path: ".trash/orphan-move1".to_string(),
+        deleted_at: "2026-07-10T00:00:00Z".to_string(),
+        revision: 1,
+    };
+    fs::write(
+        book.join("trash-entry.json"),
+        serde_json::to_vec_pretty(&moved).expect("entry must serialize"),
+    )
+    .expect("stray entry must be written");
+    super::write_journal(
+        &root,
+        &super::TrashJournal {
+            schema_version: 1,
+            operation: "move".to_string(),
+            trash_id: moved.trash_id.clone(),
+            phase: "prepared".to_string(),
+            item: moved,
+        },
+    )
+    .expect("journal must write");
+
+    reconcile(&root).expect("reconciliation must clean the stray entry");
+
+    assert!(!book.join("trash-entry.json").exists());
+    assert!(book.join("manifest.json").exists());
+    assert!(!root
+        .join(".trash")
+        .join(".journal")
+        .join("orphan-move1.json")
+        .exists());
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
 fn write_raw_journal(root: &Path, name: &str, value: serde_json::Value) {
     let journal_dir = root.join(".trash").join(".journal");
     fs::create_dir_all(&journal_dir).expect("journal dir must exist");
