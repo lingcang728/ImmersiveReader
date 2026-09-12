@@ -4,8 +4,8 @@ use crate::tasks::{
 use rusqlite::{params, Connection, Error as SqliteError, ErrorCode, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandRecord {
@@ -47,6 +47,94 @@ fn is_retryable_initialization_lock(error: &SqliteError) -> bool {
     )
 }
 
+/// P1-16: a control.db that SQLite cannot parse at all — NOTADB / CORRUPT
+/// primary codes (extended codes such as SQLITE_CORRUPT_* still map to these
+/// primary codes) or the familiar "file is not a database" / "malformed"
+/// messages — can never be repaired in place, so `open` quarantines it and
+/// rebuilds an empty schema instead of permanently failing every task command.
+/// BUSY/LOCKED stay transient and are never treated as corruption.
+fn is_corrupt_database(error: &SqliteError) -> bool {
+    let SqliteError::SqliteFailure(failure, message) = error else {
+        return false;
+    };
+    if matches!(
+        failure.code,
+        ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+    ) {
+        return false;
+    }
+    if matches!(
+        failure.code,
+        ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt
+    ) {
+        return true;
+    }
+    let message = message.as_deref().unwrap_or_default().to_ascii_lowercase();
+    message.contains("not a database")
+        || message.contains("malformed")
+        || message.contains("corrupt")
+}
+
+fn database_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Rename a damaged control.db — plus its `-wal`/`-shm` sidecars, whose replay
+/// could otherwise re-corrupt the fresh file — to `*.corrupt-<epoch>` so the
+/// next open rebuilds an empty schema. Mirrors `progress.rs` `backup_corrupt`;
+/// a `-N` suffix keeps repeated corruption from deadlocking startup.
+fn quarantine_corrupt_database(path: &Path) -> Result<(), String> {
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    for candidate in [
+        path.to_path_buf(),
+        database_sidecar_path(path, "-wal"),
+        database_sidecar_path(path, "-shm"),
+    ] {
+        if !candidate.exists() {
+            continue;
+        }
+        let file_name = candidate
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "control.db".to_string());
+        let mut renamed = false;
+        for attempt in 0..10_u32 {
+            let suffix = if attempt == 0 {
+                format!("corrupt-{epoch}")
+            } else {
+                format!("corrupt-{epoch}-{attempt}")
+            };
+            let backup = candidate.with_file_name(format!("{file_name}.{suffix}"));
+            match fs::rename(&candidate, &backup) {
+                Ok(()) => {
+                    renamed = true;
+                    break;
+                }
+                // A previous quarantine may already hold the same epoch name.
+                Err(_) if backup.exists() => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "failed to quarantine corrupt database {}: {error}",
+                        candidate.display()
+                    ));
+                }
+            }
+        }
+        if !renamed {
+            return Err(format!(
+                "failed to quarantine corrupt database {}",
+                candidate.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Repair podcast tasks that were interrupted before a task contract existed.
 pub fn repair_orphaned_podcast_tasks() -> Result<u32, String> {
     let locations = crate::storage::StorageLocations::current()?;
@@ -61,11 +149,27 @@ impl ControlDb {
     }
 
     pub fn open(path: &Path) -> Result<Self, String> {
+        Self::open_inner(path, true)
+    }
+
+    /// `quarantine_corrupt` is consumed by the first rebuild so a damaged file
+    /// is moved aside at most once — a rebuild that still fails returns the
+    /// error rather than looping forever over the filesystem.
+    fn open_inner(path: &Path, quarantine_corrupt: bool) -> Result<Self, String> {
         let parent = path
             .parent()
             .ok_or_else(|| "Control database has no parent directory".to_string())?;
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        let connection = Connection::open(path).map_err(|error| error.to_string())?;
+        let connection = match Connection::open(path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                if quarantine_corrupt && is_corrupt_database(&error) {
+                    quarantine_corrupt_database(path)?;
+                    return Self::open_inner(path, false);
+                }
+                return Err(error.to_string());
+            }
+        };
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| error.to_string())?;
@@ -151,7 +255,17 @@ impl ControlDb {
                     last_lock_error = Some(error.to_string());
                     std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
                 }
-                Err(error) => return Err(error.to_string()),
+                Err(error) => {
+                    // P1-16: a damaged file surfaces here ("file is not a
+                    // database" on the journal_mode pragma). Quarantine it and
+                    // rebuild an empty schema instead of permanently failing.
+                    if quarantine_corrupt && is_corrupt_database(&error) {
+                        drop(connection);
+                        quarantine_corrupt_database(path)?;
+                        return Self::open_inner(path, false);
+                    }
+                    return Err(error.to_string());
+                }
             }
         }
         Err(last_lock_error.unwrap_or_else(|| "Control database initialization failed".to_string()))
@@ -340,7 +454,12 @@ impl ControlDb {
             .map_err(|error| error.to_string())
     }
 
-    pub fn persist_task_event(&mut self, event: &TaskEvent) -> Result<(), String> {
+    /// `&self` (not `&mut self`) so recovery paths such as
+    /// `recover_interrupted_tasks` / `reap_stale_workers` can persist events
+    /// while holding an immutable handle. `unchecked_transaction` is the same
+    /// `BEGIN DEFERRED`; exclusivity is already guaranteed because no other
+    /// `&mut` use can coexist while this method runs.
+    pub fn persist_task_event(&self, event: &TaskEvent) -> Result<(), String> {
         if event.schema_version != 1
             || event.task_id != event.snapshot.id
             || event.sequence != event.snapshot.last_sequence
@@ -354,7 +473,7 @@ impl ControlDb {
             i64::try_from(event.revision).map_err(|_| "INVALID_TASK_REVISION".to_string())?;
         let transaction = self
             .connection
-            .transaction()
+            .unchecked_transaction()
             .map_err(|error| error.to_string())?;
         let current = transaction
             .query_row(
@@ -666,6 +785,75 @@ impl ControlDb {
             .collect())
     }
 
+    /// P1-4: expose the persisted lifecycle state (serde `snake_case` names such
+    /// as "running"/"paused") so the worker side can gate suspend/resume
+    /// idempotently. `None` when the task does not exist.
+    pub fn task_lifecycle_state(&self, task_id: &str) -> Result<Option<String>, String> {
+        Ok(self
+            .task_snapshot(task_id)?
+            .map(|snapshot| lifecycle_state_name(&snapshot.lifecycle_state).to_string()))
+    }
+
+    /// P1-1: recover podcast tasks left active by a dead app or worker. Any
+    /// task whose lifecycle is still active (Running/Paused — also
+    /// Starting/Pausing/Stopping, which equally imply a live worker) but has no
+    /// live worker in `active_ids`, or whose heartbeat has expired, is marked
+    /// Interrupted (recoverable, retryable) so the user can resume via the
+    /// worker's chunk checkpoints instead of staring at a forever-Running row.
+    /// Idempotent: already-terminal tasks are skipped, so calling this on every
+    /// startup is a no-op once the queue is clean.
+    pub fn recover_interrupted_tasks(&self, active_ids: &[String]) -> Result<usize, String> {
+        let mut recovered = 0usize;
+        for snapshot in self.task_snapshots(Some(TaskKind::Podcast))? {
+            if !is_active_task(&snapshot.lifecycle_state) {
+                continue;
+            }
+            let has_live_worker = active_ids.iter().any(|id| id == &snapshot.id);
+            if has_live_worker
+                && !snapshot_heartbeat_stale(&snapshot, RECOVERY_STALE_HEARTBEAT)
+            {
+                continue;
+            }
+            self.persist_task_event(&worker_lost_event(snapshot)?)?;
+            recovered = recovered.saturating_add(1);
+        }
+        Ok(recovered)
+    }
+
+    /// P1-15: watchdog for hung/orphaned workers. A podcast task that is still
+    /// Running but whose freshest liveness signal — DB `last_heartbeat_at`, the
+    /// worker's `work/state/<task>.json` heartbeat fields, or that file's
+    /// mtime — is older than `stale_after` has no live worker (a real worker
+    /// heartbeats every few seconds; 3–5 minutes is a safe threshold). Mark it
+    /// Interrupted so chunk checkpoints / recovery.json can resume it on
+    /// retry. Idempotent: Paused (user-suspended) and terminal tasks are
+    /// untouched, and re-runs only see terminal rows.
+    ///
+    /// `work_root` is the per-task cache root holding one directory per task id
+    /// — `locations.cache_root.join("Podcast").join("Tasks")` — so the worker
+    /// state file resolves to `work_root/<task_id>/work/state/<task_id>.json`.
+    pub fn reap_stale_workers(
+        &self,
+        work_root: &Path,
+        stale_after: Duration,
+    ) -> Result<usize, String> {
+        let mut reaped = 0usize;
+        for snapshot in self.task_snapshots(Some(TaskKind::Podcast))? {
+            if snapshot.lifecycle_state != LifecycleState::Running {
+                continue;
+            }
+            let stale = worker_liveness_age(&snapshot, work_root)
+                .map(|age| age > stale_after)
+                .unwrap_or(true);
+            if !stale {
+                continue;
+            }
+            self.persist_task_event(&stale_worker_event(snapshot, stale_after)?)?;
+            reaped = reaped.saturating_add(1);
+        }
+        Ok(reaped)
+    }
+
     pub fn capture_cancel_discard(&self) -> Result<Vec<String>, String> {
         let transaction = self
             .connection
@@ -914,16 +1102,27 @@ impl ControlDb {
             .revision
             .checked_add(1)
             .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
-        snapshot.lifecycle_state = LifecycleState::Running;
+        // P1-4: a buffered worker line must not resurrect a task the user just
+        // paused or is stopping — that made `pause_task` suspend an already
+        // suspended process (suspend count 2 → resume can never thaw it). Such
+        // lines still refresh heartbeat/progress, but lifecycle, stage and the
+        // control flags keep what the pause/stop event set.
+        let hold_lifecycle = matches!(
+            snapshot.lifecycle_state,
+            LifecycleState::Pausing | LifecycleState::Paused | LifecycleState::Stopping
+        );
+        if !hold_lifecycle {
+            snapshot.lifecycle_state = LifecycleState::Running;
+            snapshot.engine_stage = next_stage.clone();
+            snapshot.engine_status = "working".to_string();
+            snapshot.can_pause = true;
+            snapshot.can_cancel = true;
+            snapshot.can_resume = false;
+            // Never surface raw worker log spam as the primary label — UI maps stage to Chinese.
+            snapshot.progress.label = Some(stable_worker_label(&next_stage));
+        }
         snapshot.outcome = TaskOutcome::None;
-        snapshot.engine_stage = next_stage.clone();
-        snapshot.engine_status = "working".to_string();
-        snapshot.can_pause = true;
-        snapshot.can_cancel = true;
-        snapshot.can_resume = false;
         snapshot.last_heartbeat_at = Some(now.clone());
-        // Never surface raw worker log spam as the primary label — UI maps stage to Chinese.
-        snapshot.progress.label = Some(stable_worker_label(&next_stage));
         if stream == "stderr" && is_fatal {
             snapshot.error_message = Some(line.trim().chars().take(500).collect());
         }
@@ -1391,9 +1590,125 @@ fn is_active_task(state: &LifecycleState) -> bool {
     )
 }
 
-fn interrupted_event(
+/// Lifecycle names matching the `snake_case` serde contract, for callers that
+/// need a stable string (`task_lifecycle_state`).
+fn lifecycle_state_name(state: &LifecycleState) -> &'static str {
+    match state {
+        LifecycleState::Queued => "queued",
+        LifecycleState::Starting => "starting",
+        LifecycleState::Running => "running",
+        LifecycleState::Pausing => "pausing",
+        LifecycleState::Paused => "paused",
+        LifecycleState::Stopping => "stopping",
+        LifecycleState::Terminal => "terminal",
+    }
+}
+
+/// A live worker emits a DB-visible heartbeat at least every few seconds; past
+/// five minutes of silence its claim to be alive is not credible.
+const RECOVERY_STALE_HEARTBEAT: Duration = Duration::from_secs(300);
+
+/// Age of the freshest DB-side liveness signal — `last_heartbeat_at`, then
+/// `updated_at` — so a recently-managed task is never mistaken for dead.
+/// `None` when neither timestamp parses.
+fn snapshot_liveness_age(snapshot: &TaskSnapshot) -> Option<Duration> {
+    let mut best: Option<Duration> = None;
+    for stamp in [
+        snapshot.last_heartbeat_at.as_deref(),
+        Some(snapshot.updated_at.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(stamp) {
+            let elapsed = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
+            let age = elapsed.to_std().unwrap_or(Duration::ZERO);
+            best = Some(best.map_or(age, |current| current.min(age)));
+        }
+    }
+    best
+}
+
+fn snapshot_heartbeat_stale(snapshot: &TaskSnapshot, stale_after: Duration) -> bool {
+    snapshot_liveness_age(snapshot)
+        .map(|age| age > stale_after)
+        .unwrap_or(true)
+}
+
+/// Path of the per-task worker state file that `state.py`'s `TaskHeartbeat`
+/// keeps fresh: `<cache>/Podcast/Tasks/<id>/work/state/<id>.json` (the Python
+/// `CACHE_ROOT` is the per-task directory, its `WORK` is `CACHE_ROOT/work`,
+/// `STATE_DIR` is `WORK/state`).
+fn worker_state_path(work_root: &Path, task_id: &str) -> PathBuf {
+    work_root
+        .join(task_id)
+        .join("work")
+        .join("state")
+        .join(format!("{task_id}.json"))
+}
+
+/// Age of a naive local-time ISO timestamp as `state.py` writes it
+/// (`datetime.now().isoformat(timespec="seconds")` — no offset, local clock).
+fn naive_local_age(value: &str) -> Option<Duration> {
+    let trimmed = value.trim();
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(trimmed, format) {
+            let elapsed = chrono::Local::now()
+                .naive_local()
+                .signed_duration_since(parsed);
+            return Some(elapsed.to_std().unwrap_or(Duration::ZERO));
+        }
+    }
+    None
+}
+
+/// Age of the freshest liveness signal carried by the worker state file: its
+/// `last_heartbeat_at`/`last_update_at`/`updated_at` fields, or the file mtime
+/// when the JSON cannot be read (a live worker rewrites it every few seconds).
+fn worker_state_file_age(state_path: &Path) -> Option<Duration> {
+    if !state_path.is_file() {
+        return None;
+    }
+    let mut best: Option<Duration> = None;
+    if let Ok(raw) = fs::read_to_string(state_path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+            for key in ["last_heartbeat_at", "last_update_at", "updated_at"] {
+                if let Some(age) = json
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .and_then(naive_local_age)
+                {
+                    best = Some(best.map_or(age, |current| current.min(age)));
+                }
+            }
+        }
+    }
+    if let Ok(modified) = fs::metadata(state_path).and_then(|meta| meta.modified()) {
+        // A future mtime is clock skew — it still proves the file was touched.
+        let age = modified.elapsed().unwrap_or(Duration::ZERO);
+        best = Some(best.map_or(age, |current| current.min(age)));
+    }
+    best
+}
+
+/// Age of the freshest liveness signal for a podcast task across the DB
+/// snapshot and its worker state file. `None` when nothing is readable.
+fn worker_liveness_age(snapshot: &TaskSnapshot, work_root: &Path) -> Option<Duration> {
+    let mut best = snapshot_liveness_age(snapshot);
+    if let Some(age) = worker_state_file_age(&worker_state_path(work_root, &snapshot.id)) {
+        best = Some(best.map_or(age, |current| current.min(age)));
+    }
+    best
+}
+
+/// Shared builder for "active task whose engine/worker is gone" terminal
+/// events. The row stays resumable (`recoverable` + `can_retry`): the worker's
+/// `work/state` + `recovery.json` + chunk checkpoints survive the interrupt.
+fn interrupted_terminal_event(
     mut snapshot: TaskSnapshot,
-    exit_code: Option<i32>,
+    event_type: &str,
+    engine_stage: &str,
+    message: String,
 ) -> Result<TaskEvent, String> {
     let now = chrono::Utc::now().to_rfc3339();
     snapshot.last_sequence = snapshot
@@ -1407,11 +1722,8 @@ fn interrupted_event(
     snapshot.lifecycle_state = LifecycleState::Terminal;
     snapshot.outcome = TaskOutcome::Interrupted;
     snapshot.error_code = Some(TaskErrorCode::EngineCrashed);
-    snapshot.error_message = Some(match exit_code {
-        Some(code) => format!("受管引擎异常退出（exit code {code}）。"),
-        None => "应用重启后发现受管引擎未正常结束。".to_string(),
-    });
-    snapshot.engine_stage = "crashed".to_string();
+    snapshot.error_message = Some(message);
+    snapshot.engine_stage = engine_stage.to_string();
     snapshot.engine_status = "exited".to_string();
     snapshot.recoverable = true;
     snapshot.can_pause = false;
@@ -1424,10 +1736,51 @@ fn interrupted_event(
         task_id: snapshot.id.clone(),
         sequence: snapshot.last_sequence,
         revision: snapshot.revision,
-        event_type: "engine_crashed".to_string(),
+        event_type: event_type.to_string(),
         snapshot,
         created_at: now,
     })
+}
+
+fn interrupted_event(
+    snapshot: TaskSnapshot,
+    exit_code: Option<i32>,
+) -> Result<TaskEvent, String> {
+    interrupted_terminal_event(
+        snapshot,
+        "engine_crashed",
+        "crashed",
+        match exit_code {
+            Some(code) => format!("受管引擎异常退出（exit code {code}）。"),
+            None => "应用重启后发现受管引擎未正常结束。".to_string(),
+        },
+    )
+}
+
+/// P1-1 event: the DB still shows the task active but no live worker exists.
+fn worker_lost_event(snapshot: TaskSnapshot) -> Result<TaskEvent, String> {
+    interrupted_terminal_event(
+        snapshot,
+        "worker_lost",
+        "interrupted",
+        "未找到该任务的存活工作进程（可能随应用退出被终止），任务已标记为中断；可通过重试续跑。".to_string(),
+    )
+}
+
+/// P1-15 event: every heartbeat source has been silent past the threshold.
+fn stale_worker_event(
+    snapshot: TaskSnapshot,
+    stale_after: Duration,
+) -> Result<TaskEvent, String> {
+    interrupted_terminal_event(
+        snapshot,
+        "worker_heartbeat_stale",
+        "stalled",
+        format!(
+            "工作进程心跳超过 {} 秒未更新（可能已挂起或退出），任务已标记为中断；可通过重试续跑。",
+            stale_after.as_secs()
+        ),
+    )
 }
 
 fn cancelled_event(mut snapshot: TaskSnapshot) -> Result<TaskEvent, String> {

@@ -6,6 +6,7 @@ use crate::tasks::{
 use std::fs;
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::Duration;
 
 #[test]
 fn command_result_is_idempotent_across_database_reopen() {
@@ -273,7 +274,7 @@ fn task_snapshot_and_events_survive_reopen() {
     fs::create_dir_all(&root).expect("test root must exist");
     let path = root.join("control.db");
     {
-        let mut database = ControlDb::open(&path).expect("control database must open");
+        let database = ControlDb::open(&path).expect("control database must open");
         database
             .persist_task_event(&task_event(1, 1))
             .expect("first event must persist");
@@ -326,7 +327,7 @@ fn podcast_and_zhihu_active_snapshots_can_coexist() {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("test root must exist");
     let path = root.join("control.db");
-    let mut database = ControlDb::open(&path).expect("control database must open");
+    let database = ControlDb::open(&path).expect("control database must open");
     database
         .persist_task_event(&task_event_for(
             "podcast-active",
@@ -373,7 +374,7 @@ fn task_event_rejects_sequence_gaps_and_old_revisions() {
     ));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("test root must exist");
-    let mut database =
+    let database =
         ControlDb::open(&root.join("control.db")).expect("control database must open");
     database
         .persist_task_event(&task_event(1, 1))
@@ -455,7 +456,7 @@ fn stale_running_engine_is_recovered_after_reopen() {
     fs::create_dir_all(&root).expect("test root must exist");
     let path = root.join("control.db");
     {
-        let mut database = ControlDb::open(&path).expect("control database must open");
+        let database = ControlDb::open(&path).expect("control database must open");
         database
             .persist_task_event(&task_event(1, 1))
             .expect("running task must persist");
@@ -849,6 +850,422 @@ fn orphaned_podcast_tasks_without_contract_are_marked_input_copy_failed() {
         database
             .repair_orphaned_podcast_tasks_at(&data_root)
             .expect("idempotent"),
+        0
+    );
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+fn stale_stamp() -> String {
+    (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339()
+}
+
+fn fresh_stamp() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// P1-16: a control.db SQLite cannot parse must be quarantined to
+/// `control.db.corrupt-<epoch>` and rebuilt empty instead of permanently
+/// failing every task command.
+#[test]
+fn corrupt_control_database_is_quarantined_and_rebuilt() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-corrupt-db-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    // Well over SQLite's 100-byte header so it is unambiguously "not a database".
+    fs::write(&path, vec![0x5a_u8; 4096]).expect("corrupt fixture must write");
+    fs::write(root.join("control.db-wal"), b"stale wal").expect("wal fixture");
+    fs::write(root.join("control.db-shm"), b"stale shm").expect("shm fixture");
+
+    let database = ControlDb::open(&path).expect("corrupt database must self-heal");
+    let tables = database.table_names().expect("rebuilt schema must load");
+    assert!(tables.contains(&"task_snapshots".to_string()));
+    assert!(matches!(
+        database
+            .claim_command("heal-1", "command", "input")
+            .expect("rebuilt database must accept commands"),
+        CommandClaim::New
+    ));
+    let corrupt_files: Vec<String> = fs::read_dir(&root)
+        .expect("root must list")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".corrupt-"))
+        .collect();
+    assert!(
+        corrupt_files
+            .iter()
+            .any(|name| name.starts_with("control.db.corrupt-")),
+        "damaged database must be quarantined: {corrupt_files:?}"
+    );
+    // A stale WAL sidecar must never survive at its original name where it
+    // could replay into the rebuilt database — quarantine renames it, and
+    // SQLite may also simply remove it when the corrupt handle is dropped.
+    let stale_wal_left = fs::read(root.join("control.db-wal"))
+        .map(|bytes| bytes == b"stale wal")
+        .unwrap_or(false);
+    assert!(!stale_wal_left, "stale WAL sidecar must not survive rebuild");
+    drop(database);
+    // The rebuilt file is a real database: reopen is a plain open and the
+    // idempotency claim persists.
+    let reopened = ControlDb::open(&path).expect("rebuilt database must reopen");
+    assert!(matches!(
+        reopened
+            .claim_command("heal-1", "command", "input")
+            .expect("claim must replay"),
+        CommandClaim::Existing(_)
+    ));
+    drop(reopened);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P1-16: a healthy database must never be quarantined or rebuilt over.
+#[test]
+fn healthy_control_database_is_never_quarantined() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-healthy-db-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    {
+        let database = ControlDb::open(&path).expect("control database must open");
+        database
+            .claim_command("keep-1", "command", "input")
+            .expect("claim must persist");
+        database
+            .complete_command("keep-1", r#"{"ok":true}"#, None, None)
+            .expect("completion must persist");
+    }
+    let reopened = ControlDb::open(&path).expect("healthy database must reopen");
+    match reopened
+        .claim_command("keep-1", "command", "input")
+        .expect("claim must replay")
+    {
+        CommandClaim::Existing(record) => {
+            assert_eq!(record.result_json.as_deref(), Some(r#"{"ok":true}"#))
+        }
+        CommandClaim::New => panic!("healthy database must not have been rebuilt"),
+    }
+    let quarantined = fs::read_dir(&root)
+        .expect("root must list")
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"));
+    assert!(!quarantined, "healthy database must not be quarantined");
+    drop(reopened);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P1-4: worker-side suspend gating reads the persisted lifecycle state.
+#[test]
+fn task_lifecycle_state_reports_serde_names() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-lifecycle-state-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    database
+        .persist_task_event(&task_event(1, 1))
+        .expect("running task must persist");
+    assert_eq!(
+        database
+            .task_lifecycle_state("podcast-1")
+            .expect("lifecycle state must load")
+            .as_deref(),
+        Some("running")
+    );
+    database
+        .control_task("podcast-1", "pause", 1)
+        .expect("pause must persist");
+    assert_eq!(
+        database
+            .task_lifecycle_state("podcast-1")
+            .expect("paused state must load")
+            .as_deref(),
+        Some("paused")
+    );
+    assert!(database
+        .task_lifecycle_state("missing-task")
+        .expect("missing task must load")
+        .is_none());
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P1-4: a worker line buffered before the suspend lands must not flip a
+/// Paused task back to Running — that is what made `pause_task` suspend an
+/// already-suspended process and left resume powerless.
+#[test]
+fn worker_line_does_not_resurrect_paused_task() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-paused-line-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    database
+        .persist_task_event(&task_event(1, 1))
+        .expect("running task must persist");
+    database
+        .control_task("podcast-1", "pause", 1)
+        .expect("pause must persist");
+
+    let event = database
+        .record_worker_line(
+            "podcast-1",
+            "stdout",
+            r#"{"type":"progress","stage":"transcribe","percent":40.0}"#,
+        )
+        .expect("buffered line must persist")
+        .expect("stage change must emit an event");
+    assert_eq!(event.snapshot.lifecycle_state, LifecycleState::Paused);
+    assert_eq!(event.snapshot.engine_stage, "paused");
+    assert!(event.snapshot.can_resume);
+    assert!(!event.snapshot.can_pause);
+    assert_eq!(
+        database
+            .task_lifecycle_state("podcast-1")
+            .expect("state must load")
+            .as_deref(),
+        Some("paused")
+    );
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P1-1: active podcast tasks with no live worker (or an expired heartbeat)
+/// are marked Interrupted so they can be retried instead of staying Running
+/// forever; terminal/queued rows and live workers are untouched.
+#[test]
+fn recover_interrupted_tasks_marks_workerless_active_tasks() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-recover-interrupted-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+
+    // Running task with no live worker — the classic post-quit state.
+    let mut orphaned = task_event(1, 1);
+    orphaned.snapshot.last_heartbeat_at = Some(stale_stamp());
+    orphaned.snapshot.updated_at = stale_stamp();
+    database
+        .persist_task_event(&orphaned)
+        .expect("running task must persist");
+
+    // Paused task whose worker is gone — must also recover.
+    let mut paused = task_event_for("podcast-paused", TaskKind::Podcast, "book-2", 1, 1);
+    paused.snapshot.lifecycle_state = LifecycleState::Paused;
+    paused.snapshot.engine_stage = "paused".to_string();
+    paused.snapshot.engine_status = "paused".to_string();
+    paused.snapshot.last_heartbeat_at = Some(stale_stamp());
+    paused.snapshot.updated_at = stale_stamp();
+    database
+        .persist_task_event(&paused)
+        .expect("paused task must persist");
+
+    // Queued task — never had a worker, must be left alone.
+    let mut queued = task_event_for("podcast-queued", TaskKind::Podcast, "book-3", 1, 1);
+    queued.snapshot.lifecycle_state = LifecycleState::Queued;
+    queued.snapshot.engine_stage = "queued".to_string();
+    queued.snapshot.engine_status = "waiting".to_string();
+    database
+        .persist_task_event(&queued)
+        .expect("queued task must persist");
+
+    // Running task whose worker IS registered and heartbeating — keep it.
+    let mut live = task_event_for("podcast-live", TaskKind::Podcast, "book-4", 1, 1);
+    live.snapshot.last_heartbeat_at = Some(fresh_stamp());
+    live.snapshot.updated_at = fresh_stamp();
+    database
+        .persist_task_event(&live)
+        .expect("live task must persist");
+
+    assert_eq!(
+        database
+            .recover_interrupted_tasks(&["podcast-live".to_string()])
+            .expect("recovery must run"),
+        2
+    );
+    for task_id in ["podcast-1", "podcast-paused"] {
+        let snapshot = database
+            .task_snapshot(task_id)
+            .expect("snapshot must load")
+            .expect("snapshot must exist");
+        assert_eq!(snapshot.lifecycle_state, LifecycleState::Terminal);
+        assert_eq!(snapshot.outcome, TaskOutcome::Interrupted);
+        assert_eq!(snapshot.error_code, Some(TaskErrorCode::EngineCrashed));
+        assert!(snapshot.recoverable);
+        assert!(snapshot.can_retry);
+        assert!(!snapshot.can_pause);
+    }
+    let events = database
+        .task_events("podcast-1", 1, 100)
+        .expect("events must load");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "worker_lost");
+    assert_eq!(
+        database
+            .task_snapshot("podcast-queued")
+            .expect("queued must load")
+            .expect("queued must exist")
+            .lifecycle_state,
+        LifecycleState::Queued
+    );
+    assert_eq!(
+        database
+            .task_snapshot("podcast-live")
+            .expect("live must load")
+            .expect("live must exist")
+            .lifecycle_state,
+        LifecycleState::Running
+    );
+
+    // Idempotent: a second pass finds only terminal/healthy rows.
+    assert_eq!(
+        database
+            .recover_interrupted_tasks(&["podcast-live".to_string()])
+            .expect("second recovery must be a no-op"),
+        0
+    );
+
+    // A registered worker whose heartbeat has expired is dead weight too.
+    let mut hung = task_event_for("podcast-hung", TaskKind::Podcast, "book-5", 1, 1);
+    hung.snapshot.last_heartbeat_at = Some(stale_stamp());
+    hung.snapshot.updated_at = stale_stamp();
+    database
+        .persist_task_event(&hung)
+        .expect("hung task must persist");
+    assert_eq!(
+        database
+            .recover_interrupted_tasks(&["podcast-live".to_string(), "podcast-hung".to_string()])
+            .expect("stale heartbeat must recover"),
+        1
+    );
+    assert_eq!(
+        database
+            .task_snapshot("podcast-hung")
+            .expect("hung must load")
+            .expect("hung must exist")
+            .outcome,
+        TaskOutcome::Interrupted
+    );
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P1-15: a Running task whose DB heartbeat and `work/state/<task>.json` are
+/// both stale past `stale_after` is reaped as Interrupted; live workers, Paused
+/// tasks and terminal rows are never reaped.
+#[test]
+fn reap_stale_workers_marks_silent_running_tasks() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-reap-stale-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let work_root = root.join("Tasks");
+    fs::create_dir_all(&work_root).expect("work root must exist");
+    let database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let stale_after = Duration::from_secs(300);
+
+    // Dead worker: stale DB heartbeat, no state file.
+    let mut dead = task_event(1, 1);
+    dead.snapshot.last_heartbeat_at = Some(stale_stamp());
+    dead.snapshot.updated_at = stale_stamp();
+    database
+        .persist_task_event(&dead)
+        .expect("dead-worker task must persist");
+
+    // Alive but silent on stdout: DB heartbeat stale, yet the Python
+    // TaskHeartbeat still touches work/state/<task>.json — must NOT be reaped.
+    let mut silent = task_event_for("podcast-silent", TaskKind::Podcast, "book-6", 1, 1);
+    silent.snapshot.last_heartbeat_at = Some(stale_stamp());
+    silent.snapshot.updated_at = stale_stamp();
+    database
+        .persist_task_event(&silent)
+        .expect("silent task must persist");
+    let state_dir = work_root
+        .join("podcast-silent")
+        .join("work")
+        .join("state");
+    fs::create_dir_all(&state_dir).expect("state dir must exist");
+    let heartbeat = chrono::Local::now()
+        .naive_local()
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    fs::write(
+        state_dir.join("podcast-silent.json"),
+        format!(
+            r#"{{"task_id":"podcast-silent","status":"transcribing","last_heartbeat_at":"{heartbeat}","updated_at":"{heartbeat}","last_update_at":"{heartbeat}"}}"#
+        ),
+    )
+    .expect("state file must write");
+
+    // User-paused tasks suspend their worker on purpose — never reap.
+    let mut paused = task_event_for("podcast-paused", TaskKind::Podcast, "book-7", 1, 1);
+    paused.snapshot.lifecycle_state = LifecycleState::Paused;
+    paused.snapshot.last_heartbeat_at = Some(stale_stamp());
+    paused.snapshot.updated_at = stale_stamp();
+    database
+        .persist_task_event(&paused)
+        .expect("paused task must persist");
+
+    assert_eq!(
+        database
+            .reap_stale_workers(&work_root, stale_after)
+            .expect("reaper must run"),
+        1
+    );
+    let reaped = database
+        .task_snapshot("podcast-1")
+        .expect("reaped snapshot must load")
+        .expect("reaped snapshot must exist");
+    assert_eq!(reaped.lifecycle_state, LifecycleState::Terminal);
+    assert_eq!(reaped.outcome, TaskOutcome::Interrupted);
+    assert_eq!(reaped.engine_stage, "stalled");
+    assert!(reaped.recoverable);
+    assert!(reaped.can_retry);
+    let events = database
+        .task_events("podcast-1", 1, 100)
+        .expect("reaped events must load");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "worker_heartbeat_stale");
+    for task_id in ["podcast-silent", "podcast-paused"] {
+        assert_eq!(
+            database
+                .task_snapshot(task_id)
+                .expect("snapshot must load")
+                .expect("snapshot must exist")
+                .lifecycle_state,
+            if task_id == "podcast-paused" {
+                LifecycleState::Paused
+            } else {
+                LifecycleState::Running
+            },
+            "{task_id} must not be reaped"
+        );
+    }
+
+    // Idempotent: everything is either fresh or already terminal now.
+    assert_eq!(
+        database
+            .reap_stale_workers(&work_root, stale_after)
+            .expect("second reap must be a no-op"),
         0
     );
     drop(database);
