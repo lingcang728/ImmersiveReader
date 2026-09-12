@@ -119,7 +119,9 @@
         "output": 0.28
       }
     },
-    "fail_on_quality_errors": true
+    "fail_on_quality_errors": true,
+    "missing_translation_max_count": 4,
+    "missing_translation_max_ratio": 0.05
   },
   "skip_processed_files": true,
   "always_reprocess_inputs": false,

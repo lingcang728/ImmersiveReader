@@ -231,3 +231,46 @@ def test_main_emits_completed_without_fatal_on_success(tmp_path: Path, monkeypat
     last = json.loads(stdout_lines[-1])
     assert last["type"] == "completed"
     assert not any('"type": "fatal"' in line or '"type":"fatal"' in line for line in captured.err.splitlines())
+
+
+def test_main_fatal_keeps_budget_code_and_required_action(tmp_path: Path, monkeypatch, capsys) -> None:
+    """P2-28: a mid-run budget stop must surface BUDGET_CONFIRMATION_REQUIRED +
+    requiredAction=approve_budget on the fatal line — never UNKNOWN."""
+    path, environment = fixture(tmp_path)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, "argv", ["transcribe_task.py", "--task-spec", str(path)])
+
+    fake_worker = types.ModuleType("transcribe_podcasts")
+
+    class _BudgetExceeded(Exception):
+        code = "BUDGET_CONFIRMATION_REQUIRED"
+        required_action = "approve_budget"
+        retry_after_seconds = None
+
+    def _boom() -> int:
+        raise _BudgetExceeded("Estimated Podcast API budget exceeds approval")
+
+    fake_worker.main = _boom
+    fake_worker.LAST_RUN_SUMMARY = None
+
+    fake_pricing = types.ModuleType("deepseek_pricing")
+    fake_pricing.PodcastBudgetExceededError = _BudgetExceeded
+    fake_pricing.PodcastUpstreamError = type("_Upstream", (Exception,), {})
+    fake_pricing.classify_upstream_error = lambda error: None
+
+    fake_pim = types.ModuleType("polish_interview_markdown")
+    monkeypatch.setitem(sys.modules, "transcribe_podcasts", fake_worker)
+    monkeypatch.setitem(sys.modules, "deepseek_pricing", fake_pricing)
+    monkeypatch.setitem(sys.modules, "polish_interview_markdown", fake_pim)
+
+    from transcribe_task import main
+
+    assert main() == 1
+    captured = capsys.readouterr()
+    stderr_lines = [line for line in captured.err.splitlines() if line.strip()]
+    fatal = json.loads(stderr_lines[-1])
+    assert fatal["type"] == "fatal"
+    assert fatal["errorCode"] == "BUDGET_CONFIRMATION_REQUIRED"
+    assert fatal["requiredAction"] == "approve_budget"
+    assert "budget" in fatal["message"].lower()

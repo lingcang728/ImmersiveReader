@@ -34,15 +34,28 @@ COMPATIBILITY_FIELDS = (
 
 
 class TaskSpecError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, required_action: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.required_action = required_action
 
 
-# transcribe_podcasts.main() exit codes → structured fatal errorCode (P1-28).
-# The desktop host treats the last stderr line as the task's last_error and
-# maps a JSON {"errorCode": ...} onto TaskErrorCode, so every non-zero exit
-# must leave a fatal NDJSON line as the final stderr output.
+# ---- Fatal NDJSON contract (P1-28 / P2-28) ---------------------------------
+# The desktop host treats the LAST stderr line as the task's last_error and
+# parses a JSON object on it:
+#   {"type": "fatal", "errorCode": "...", "message": "...",
+#    "retryAfterSeconds"?: int, "requiredAction"?: "approve_budget"}
+# - type/errorCode/message are mandatory and stable; message is the human-
+#   readable text the UI displays (never raw JSON).
+# - errorCode maps onto TaskErrorCode (e.g. BUDGET_CONFIRMATION_REQUIRED →
+#   RequiredAction::ApproveBudget); unmapped codes degrade to Unknown while
+#   the message is still shown.
+# - retryAfterSeconds / requiredAction are optional extras the host reads when
+#   present.
+# Every non-zero exit must leave exactly one such line as the final stderr
+# output, printed AFTER the pipeline has gone quiet. Both stdio streams are
+# UTF-8-reconfigured at module top (P0-2), so ensure_ascii=False output cannot
+# emit cp936 bytes and kill the host's pipe reader.
 _EXIT_FATAL = {
     1: ("TRANSCRIPTION_FAILED", "转写流水线存在失败项"),
     2: ("ENGINE_UNAVAILABLE", "未找到 ffmpeg，转写引擎不可用"),
@@ -169,7 +182,11 @@ def load_task_spec(path: Path, environment: dict[str, str] | None = None) -> dic
         if not math.isfinite(budget_limit_value) or budget_limit_value < 0:
             raise TaskSpecError("INVALID_TASK_SPEC", "Budget limit must be non-negative")
         if not math.isfinite(estimated_budget) or estimated_budget < 0 or budget_limit_value + 1e-9 < estimated_budget:
-            raise TaskSpecError("BUDGET_CONFIRMATION_REQUIRED", "Budget limit is below the verified estimate")
+            raise TaskSpecError(
+                "BUDGET_CONFIRMATION_REQUIRED",
+                "Budget limit is below the verified estimate",
+                required_action="approve_budget",
+            )
     _verify_recovery(resolved_spec.parent, compatibility, input_sha256)
     spec["resolvedInputPath"] = str(input_path)
     return spec
@@ -183,7 +200,11 @@ def main() -> int:
         spec = load_task_spec(args.task_spec)
     except (OSError, ValueError, json.JSONDecodeError, TaskSpecError) as error:
         code = error.code if isinstance(error, TaskSpecError) else "INVALID_TASK_SPEC"
-        print(json.dumps({"type": "fatal", "errorCode": code, "message": str(error)}), file=sys.stderr)
+        payload: dict[str, Any] = {"type": "fatal", "errorCode": code, "message": str(error)}
+        required_action = getattr(error, "required_action", None)
+        if required_action:
+            payload["requiredAction"] = required_action
+        print(json.dumps(payload), file=sys.stderr, flush=True)
         return 2
     os.environ["PODCAST_TRANSCRIBER_RUN_ID"] = spec["taskId"]
     import transcribe_podcasts
@@ -230,6 +251,7 @@ def main() -> int:
                 "message",
                 "errorCode",
                 "retryAfterSeconds",
+                "requiredAction",
             }
         }
         print(json.dumps(safe, ensure_ascii=False), flush=True)
@@ -305,7 +327,12 @@ def main() -> int:
             )
         return code
     except Exception as error:
+        # Classified errors (upstream/local/budget) keep their stable errorCode
+        # and any requiredAction for the host UI; anything else carrying a
+        # ``code`` attribute (e.g. PromptBudgetError) also passes through.
         classified = error if isinstance(error, (PodcastBudgetExceededError, PodcastUpstreamError)) else classify_upstream_error(error)
+        if classified is None and getattr(error, "code", None):
+            classified = error
         if classified is not None:
             payload = {
                 "type": "fatal",
@@ -315,9 +342,12 @@ def main() -> int:
             retry_after = getattr(classified, "retry_after_seconds", None)
             if retry_after is not None:
                 payload["retryAfterSeconds"] = retry_after
+            required_action = getattr(classified, "required_action", None)
+            if required_action:
+                payload["requiredAction"] = required_action
         else:
             payload = {"type": "fatal", "errorCode": "UNKNOWN", "message": str(error)}
-        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
         return 1
 
 

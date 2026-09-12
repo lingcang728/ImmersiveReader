@@ -36,7 +36,8 @@ del _stream
 
 from deepseek_pricing import (  # noqa: E402
     DEEPSEEK_DEFAULT_MODEL,
-    PodcastUpstreamError,
+    PROPAGATE_FATAL_ERRORS,
+    PodcastUpstreamError,  # noqa: F401 — re-exported for tp.* compatibility
     PromptBudgetError,
     classify_upstream_error,
 )
@@ -1134,7 +1135,7 @@ def translate_segments_with_llm(
                 raise
             except DeepSeekLengthTruncatedError:
                 raise
-            except PodcastUpstreamError:
+            except PROPAGATE_FATAL_ERRORS:
                 raise
             except Exception as exc:
                 last_exc = exc
@@ -1213,14 +1214,14 @@ def translate_segments_with_llm(
                                 apply_translation_results(single_partial.partial_results)
                             else:
                                 mark_translation_failure(segment, single_partial)
-                        except PodcastUpstreamError:
+                        except PROPAGATE_FATAL_ERRORS:
                             raise
                         except Exception as single_exc:
                             logger.warning("Single-segment translation failed; marking missing: %s", single_exc)
                             mark_translation_failure(segment, single_exc)
                     continue
                 except Exception as exc:
-                    if isinstance(exc, PodcastUpstreamError):
+                    if isinstance(exc, PROPAGATE_FATAL_ERRORS):
                         raise
                     if len(current_batch) > 1:
                         midpoint = len(current_batch) // 2
@@ -1232,7 +1233,7 @@ def translate_segments_with_llm(
                     try:
                         results = request_with_retries([segment], max_single_retries)
                         apply_translation_results(results)
-                    except PodcastUpstreamError:
+                    except PROPAGATE_FATAL_ERRORS:
                         raise
                     except Exception as single_exc:
                         logger.warning("Single-segment translation failed; marking missing: %s", single_exc)
@@ -1270,7 +1271,7 @@ def translate_segments_with_llm(
         for future in as_completed(futures):
             try:
                 future.result()
-            except PodcastUpstreamError:
+            except PROPAGATE_FATAL_ERRORS:
                 raise
             except Exception as exc:
                 logger.error("Batch translation worker encountered an unhandled error: %s", exc)
@@ -2306,6 +2307,10 @@ def write_final_markdown_from_json(json_path: str, logger: logging.Logger, confi
             except Exception:
                 pass
         return str(out_path)
+    except PROPAGATE_FATAL_ERRORS:
+        # Budget/upstream errors carry a stable errorCode the host needs —
+        # never wrap them into a generic RuntimeError.
+        raise
     except Exception as exc:
         message = f"Final Markdown generation failed for {json_path}: {exc}"
         logger.exception(message)
@@ -2913,7 +2918,8 @@ def process_postprocess_stage(
                                      all_segments, runtime, duration, started_at,
                                      detected_language, needs_translation, config, logger, run_logger,
                                      _job_id)
-    except PodcastUpstreamError:
+    except PROPAGATE_FATAL_ERRORS:
+        # Budget/upstream errors keep their errorCode for the host fatal line.
         raise
     except Exception as exc:
         logger.exception("Unexpected postprocess failure for %s", source.name)
@@ -2960,7 +2966,9 @@ def _run_postprocess_body(
                 all_segments = translate_segments_with_llm(all_segments, config, state, state_path, logger, _job_id=_job_id)
             runtime["translation_model"] = model_label(translation_config)
             translation_status = "partial_success" if int(state.get("translation_failed") or 0) else "success"
-        except PodcastUpstreamError:
+        except PROPAGATE_FATAL_ERRORS:
+            # e.g. BUDGET_CONFIRMATION_REQUIRED must reach the host fatal line
+            # so the UI can offer the approve-budget action.
             raise
         except Exception as exc:
             logger.error("Translation failed: %s", exc)
@@ -3048,7 +3056,14 @@ def _run_postprocess_body(
     }
     update_manifest_processed(task_id, manifest_entry)
     logger.info("Completed: %s (status=%s, translation=%s)", source.name, overall_status, translation_status)
-    return {"file": source.name, "status": overall_status, "task_id": task_id, "outputs": outputs, "translation_status": translation_status}, []
+    return {
+        "file": source.name,
+        "status": overall_status,
+        "task_id": task_id,
+        "outputs": outputs,
+        "translation_status": translation_status,
+        "missing_translations": int(state.get("translation_failed") or 0),
+    }, []
 
 
 def translate_existing_outputs(config: dict[str, Any], force: bool = False, no_open_output: bool = False) -> int:
@@ -3124,6 +3139,8 @@ def translate_existing_outputs(config: dict[str, Any], force: bool = False, no_o
                 "translation_status": translation_status,
             })
             results.append({"file": source_file, "status": overall_status, "task_id": task_id, "outputs": outputs, "translation_status": translation_status})
+        except PROPAGATE_FATAL_ERRORS:
+            raise
         except Exception as exc:
             logger.exception("Translation failed for %s", source_file)
             failure_status = "failed" if "Final Markdown was not generated" in str(exc) else "partial_success"
@@ -3157,6 +3174,7 @@ def write_run_summary(results: list[dict[str, Any]], runtime: dict[str, str] | N
                 "file": item.get("file"),
                 "status": item.get("status"),
                 "error": item.get("error"),
+                "missing_translations": int(item.get("missing_translations") or 0),
             }
             for item in results
         ],
@@ -3169,6 +3187,7 @@ def write_run_summary(results: list[dict[str, Any]], runtime: dict[str, str] | N
     trans_success = sum(1 for item in results if item.get("translation_status") == "success")
     trans_partial = sum(1 for item in results if item.get("translation_status") == "partial_success")
     trans_failed = sum(1 for item in results if item.get("translation_status") == "failed")
+    missing_segments = sum(int(item.get("missing_translations") or 0) for item in results)
     path = OUT_REPORTS / "run_summary.md"
     lines = [
         "# 本轮转写摘要",
@@ -3180,6 +3199,10 @@ def write_run_summary(results: list[dict[str, Any]], runtime: dict[str, str] | N
         f"- 转写成功但翻译失败：{trans_failed}",
         f"- 跳过：{skipped}",
         f"- 失败：{failed}",
+    ]
+    if missing_segments:
+        lines.append(f"- 缺失译文段数：{missing_segments}")
+    lines += [
         "",
         "## 各阶段状态",
         "",
@@ -3188,7 +3211,9 @@ def write_run_summary(results: list[dict[str, Any]], runtime: dict[str, str] | N
         t_status = item.get("translation_status", "skipped")
         # Categorize status label for clarity
         if item["status"] == "partial_success":
-            status_label = "转录成功，部分翻译缺失" if t_status == "partial_success" else "转录成功，翻译失败"
+            missing_count = int(item.get("missing_translations") or 0)
+            partial_label = f"转录成功，部分翻译缺失（{missing_count} 段）" if missing_count else "转录成功，部分翻译缺失"
+            status_label = partial_label if t_status == "partial_success" else "转录成功，翻译失败"
         elif t_status == "success" and item["status"] == "success":
             status_label = "转录+翻译均成功"
         elif item["status"] == "success":
@@ -3344,6 +3369,8 @@ def process_source_with_fallback(
             _return_context=_audio_only,
             _job_id=_job_id,
         )
+    except PROPAGATE_FATAL_ERRORS:
+        raise
     except Exception as exc:
         logger.exception("Failed to process %s", source.name)
         fallback_logger = run_logger or logger
@@ -3384,6 +3411,8 @@ def process_source_with_fallback(
                     pp_result["fallback_from"] = "cuda"
                     return pp_result, local_failures
                 return result, local_failures
+            except PROPAGATE_FATAL_ERRORS:
+                raise
             except Exception as cpu_exc:
                 logger.exception("CPU fallback also failed for %s", source.name)
                 local_failures.append(f"CPU fallback failed: {cpu_exc}")
@@ -3538,6 +3567,8 @@ def main() -> int:
                 else:
                     results.append(result)
                     run_logger.info("Finished %s: %s", source.name, result.get("status", "unknown") if isinstance(result, dict) else "unknown")
+            except PROPAGATE_FATAL_ERRORS:
+                raise
             except Exception as exc:
                 run_logger.exception("Failed to process %s", source.name)
                 results.append({"file": source.name, "status": "failed", "error": str(exc)})
@@ -3549,7 +3580,10 @@ def main() -> int:
             failures.extend(pp_failures)
             results.append(pp_result)
             run_logger.info("Postprocess finished %s: %s", name, pp_result.get("status", "unknown") if isinstance(pp_result, dict) else "unknown")
-        except PodcastUpstreamError:
+        except PROPAGATE_FATAL_ERRORS:
+            # Cancel queued postprocess work; the errorCode (e.g.
+            # BUDGET_CONFIRMATION_REQUIRED) must reach the host fatal line.
+            pp_executor.shutdown(wait=False, cancel_futures=True)
             raise
         except Exception as exc:
             run_logger.exception("Postprocess failed for %s", name)

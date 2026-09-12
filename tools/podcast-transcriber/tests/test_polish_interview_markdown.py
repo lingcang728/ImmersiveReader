@@ -277,6 +277,77 @@ def test_speaker_labels_disabled_skips_speaker_role_quality_gate() -> None:
     assert "speaker inference produced fewer than two speaker roles" not in errors
 
 
+def _en_turns(count: int, missing: set[int] | None = None) -> list[dict]:
+    missing = missing or set()
+    return [
+        {
+            "speaker": "主持人",
+            "start": float(i * 10),
+            "end": float(i * 10) + 5,
+            "original": f"Original sentence number {i} for the test.",
+            "translation": "" if i in missing else f"第 {i} 段中文译文。",
+            "is_sponsor": False,
+            "needs_polish": False,
+            "languageClass": "en",
+        }
+        for i in range(count)
+    ]
+
+
+def test_final_quality_tolerates_few_missing_translations() -> None:
+    """P2-28: a few missing translations degrade to warning, not fatal."""
+    turns = _en_turns(20, missing={3})
+    markdown = pim.render_final_markdown(
+        {"source_file": "mostly-ok.wav", "detected_language": "en"},
+        turns,
+        {"markdown": {"llm_polish": {"enabled": False}, "fail_on_quality_errors": True}},
+    )
+    assert "Original sentence number 3" in markdown
+    assert pim.LAST_POLISH_SUMMARY["missing_translations"] == 1
+    assert pim.LAST_POLISH_SUMMARY["translatable_turns"] == 20
+
+
+def test_final_quality_tolerates_missing_marker_text() -> None:
+    """[翻译缺失：…] marker text counts against tolerance, not a hard error."""
+    turns = _en_turns(20)
+    turns[5]["translation"] = "[翻译缺失：translation failed]"
+    markdown = pim.render_final_markdown(
+        {"source_file": "marker.wav", "detected_language": "en"},
+        turns,
+        {"markdown": {"llm_polish": {"enabled": False}, "fail_on_quality_errors": True}},
+    )
+    assert "[翻译缺失：" in markdown
+    assert pim.LAST_POLISH_SUMMARY["missing_translations"] == 1
+
+
+def test_final_quality_fails_when_all_translations_missing() -> None:
+    turns = _en_turns(3, missing={0, 1, 2})
+    try:
+        pim.render_final_markdown(
+            {"source_file": "all-missing.wav", "detected_language": "en"},
+            turns,
+            {"markdown": {"llm_polish": {"enabled": False}, "fail_on_quality_errors": True}},
+        )
+    except RuntimeError as error:
+        assert "missing translation" in str(error)
+    else:
+        raise AssertionError("all-missing translation must still fail QA")
+
+
+def test_final_quality_fails_when_missing_exceeds_tolerance() -> None:
+    turns = _en_turns(20, missing={1, 3, 5, 7, 9, 11})
+    try:
+        pim.render_final_markdown(
+            {"source_file": "too-many-missing.wav", "detected_language": "en"},
+            turns,
+            {"markdown": {"llm_polish": {"enabled": False}, "fail_on_quality_errors": True}},
+        )
+    except RuntimeError as error:
+        assert "missing translation" in str(error)
+    else:
+        raise AssertionError("missing count above tolerance must fail QA")
+
+
 def test_write_final_markdown_from_json_injects_configured_semaphore(tmp_path, monkeypatch) -> None:
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
