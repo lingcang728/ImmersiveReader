@@ -305,6 +305,8 @@
 	let trashLoading = false;
 	let libraryWritable = true;
 	let libraryLoading = true;
+	let importFolderBusy = false;
+	let flowReaderStarting = false;
 	let appSettings: AppSettings | null = null;
 	let podcastWorkflowOpen = false;
 	let zhihuWorkflowOpen = false;
@@ -702,6 +704,7 @@
 	// Unified immersion chrome: window bar + context toolbar share chromeVisible.
 	let chromeState: ChromeState = createChromeState("library");
 	let chromeHideTimer: ReturnType<typeof setTimeout> | null = null;
+	let chromeStackEl: HTMLElement | null = null;
 	let chromeTitle = "沉浸阅读";
 	let flowIframeEl: HTMLIFrameElement | null = null;
 	let readingCursorState: ReadingCursorState = createReadingCursorState();
@@ -746,8 +749,36 @@
 		}
 	}
 
+	// Wheel/scroll bursts would dispatch one chrome event per input event.
+	// The reducer already early-returns when nothing changes, but gating the
+	// notification itself to one dispatch per frame avoids the call entirely.
+	let readingActivityFrame: number | null = null;
+	function scheduleReadingActivity() {
+		if (readingActivityFrame !== null) return;
+		readingActivityFrame = requestAnimationFrame(() => {
+			readingActivityFrame = null;
+			noteReadingActivity();
+		});
+	}
+
 	function revealChromeFromTopEdge() {
 		dispatchChrome({ type: "top-edge-enter" });
+	}
+
+	// Keyboard path to the immersive chrome — the pointer gets the top-edge
+	// hotzone; without this a keyboard user had no way to reach the toolbar or
+	// window controls once chrome auto-hid (and the inert stack trapped them).
+	async function revealChromeForKeyboard() {
+		if (isImmersiveSurface(chromeState.surface)) {
+			dispatchChrome({ type: "top-edge-enter" });
+		}
+		await tick();
+		const target =
+			chromeStackEl?.querySelector<HTMLElement>(".context-bar button") ??
+			chromeStackEl?.querySelector<HTMLElement>(
+				"button, [href], input, [tabindex]:not([tabindex='-1'])"
+			);
+		target?.focus();
 	}
 
 	function onChromeMouseEnter() {
@@ -807,6 +838,20 @@
 	$: showFlowContext = !!flowReaderSession;
 	$: showTopEdgeHotzone = isImmersiveSurface(chromeState.surface);
 	$: {
+		// Modal layers (nav guard / workflows / book detail / trash) must own
+		// the topmost surface — the Ctrl+F overlay sits at z-1000 and would
+		// otherwise cover the non-top-layer dialogs, so yield it on open.
+		if (
+			navigationGuardOpen ||
+			podcastWorkflowOpen ||
+			zhihuWorkflowOpen ||
+			selectedBookDetail !== null ||
+			trashOpen
+		) {
+			closeSearchOverlay();
+		}
+	}
+	$: {
 		// Keep surface in sync with mode flags without fighting explicit dispatches mid-transition.
 		void flowReaderSession;
 		void $focusMode;
@@ -832,6 +877,11 @@
 	let focusEdgeSpace = 0;
 	let focusWheelDelta = 0;
 	let focusWheelResetTimer: ReturnType<typeof setTimeout> | null = null;
+	// Wheel ticks can cross the FOCUS_WHEEL_STEP threshold several times per
+	// frame; the accumulated steps are applied once per frame so each move's
+	// style/scroll writes batch into one layout pass instead of thrashing.
+	let pendingFocusWheelSteps = 0;
+	let focusWheelMoveFrame: number | null = null;
 	let lastFocusedIdx = -1;
 
 	function isTextInputTarget(target: EventTarget | null) {
@@ -1126,6 +1176,41 @@
 		}, 5000);
 	}
 
+	// Close the Ctrl+F overlay so it can never sit above a modal layer.
+	function closeSearchOverlay() {
+		if (!$searchOpen) return;
+		$searchOpen = false;
+		$searchQuery = "";
+		clearSearchHighlights();
+	}
+
+	// Derive a request id from the operation inputs instead of minting a fresh
+	// UUID per click: retrying the same action reproduces the same id, so the
+	// backend's idempotent command claim dedupes retries rather than spawning
+	// duplicate tasks. SHA-256 of the parts, folded into UUID layout.
+	async function stableRequestId(
+		...parts: readonly (string | number | null | undefined)[]
+	): Promise<string> {
+		const input = parts.map((part) => String(part ?? "")).join("\n");
+		try {
+			const digest = await crypto.subtle.digest(
+				"SHA-256",
+				new TextEncoder().encode(input)
+			);
+			const bytes = new Uint8Array(digest);
+			bytes[6] = (bytes[6] & 0x0f) | 0x40; // UUID version 4 layout
+			bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant bits
+			const hex = Array.from(bytes.subarray(0, 16), (b) =>
+				b.toString(16).padStart(2, "0")
+			).join("");
+			return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+		} catch {
+			// No crypto.subtle (non-secure context): still a valid request id,
+			// just not retry-stable.
+			return crypto.randomUUID();
+		}
+	}
+
 	async function refreshLibrary() {
 		libraryLoading = true;
 		try {
@@ -1154,14 +1239,19 @@
 	}
 
 	async function importFolderToLibrary() {
+		if (importFolderBusy) return;
 		const selected = await open({ directory: true, multiple: false, title: "选择 Markdown 文件夹" });
 		if (!selected || Array.isArray(selected)) return;
+		importFolderBusy = true;
+		showAppNotice("正在导入文件夹…");
 		try {
 			const manifest = await invoke<{ bookId: string }>("import_markdown_folder", { path: selected });
 			await refreshLibrary();
 			await openLibraryBook(manifest.bookId);
 		} catch (error) {
 			showAppNotice(`导入失败：${String(error)}`);
+		} finally {
+			importFolderBusy = false;
 		}
 	}
 
@@ -1219,8 +1309,11 @@
 	}
 
 	async function openBrowserReader(bookId: string) {
+		if (flowReaderStarting) return;
 		try {
 			if ((await requestNavigationGuard("进入连读")) === "cancel") return;
+			flowReaderStarting = true;
+			showAppNotice("正在启动连读…");
 			await flushSaveState();
 			if (flowReaderSession) {
 				await invoke("close_reader_session", { sessionId: flowReaderSession.sessionId });
@@ -1231,6 +1324,8 @@
 			);
 		} catch (error) {
 			showAppNotice(`无法启动连读：${String(error)}`);
+		} finally {
+			flowReaderStarting = false;
 		}
 	}
 
@@ -1258,13 +1353,14 @@
 		action: "pause" | "resume" | "cancel",
 		expectedRevision: number
 	) {
-		if (action === "cancel" && !window.confirm("取消该知乎任务？")) return;
+		// Call sites (task rows) already confirm cancel — a second confirm here
+		// made every zhihu cancel ask twice.
 		try {
 			await invoke("control_zhihu_task", {
 				taskId,
 				action,
 				expectedRevision,
-				requestId: crypto.randomUUID()
+				requestId: await stableRequestId("control_zhihu_task", taskId, action, expectedRevision)
 			});
 			showAppNotice(action === "pause" ? "知乎任务已暂停" : action === "resume" ? "知乎任务已恢复" : "知乎任务已取消");
 			await refreshAcquisitionSnapshot();
@@ -1325,7 +1421,7 @@
 				taskId,
 				action,
 				expectedRevision,
-				requestId: crypto.randomUUID()
+				requestId: await stableRequestId("control_podcast_task", taskId, action, expectedRevision)
 			});
 			showAppNotice(action === "pause" ? "任务已暂停" : action === "resume" ? "任务已恢复" : "任务已取消");
 		} catch (error) {
@@ -1355,7 +1451,7 @@
 			await invoke("restore_trash_item", {
 				trashId: item.trashId,
 				expectedRevision: item.revision,
-				requestId: crypto.randomUUID()
+				requestId: await stableRequestId("restore_trash_item", item.trashId, item.revision)
 			});
 			await Promise.all([refreshTrash(), refreshLibrary()]);
 			showAppNotice(`已恢复《${item.title}》`);
@@ -1374,7 +1470,7 @@
 			const result = await invoke<TrashDeleteResult>("permanently_delete_trash_item", {
 				trashId: item.trashId,
 				expectedRevision: item.revision,
-				requestId: crypto.randomUUID()
+				requestId: await stableRequestId("permanently_delete_trash_item", item.trashId, item.revision)
 			});
 			await refreshTrash();
 			showAppNotice(`已永久删除 ${result.deletedItems} 个项目`);
@@ -1823,6 +1919,34 @@
 		setTimeout(checkInitialFile, 200);
 
 		const handleKeydown = (e: KeyboardEvent) => {
+			// While a modal layer is open it owns the keyboard: global shortcuts
+			// (Space, arrows, Ctrl+…) must not act on the surface beneath. The
+			// workflow dialogs are native <dialog> and close on Esc by themselves;
+			// for our own layers Esc has explicit semantics — the navigation
+			// guard resolves "cancel" (never silently discards the edit), the
+			// book-detail dialog and trash surface close.
+			if (
+				navigationGuardOpen ||
+				podcastWorkflowOpen ||
+				zhihuWorkflowOpen ||
+				selectedBookDetail !== null ||
+				trashOpen
+			) {
+				if (e.key === "Escape") {
+					if (navigationGuardOpen) {
+						e.preventDefault();
+						void chooseNavigationGuard("cancel");
+					} else if (selectedBookDetail !== null) {
+						e.preventDefault();
+						selectedBookDetail = null;
+					} else if (trashOpen) {
+						e.preventDefault();
+						trashOpen = false;
+					}
+				}
+				return;
+			}
+
 			if (readingCursorState.active) {
 				dispatchReadingCursor({ type: "keyboard" });
 			}
@@ -1864,9 +1988,30 @@
 			} else if ($focusMode) {
 				e.preventDefault();
 				void toggleFocusMode(false);
+			} else if (isImmersiveSurface(chromeState.surface) && !chromeVisible) {
+				// Keyboard equivalent of the top-edge hotzone: first Esc summons
+				// the chrome (and moves focus into it) rather than being a dead key.
+				e.preventDefault();
+				void revealChromeForKeyboard();
+			} else if (flowReaderSession) {
+				e.preventDefault();
+				void closeFlowReader();
+			} else if ($currentFilePath) {
+				// Last ladder step: leave the reading surface for the bookshelf.
+				e.preventDefault();
+				void returnToBookshelf();
 			}
 			return;
 		}
+
+			// F10 moves keyboard focus to the chrome (window bar / toolbar) —
+			// the standard "menu bar" key, and the only way to reach the window
+			// controls without a pointer once chrome auto-hides.
+			if (e.key === "F10") {
+				e.preventDefault();
+				void revealChromeForKeyboard();
+				return;
+			}
 
 			if (isModKey(e) && e.key === "t") {
 				e.preventDefault();
@@ -1971,43 +2116,52 @@
 			chapterNavigationKeyLatch.reset();
 		};
 
+		// Scroll events fire far more often than once per frame. Everything in
+		// the handler reads *current* scroll state, so coalescing to one run per
+		// animation frame is identical to running it per event.
+		let scrollFrame: number | null = null;
 		const handleScroll = () => {
 			if (!contentEl) return;
-			if (codeCopyVisible) scheduleCodeCopyHide(0);
-			const scrollTop = contentEl.scrollTop;
-			const scrollHeight = contentEl.scrollHeight - contentEl.clientHeight;
-			readingProgress = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
-			if (activeBook && readingProgress >= 0.84) void preloadNextBookChapter();
-			if ($currentFilePath) noteReadingActivity();
+			if (scrollFrame !== null) return;
+			scrollFrame = requestAnimationFrame(() => {
+				scrollFrame = null;
+				if (!contentEl) return;
+				if (codeCopyVisible) scheduleCodeCopyHide(0);
+				const scrollTop = contentEl.scrollTop;
+				const scrollHeight = contentEl.scrollHeight - contentEl.clientHeight;
+				readingProgress = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
+				if (activeBook && readingProgress >= 0.84) void preloadNextBookChapter();
+				if ($currentFilePath) noteReadingActivity();
 
-			if ($currentFilePath && $focusMode) {
-				markFocusScrollActive();
-				if (focusProgrammaticScrollIndex !== null) {
-					const targetReached =
-						focusProgrammaticScrollTarget !== null &&
-						Math.abs(scrollTop - focusProgrammaticScrollTarget) < 1;
-					scheduleProgrammaticFocusScrollUnlock(
-						targetReached ? FOCUS_SCROLL_ACTIVE_MS : FOCUS_PROGRAMMATIC_SCROLL_SETTLE_MS,
-					);
+				if ($currentFilePath && $focusMode) {
+					markFocusScrollActive();
+					if (focusProgrammaticScrollIndex !== null) {
+						const targetReached =
+							focusProgrammaticScrollTarget !== null &&
+							Math.abs(scrollTop - focusProgrammaticScrollTarget) < 1;
+						scheduleProgrammaticFocusScrollUnlock(
+							targetReached ? FOCUS_SCROLL_ACTIVE_MS : FOCUS_PROGRAMMATIC_SCROLL_SETTLE_MS,
+						);
+					}
+					scheduleFocusUpdate(getScheduledFocusIndex());
 				}
-				scheduleFocusUpdate(getScheduledFocusIndex());
-			}
 
-			// Update edit orbit particle position when scrolling during edit in focus mode
-			if (editingParagraph && isEditingInDarkFocus) {
-				updateEditOrbitPosition();
-			}
+				// Update edit orbit particle position when scrolling during edit in focus mode
+				if (editingParagraph && isEditingInDarkFocus) {
+					updateEditOrbitPosition();
+				}
 
-			if ($currentFilePath && !$focusMode && !editingParagraph) {
-				pulseStatusLine();
-			}
+				if ($currentFilePath && !$focusMode && !editingParagraph) {
+					pulseStatusLine();
+				}
 
-			if ($currentFilePath && !saveStateTimer) {
-				saveStateTimer = setTimeout(() => {
-					saveStateTimer = null;
-					void saveState();
-				}, 5000);
-			}
+				if ($currentFilePath && !saveStateTimer) {
+					saveStateTimer = setTimeout(() => {
+						saveStateTimer = null;
+						void saveState();
+					}, 5000);
+				}
+			});
 		};
 
 		const handleWheel = (e: WheelEvent) => {
@@ -2022,7 +2176,7 @@
 				return;
 			}
 			if ($currentFilePath || flowReaderSession) {
-				noteReadingActivity();
+				scheduleReadingActivity();
 			}
 			if (contentEl && activeBook && !$focusMode && Math.abs(e.deltaY) > 0.01) {
 				cancelChapterBoundaryRestore();
@@ -2075,10 +2229,7 @@
 
 			const stepDirection = focusWheelDelta > 0 ? 1 : -1;
 			focusWheelDelta = 0;
-			const chapterDirection = moveFocus(stepDirection);
-			if (chapterDirection !== null) {
-				void navigateBookChapter(chapterDirection);
-			}
+			scheduleFocusWheelStep(stepDirection);
 		};
 
 		const clearPodcastSelectionReveal = () => {
@@ -2188,10 +2339,17 @@
 			});
 		};
 
+		// Same coalescing as pointer-move: the cursor reducer is a store write,
+		// so a wheel burst would otherwise invalidate it once per tick.
+		let readingCursorWheelFrame: number | null = null;
 		const handleReadingCursorWheel = (e: WheelEvent) => {
 			if (!readingCursorState.active) return;
 			if (Math.abs(e.deltaX) + Math.abs(e.deltaY) + Math.abs(e.deltaZ) < 0.01) return;
-			dispatchReadingCursor({ type: "wheel" });
+			if (readingCursorWheelFrame !== null) return;
+			readingCursorWheelFrame = window.requestAnimationFrame(() => {
+				readingCursorWheelFrame = null;
+				dispatchReadingCursor({ type: "wheel" });
+			});
 		};
 
 		const handleContentMouseOver = (e: MouseEvent) => {
@@ -2237,13 +2395,27 @@
 		contentEl?.addEventListener("dblclick", handleDblClick);
 		contentEl?.addEventListener("mouseover", handleContentMouseOver);
 		contentEl?.addEventListener("mouseout", handleContentMouseOut);
+		// Images load lazily and reflow the article when they land — capture-phase
+		// load events keep the cached heading offsets honest (focus metrics have
+		// their own invalidation paths).
+		const handleContentLoad = () => {
+			invalidateHeadingIndex();
+		};
+		contentEl?.addEventListener("load", handleContentLoad, true);
+		// rebuildFocusMetrics is O(units) synchronous layout; a resize drag
+		// fires continuously, so coalesce to one run per animation frame.
+		let resizeFrame: number | null = null;
 		const handleResize = () => {
-			invalidateFocusMetrics();
-			if ($currentFilePath && $focusMode) {
-				rebuildFocusMetrics();
-				scheduleFocusUpdate(lastFocusedIdx >= 0 ? lastFocusedIdx : undefined);
-			}
-			updateEditOrbitPosition();
+			if (resizeFrame !== null) return;
+			resizeFrame = requestAnimationFrame(() => {
+				resizeFrame = null;
+				invalidateFocusMetrics();
+				if ($currentFilePath && $focusMode) {
+					rebuildFocusMetrics();
+					scheduleFocusUpdate(lastFocusedIdx >= 0 ? lastFocusedIdx : undefined);
+				}
+				updateEditOrbitPosition();
+			});
 		};
 		window.addEventListener("resize", handleResize);
 		const handleBeforeUnload = () => {
@@ -2339,6 +2511,8 @@
 			pollTick += 1;
 			if (!document.hasFocus() && pollTick % 5 !== 0) return;
 			if (fileWatchInFlight) return;
+			// 连读会话期间不要触发 openFile —— 它会把精读面盖到 iframe 之上。
+			if (flowReaderSession) return;
 			fileWatchInFlight = true;
 			const path = $currentFilePath ?? "";
 			const navigationAtStart: NavigationSnapshot = {
@@ -2415,6 +2589,7 @@
 			contentEl?.removeEventListener("dblclick", handleDblClick);
 			contentEl?.removeEventListener("mouseover", handleContentMouseOver);
 			contentEl?.removeEventListener("mouseout", handleContentMouseOut);
+			contentEl?.removeEventListener("load", handleContentLoad, true);
 			if (footnoteHideTimer) {
 				clearTimeout(footnoteHideTimer);
 			}
@@ -2423,6 +2598,27 @@
 			}
 			window.removeEventListener("resize", handleResize);
 			window.removeEventListener("beforeunload", handleBeforeUnload);
+			if (scrollFrame !== null) {
+				cancelAnimationFrame(scrollFrame);
+				scrollFrame = null;
+			}
+			if (resizeFrame !== null) {
+				cancelAnimationFrame(resizeFrame);
+				resizeFrame = null;
+			}
+			if (readingCursorWheelFrame !== null) {
+				cancelAnimationFrame(readingCursorWheelFrame);
+				readingCursorWheelFrame = null;
+			}
+			if (focusWheelMoveFrame !== null) {
+				cancelAnimationFrame(focusWheelMoveFrame);
+				focusWheelMoveFrame = null;
+				pendingFocusWheelSteps = 0;
+			}
+			if (readingActivityFrame !== null) {
+				cancelAnimationFrame(readingActivityFrame);
+				readingActivityFrame = null;
+			}
 			if (focusWheelResetTimer) {
 				clearTimeout(focusWheelResetTimer);
 			}
@@ -2726,6 +2922,12 @@
 			// Cancel only this layer; stop the window handler from also acting.
 			e.preventDefault();
 			e.stopPropagation();
+			// While the navigation guard is open Esc belongs to it — reverting
+			// the edit here would bypass the guard's explicit choice.
+			if (navigationGuardOpen) {
+				void chooseNavigationGuard("cancel");
+				return;
+			}
 			cancelEdit();
 			return;
 		}
@@ -2948,8 +3150,16 @@
 				console.error('Failed to save:', err);
 				fileError = `保存失败：${err instanceof Error ? err.message : String(err)}`;
 				$markdownSource = oldMarkdownSource;
-				teardownEdit(el);
-				restoreEditedBlockHtml(el, oldText);
+				// Keep the draft: the block stays in edit mode with the typed text
+				// intact — Enter/blur retries the save, Esc still discards it.
+				if (el.isConnected) {
+					el.addEventListener("blur", finishEdit, { once: true });
+					if (document.activeElement !== el) {
+						el.focus();
+						placeCaretAtEnd(el);
+					}
+				}
+				showAppNotice("保存失败，已保留草稿——继续编辑后可重试，或按 Esc 放弃");
 				return false;
 			}
 
@@ -3076,15 +3286,13 @@
 	const FOCUS_SEGMENT_GROUP_LINES = 2.8;
 	const FOCUS_SEGMENT_MIN_TAIL_LINES = 1.2;
 
-	function getInlineRunHeight(el: HTMLElement) {
-		const rects = el.getClientRects();
-		if (rects.length === 0) return 0;
-		return rects[rects.length - 1].bottom - rects[0].top;
-	}
-
 	// Wrap a long paragraph's sentences into <span class="focus-seg"> groups of
 	// roughly FOCUS_SEGMENT_GROUP_LINES lines each. Text nodes are split at
 	// sentence starts; inline elements (links, code…) stay whole.
+	//
+	// Layout work is strictly two-phase: every DOM mutation happens before a
+	// single batched measurement pass. Interleaving getClientRects reads with
+	// these inserts would force a synchronous reflow per sentence.
 	function segmentLongParagraph(p: HTMLElement, lineHeight: number): HTMLElement[] {
 		if (p.dataset.focusSegmented === "true") {
 			return Array.from(p.querySelectorAll(":scope > .focus-seg")) as HTMLElement[];
@@ -3094,6 +3302,7 @@
 		const sentences = splitSentences(text);
 		if (sentences.length < 2) return [];
 
+		// Phase 1 (writes only): split text nodes at sentence starts.
 		const splitAtOffset = (target: number) => {
 			let acc = 0;
 			for (let node = p.firstChild; node; node = node.nextSibling) {
@@ -3136,29 +3345,51 @@
 			return [];
 		}
 
+		// Phase 2 (reads only): measure every sentence span once. An inline
+		// group wrapping sentences s..e has a run height of
+		// bottom(lastRect(sentence e)) - top(firstRect(sentence s)) — the same
+		// value a post-wrap getClientRects on the group would report — so
+		// grouping can be computed without any further DOM writes.
+		const sentenceMetrics = sentenceSpans.map((span) => {
+			const rects = span.getClientRects();
+			return rects.length === 0
+				? { top: 0, bottom: 0 }
+				: { top: rects[0].top, bottom: rects[rects.length - 1].bottom };
+		});
+
 		// Merge sentences into groups of ~GROUP_LINES lines, measured for real.
 		const targetHeight = lineHeight * FOCUS_SEGMENT_GROUP_LINES;
-		const groups: HTMLElement[] = [];
-		let currentGroup: HTMLElement | null = null;
-		for (const sentence of sentenceSpans) {
-			if (!currentGroup || getInlineRunHeight(currentGroup) >= targetHeight) {
-				currentGroup = document.createElement("span");
-				currentGroup.className = "focus-seg";
-				p.insertBefore(currentGroup, sentence);
-				groups.push(currentGroup);
+		const groupRanges: [number, number][] = []; // [firstSentenceIdx, endIdxExclusive)
+		let groupStart = 0;
+		for (let i = 1; i < sentenceSpans.length; i++) {
+			if (sentenceMetrics[i - 1].bottom - sentenceMetrics[groupStart].top >= targetHeight) {
+				groupRanges.push([groupStart, i]);
+				groupStart = i;
 			}
-			currentGroup.appendChild(sentence);
 		}
+		groupRanges.push([groupStart, sentenceSpans.length]);
 
 		// A tiny tail group reads as an orphan line — fold it into the previous.
-		if (groups.length >= 2) {
-			const tail = groups[groups.length - 1];
-			if (getInlineRunHeight(tail) < lineHeight * FOCUS_SEGMENT_MIN_TAIL_LINES) {
-				const prev = groups[groups.length - 2];
-				while (tail.firstChild) prev.appendChild(tail.firstChild);
-				tail.remove();
-				groups.pop();
+		if (groupRanges.length >= 2) {
+			const [tailStart, tailEnd] = groupRanges[groupRanges.length - 1];
+			const tailHeight =
+				sentenceMetrics[tailEnd - 1].bottom - sentenceMetrics[tailStart].top;
+			if (tailHeight < lineHeight * FOCUS_SEGMENT_MIN_TAIL_LINES) {
+				groupRanges[groupRanges.length - 2][1] = tailEnd;
+				groupRanges.pop();
 			}
+		}
+
+		// Phase 3 (writes only): wrap each sentence range in its group span.
+		const groups: HTMLElement[] = [];
+		for (const [start, end] of groupRanges) {
+			const group = document.createElement("span");
+			group.className = "focus-seg";
+			p.insertBefore(group, sentenceSpans[start]);
+			for (let i = start; i < end; i++) {
+				group.appendChild(sentenceSpans[i]);
+			}
+			groups.push(group);
 		}
 
 		p.dataset.focusSegmented = "true";
@@ -3246,6 +3477,7 @@
 	function invalidateFocusMetrics() {
 		focusMetricsValid = false;
 		focusBlockMetrics = [];
+		invalidateHeadingIndex();
 	}
 
 	function getUnitBoundingRect(unit: FocusUnit) {
@@ -3786,6 +4018,28 @@
 		return null;
 	}
 
+	// Queue one focus step per accumulated wheel threshold crossing and flush
+	// them inside a single animation frame — running moveFocus per input event
+	// rewrites the blur window and issues a scrollTo each time.
+	function scheduleFocusWheelStep(direction: -1 | 1) {
+		pendingFocusWheelSteps += direction;
+		if (focusWheelMoveFrame !== null) return;
+		focusWheelMoveFrame = requestAnimationFrame(() => {
+			focusWheelMoveFrame = null;
+			const steps = pendingFocusWheelSteps;
+			pendingFocusWheelSteps = 0;
+			if (!$focusMode || steps === 0) return;
+			const direction = steps > 0 ? 1 : -1;
+			for (let i = Math.abs(steps); i > 0; i -= 1) {
+				const chapterDirection = moveFocus(direction);
+				if (chapterDirection !== null) {
+					void navigateBookChapter(chapterDirection);
+					break;
+				}
+			}
+		});
+	}
+
 	function handleReadingScrollIntent(intent: ReadingScrollIntent, key: string) {
 		if (!contentEl) return;
 		cancelChapterBoundaryRestore();
@@ -3798,7 +4052,10 @@
 			navigateBookChapterFromKey(key, resolution.direction, resolution.offsetPx);
 			return;
 		}
-		contentEl.scrollTo({ top: resolution.top, behavior: "smooth" });
+		contentEl.scrollTo({
+			top: resolution.top,
+			behavior: prefersReducedMotion() ? "instant" : "smooth",
+		});
 	}
 
 	function clearFocusStyles() {
@@ -4078,7 +4335,15 @@
 	// seconds on long documents. Anything beyond a few viewports cuts instantly.
 	const LONG_JUMP_VIEWPORTS = 3;
 
+	function prefersReducedMotion(): boolean {
+		return (
+			typeof window !== "undefined" &&
+			window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+		);
+	}
+
 	function getJumpBehavior(distancePx: number): ScrollBehavior {
+		if (prefersReducedMotion()) return "instant";
 		if (!contentEl) return "smooth";
 		return distancePx > contentEl.clientHeight * LONG_JUMP_VIEWPORTS ? "instant" : "smooth";
 	}
@@ -4127,22 +4392,57 @@
 		? activeBook.manifest.chapters[activeChapterIndex]?.id ?? ""
 		: getCurrentHeading()?.id ?? "";
 
-	function getCurrentHeading(): TocItem | null {
-		if (activeBook) return tocItems[activeChapterIndex] ?? null;
+	// Heading positions in scroll-content coordinates
+	// (scrollTop + rect.top - contentRect.top at measure time, same convention
+	// as focusBlockMetrics). Rebuilt lazily — invalidateFocusMetrics() drops
+	// the cache on every content/layout change; late-loading images invalidate
+	// via a capture-phase load listener on contentEl.
+	let headingIndex: { item: TocItem; top: number }[] | null = null;
+
+	function invalidateHeadingIndex() {
+		headingIndex = null;
+	}
+
+	function getHeadingIndex() {
 		if (!contentEl || tocItems.length === 0) return null;
-		const threshold =
-			contentEl.getBoundingClientRect().top + contentEl.clientHeight * 0.35;
-		let current: TocItem | null = null;
+		if (headingIndex) return headingIndex;
+		const contentRect = contentEl.getBoundingClientRect();
+		const scrollTop = contentEl.scrollTop;
+		const entries: { item: TocItem; top: number }[] = [];
 		for (const item of tocItems) {
 			const el = contentEl.querySelector(`#${CSS.escape(item.id)}`);
 			if (!el) continue;
-			if (el.getBoundingClientRect().top <= threshold) {
-				current = item;
+			entries.push({
+				item,
+				top: scrollTop + el.getBoundingClientRect().top - contentRect.top,
+			});
+		}
+		headingIndex = entries;
+		return headingIndex;
+	}
+
+	function getCurrentHeading(): TocItem | null {
+		if (activeBook) return tocItems[activeChapterIndex] ?? null;
+		const index = getHeadingIndex();
+		if (!contentEl || !index || index.length === 0) return null;
+		// rect.top <= contentRect.top + clientHeight*0.35 expressed in scroll
+		// coordinates: heading top <= scrollTop + clientHeight*0.35.
+		const threshold = contentEl.scrollTop + contentEl.clientHeight * 0.35;
+		// Entries follow document order, so their tops are non-decreasing —
+		// binary search for the last heading at/above the threshold.
+		let low = 0;
+		let high = index.length - 1;
+		let current = -1;
+		while (low <= high) {
+			const mid = (low + high) >> 1;
+			if (index[mid].top <= threshold) {
+				current = mid;
+				low = mid + 1;
 			} else {
-				break;
+				high = mid - 1;
 			}
 		}
-		return current;
+		return current >= 0 ? index[current].item : null;
 	}
 
 	// ===== Bottom status line: chapter · progress · time left =====
@@ -4187,7 +4487,6 @@
 	class:chrome-overlay={chromeOverlay}
 	class:library-surface={librarySurface}
 	class:layout-wide={windowMaximized}
-	role="application"
 >
 	<WindowResizeHandles />
 
@@ -4212,6 +4511,7 @@
 	<!-- Unified chrome: custom window bar + context toolbar share chromeVisible -->
 	<div
 		class="chrome-stack"
+		bind:this={chromeStackEl}
 		class:hidden={!chromeVisible}
 		class:overlay={chromeOverlay}
 		aria-hidden={!chromeVisible}
@@ -4439,7 +4739,7 @@
 				events={taskEventLog}
 				selectedBookDetail={selectedBookDetail}
 				trashCount={trashItems.length}
-				loading={libraryLoading}
+				loading={libraryLoading || importFolderBusy}
 				writable={libraryWritable}
 				libraryRoot={appSettings?.libraryRoot ?? ""}
 				onOpenBook={(bookId) => void openLibraryBook(bookId)}
@@ -4537,7 +4837,7 @@
 	{/if}
 
 	{#if appNoticeText}
-		<div class="zoom-indicator app-notice">{appNoticeText}</div>
+		<div class="zoom-indicator app-notice" role="status" aria-live="polite">{appNoticeText}</div>
 	{/if}
 
 	<!-- Search hit tick marks along the right edge -->
@@ -4732,6 +5032,7 @@
 		opacity: 0.3;
 		z-index: 80;
 		transition: width 0.1s linear;
+		pointer-events: none; /* pure indicator — never cover window controls */
 	}
 
 	/* ========== Context toolbar under window chrome ========== */
@@ -4766,13 +5067,17 @@
 		letter-spacing: 0.12em;
 	}
 
-	/* Invisible strip along the top edge; hovering summons chrome (does not drag). */
+	/* Invisible strip along the top edge; hovering summons chrome (does not drag).
+	   Must sit BELOW .chrome-stack (z-55): when chrome is visible the window
+	   controls own the top edge (a higher strip made their top 10px unclickable
+	   and auto-hid chrome under the pointer); when chrome hides it is
+	   pointer-events:none anyway, so the strip still catches the hover. */
 	.topbar-hover-zone {
 		position: fixed;
 		top: 0;
 		left: 0;
 		right: 0;
-		z-index: 65;
+		z-index: 50;
 	}
 
 	.topbar-left,
@@ -5694,7 +5999,9 @@
 	.navigation-guard-backdrop {
 		position: fixed;
 		inset: 0;
-		z-index: 60;
+		/* Below .chrome-stack (z-55): the custom window controls stay usable
+		   above the modal backdrop instead of being dimmed and unclickable. */
+		z-index: 45;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -5743,6 +6050,34 @@
 		border-color: var(--link);
 		background: var(--link);
 		color: var(--bg);
+	}
+
+	/* Reduced motion: drop non-essential animation/transitions on UI chrome.
+	   The Focus Mode particle/spotlight layer is intentionally excluded — its
+	   visuals are locked behavior (see P3-10). */
+	@media (prefers-reduced-motion: reduce) {
+		.article,
+		.search-tick,
+		.code-copy-btn,
+		.footnote-preview,
+		.lightbox-overlay,
+		.lightbox-image,
+		.zoom-indicator,
+		.first-hint,
+		.edit-hint,
+		.status-line-pill,
+		.loading-dot,
+		.icon-btn,
+		.progress-line,
+		.navigation-guard,
+		.navigation-guard-actions button {
+			animation: none;
+			transition: none;
+		}
+		:global(.editing) {
+			animation: none;
+			box-shadow: 0 0 0 1.5px var(--selection);
+		}
 	}
 </style>
 
