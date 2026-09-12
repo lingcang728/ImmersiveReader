@@ -382,18 +382,19 @@ pub fn control_task(
 fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
     let terminal = matches!(
         remote.status.as_str(),
-        "success" | "partial_success" | "failed"
+        "success" | "partial_success" | "failed" | "cancelled"
     );
     let lifecycle_state = match remote.status.as_str() {
         "running" => LifecycleState::Running,
         "paused" => LifecycleState::Paused,
-        "success" | "partial_success" | "failed" => LifecycleState::Terminal,
+        "success" | "partial_success" | "failed" | "cancelled" => LifecycleState::Terminal,
         _ => LifecycleState::Queued,
     };
     let outcome = match remote.status.as_str() {
         "success" => TaskOutcome::Success,
         "partial_success" => TaskOutcome::PartialSuccess,
         "failed" => TaskOutcome::Failed,
+        "cancelled" => TaskOutcome::Cancelled,
         _ => TaskOutcome::None,
     };
     let completed = remote.success_count.saturating_add(remote.failed_count);
@@ -551,7 +552,7 @@ fn apply_remote_task(
 ) -> Result<Option<TaskEvent>, String> {
     let terminal = matches!(
         remote.status.as_str(),
-        "success" | "partial_success" | "failed"
+        "success" | "partial_success" | "failed" | "cancelled"
     );
     let next = remote_snapshot(remote);
     let mut control = ControlDb::open_current()?;
@@ -602,7 +603,7 @@ pub fn ensure_poller(task_id: String, settings: AppSettings, app: AppHandle) {
                 Ok(remote) => {
                     let remote_terminal = matches!(
                         remote.status.as_str(),
-                        "success" | "partial_success" | "failed"
+                        "success" | "partial_success" | "failed" | "cancelled"
                     );
                     let progress_changed = apply_remote_task(remote, Some(&app)).ok().flatten();
                     if progress_changed.is_none()

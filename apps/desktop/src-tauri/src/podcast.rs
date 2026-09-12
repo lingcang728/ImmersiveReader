@@ -25,7 +25,10 @@ pub use task_request::{
     AddPodcastFilesRequest, DuplicatePolicy, PodcastAddResult, PodcastBudgetApproval,
     PodcastPreviewStore,
 };
-pub use worker::{cancel_task, pause_task, resume_task, start_task, stop_all as stop_workers};
+pub use worker::{
+    active_podcast_task_ids, cancel_task, pause_task, resume_task, start_task,
+    stop_all as stop_workers,
+};
 
 const ESTIMATE_VERSION: &str = "podcast-budget-v1-deepseek-v4-2026-07-12";
 
