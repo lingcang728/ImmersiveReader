@@ -188,7 +188,12 @@ mod tests {
             .expect("server must have an IP");
         let origin = format!("http://127.0.0.1:{}", address.port());
         let thread = std::thread::spawn(move || {
-            let health = server.recv().expect("health request must arrive");
+            // Bounded recv: if a request never lands the server thread must
+            // still exit, or join below hangs the whole test binary.
+            let health = server
+                .recv_timeout(Duration::from_secs(10))
+                .expect("health recv must not fail")
+                .expect("health request must arrive");
             assert!(health
                 .headers()
                 .iter()
@@ -198,7 +203,10 @@ mod tests {
                     r#"{"engine":"podcast","status":"ok"}"#,
                 ))
                 .expect("health response must write");
-            let protected = server.recv().expect("protected request must arrive");
+            let protected = server
+                .recv_timeout(Duration::from_secs(10))
+                .expect("protected recv must not fail")
+                .expect("protected request must arrive");
             let authorization = protected
                 .headers()
                 .iter()
@@ -233,7 +241,15 @@ mod tests {
             .expect("server must have an IP");
         let origin = format!("http://127.0.0.1:{}", address.port());
         let thread = std::thread::spawn(move || {
-            let request = server.recv().expect("request must arrive");
+            // Under parallel test load the client's 50ms connect timeout can
+            // fire before its request is even delivered; an unbounded recv
+            // would then hang the test binary on join forever.
+            let Some(request) = server
+                .recv_timeout(Duration::from_secs(10))
+                .expect("recv must not fail")
+            else {
+                return;
+            };
             std::thread::sleep(Duration::from_millis(100));
             let _ = request.respond(Response::from_string("{}"));
         });

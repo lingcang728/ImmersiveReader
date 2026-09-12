@@ -370,6 +370,27 @@ fn write_response(
     writer.flush()
 }
 
+/// Waits for the peer's FIN (or a bounded timeout) after the response has
+/// been sent. Once the client half-closes or fully closes, nothing more can
+/// arrive on this socket, so dropping it cannot produce an RST — a late
+/// segment landing on a closed Windows socket would otherwise reset the
+/// connection and could destroy the response the peer has not finished
+/// reading.
+fn drain_client_residue(reader: &mut BufReader<TcpStream>) {
+    const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+    const DRAIN_CAP: usize = 256 * 1024;
+    let _ = reader.get_ref().set_read_timeout(Some(DRAIN_TIMEOUT));
+    let mut remaining = DRAIN_CAP;
+    let mut sink = [0_u8; 16 * 1024];
+    while remaining > 0 {
+        let want = remaining.min(sink.len());
+        match reader.read(&mut sink[..want]) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => remaining -= read,
+        }
+    }
+}
+
 /// One worker turn: parse a single request, route it, respond, close.
 /// `Connection: close` on every reply keeps workers un-pinned — no
 /// keep-alive connection can hold a worker between requests.
@@ -404,11 +425,17 @@ fn serve_connection(
                 },
                 deadline,
             );
+            // FIN first so the client can finish reading while we wait for
+            // its own close — the drain bounds how long that can take.
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+            drain_client_residue(&mut reader);
             return;
         }
     };
     let response = crate::reader_http::handle(&request, origin, sessions, reader_html);
     let _ = write_response(&mut writer, response, deadline);
+    let _ = writer.shutdown(std::net::Shutdown::Write);
+    drain_client_residue(&mut reader);
 }
 
 impl ReaderService {
@@ -474,10 +501,12 @@ impl ReaderService {
                             // reset instead of an unbounded backlog.
                             accept_work.push(stream);
                         }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        Err(_) => {
+                            // WouldBlock and transient accept errors alike:
+                            // keep polling — a dead accept loop wedges the
+                            // reader service silently while the process is up.
                             thread::sleep(ACCEPT_POLL);
                         }
-                        Err(_) => break,
                     }
                 }
             })
@@ -580,6 +609,11 @@ mod tests {
         stream
             .write_all(value.as_bytes())
             .expect("request must write");
+        // Half-close the write side so the server's post-response drain sees
+        // EOF immediately instead of waiting out its timeout.
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("request shutdown must succeed");
         let mut response = String::new();
         stream
             .read_to_string(&mut response)
@@ -602,6 +636,9 @@ mod tests {
         stream
             .write_all(value.as_bytes())
             .expect("request must write");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("request shutdown must succeed");
         let mut response = String::new();
         stream
             .read_to_string(&mut response)
@@ -661,6 +698,9 @@ mod tests {
         stream
             .write_all(b"GARBAGE\r\n\r\n")
             .expect("garbage request must write");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("request shutdown must succeed");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("read timeout must set");
