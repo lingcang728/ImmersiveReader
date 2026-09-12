@@ -324,7 +324,7 @@ function Get-ProcessesUnderDirectory {
       $found += $process
     }
   }
-  return ,$found
+  return $found
 }
 
 function Stop-ProcessesUnderDirectory {
@@ -336,7 +336,7 @@ function Stop-ProcessesUnderDirectory {
   # or NSIS overwrite against them produces a torn install.
   $running = @(Get-ProcessesUnderDirectory -Root $Root)
   if ($running.Count -eq 0) { return }
-  $names = ($running | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', '
+  $names = ($running | ForEach-Object { "$($_.ProcessName) (PID $($_.Id)) $($_.Path)" }) -join ', '
   Write-Warning "Stopping processes under $Root before replacing files: $names"
   foreach ($process in $running) {
     try { [void]$process.CloseMainWindow() } catch { }
@@ -349,7 +349,7 @@ function Stop-ProcessesUnderDirectory {
     if ($running.Count -eq 0) { return }
     Start-Sleep -Milliseconds 500
   }
-  $names = ($running | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', '
+  $names = ($running | ForEach-Object { "$($_.ProcessName) (PID $($_.Id)) $($_.Path)" }) -join ', '
   throw "Processes are still running under $Root; close Immersive Reader and retry: $names"
 }
 
@@ -415,15 +415,9 @@ if ($Build) {
   if (Test-Path -LiteralPath $contractsDist) {
     Remove-Item -LiteralPath $contractsDist -Recurse -Force
   }
-  Push-Location (Join-Path $monorepoRoot "tools\zhihu-packer")
-  try {
-    Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "build")
-    # Compile continuous-reader template after tsc so dist holds both outputs.
-    Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "compile-reader")
-  } finally {
-    Pop-Location
-  }
   # contracts has no local toolchain; reuse the desktop app's tsc like verify.ps1.
+  # zhihu-packer's tsc imports packages/contracts/dist, so contracts must be
+  # built first.
   $contractsTsc = Join-Path $monorepoRoot "apps\desktop\node_modules\.bin\tsc.cmd"
   if (-not (Test-Path -LiteralPath $contractsTsc -PathType Leaf)) {
     throw "apps\desktop TypeScript compiler not found; run npm ci in apps\desktop first."
@@ -431,6 +425,14 @@ if ($Build) {
   Push-Location (Join-Path $monorepoRoot "packages\contracts")
   try {
     Invoke-CheckedCommand -FilePath $contractsTsc -Arguments @("-p", "tsconfig.json")
+  } finally {
+    Pop-Location
+  }
+  Push-Location (Join-Path $monorepoRoot "tools\zhihu-packer")
+  try {
+    Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "build")
+    # Compile continuous-reader template after tsc so dist holds both outputs.
+    Invoke-CheckedCommand -FilePath "npm.cmd" -Arguments @("run", "compile-reader")
   } finally {
     Pop-Location
   }
