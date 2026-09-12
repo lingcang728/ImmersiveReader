@@ -2,6 +2,8 @@ export type FileSrcConverter = (path: string) => string;
 
 const imageTagRegex = /<img\b[^>]*>/gi;
 const srcAttributeRegex = /\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
+const loadingAttributeRegex = /\bloading\s*=/i;
+const decodingAttributeRegex = /\bdecoding\s*=/i;
 
 function decodeHtmlAttribute(value: string): string {
 	return value.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (full, entity) => {
@@ -152,6 +154,25 @@ export function resolveMarkdownImageSrc(
 	return `${convertFileSrc(normalizeNativePath(nativePath))}${suffix}`;
 }
 
+function appendImageAttribute(tag: string, attribute: string): string {
+	// imageTagRegex guarantees the tag ends with '>', optionally preceded by '/'.
+	const end = tag.endsWith('/>') ? tag.length - 2 : tag.length - 1;
+	return `${tag.slice(0, end)} ${attribute}${tag.slice(end)}`;
+}
+
+function ensureDeferredImageAttributes(tag: string): string {
+	// Chapter images all fetch+decode at once otherwise. Keep any attribute the
+	// source HTML already carries so an explicit loading/decoding hint wins.
+	let result = tag;
+	if (!loadingAttributeRegex.test(result)) {
+		result = appendImageAttribute(result, 'loading="lazy"');
+	}
+	if (!decodingAttributeRegex.test(result)) {
+		result = appendImageAttribute(result, 'decoding="async"');
+	}
+	return result;
+}
+
 export function resolveMarkdownImageSources(
 	html: string,
 	markdownPath: string,
@@ -160,16 +181,20 @@ export function resolveMarkdownImageSources(
 	if (!markdownPath || !html.includes('<img')) return html;
 
 	return html.replace(imageTagRegex, (tag) => {
+		let resolvedTag = tag;
 		const match = srcAttributeRegex.exec(tag);
-		if (!match) return tag;
+		if (match) {
+			const rawValue = match[1] ?? match[2] ?? match[3] ?? '';
+			const resolved = resolveMarkdownImageSrc(rawValue, markdownPath, convertFileSrc);
+			if (resolved !== rawValue) {
+				const quote = match[1] !== undefined ? '"' : match[2] !== undefined ? "'" : '"';
+				const replacement = ` src=${quote}${escapeHtmlAttribute(resolved)}${quote}`;
+				resolvedTag = `${tag.slice(0, match.index)}${replacement}${tag.slice(
+					match.index + match[0].length
+				)}`;
+			}
+		}
 
-		const rawValue = match[1] ?? match[2] ?? match[3] ?? '';
-		const resolved = resolveMarkdownImageSrc(rawValue, markdownPath, convertFileSrc);
-		if (resolved === rawValue) return tag;
-
-		const quote = match[1] !== undefined ? '"' : match[2] !== undefined ? "'" : '"';
-		const replacement = ` src=${quote}${escapeHtmlAttribute(resolved)}${quote}`;
-
-		return `${tag.slice(0, match.index)}${replacement}${tag.slice(match.index + match[0].length)}`;
+		return ensureDeferredImageAttributes(resolvedTag);
 	});
 }

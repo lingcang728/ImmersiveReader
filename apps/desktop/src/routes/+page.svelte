@@ -254,6 +254,8 @@
 	let lastSpotlightVars = new Map<string, string>();
 	let markdownWorker: Worker | null = null;
 	let markdownWorkerFailed = false;
+	let markdownWorkerTransportFailures = 0;
+	const MARKDOWN_WORKER_MAX_TRANSPORT_FAILURES = 3;
 	let nextRenderRequestId = 1;
 	const pendingMarkdownRenders = new Map<number, {
 		resolve: (result: RenderedMarkdownDocument) => void;
@@ -327,6 +329,7 @@
 		result: { content: string; encoding: string };
 		rendered: RenderedMarkdownDocument;
 	} | null = null;
+	let chapterPreloadInFlight: Promise<void> | null = null;
 	let zoomIndicatorText = "";
 	let zoomIndicatorTimer: ReturnType<typeof setTimeout> | null = null;
 	type DurableReaderPreferences = {
@@ -846,6 +849,17 @@
 		pendingMarkdownRenders.clear();
 	}
 
+	function noteMarkdownWorkerTransportFailure() {
+		// Runtime transport failures are recoverable — the next render lazily
+		// builds a fresh worker. Only a worker that keeps dying (e.g. a script
+		// that can never load) trips the permanent fallback so editing does not
+		// pay a doomed rebuild on every render.
+		markdownWorkerTransportFailures += 1;
+		if (markdownWorkerTransportFailures >= MARKDOWN_WORKER_MAX_TRANSPORT_FAILURES) {
+			markdownWorkerFailed = true;
+		}
+	}
+
 	function getMarkdownWorker() {
 		if (markdownWorkerFailed || typeof Worker === "undefined") return null;
 		if (markdownWorker) return markdownWorker;
@@ -871,7 +885,7 @@
 				}
 			};
 			markdownWorker.onerror = (event) => {
-				markdownWorkerFailed = true;
+				noteMarkdownWorkerTransportFailure();
 				markdownWorker?.terminate();
 				markdownWorker = null;
 				rejectPendingMarkdownRenders(new Error(event.message || "Markdown worker failed"));
@@ -888,17 +902,33 @@
 	async function renderMarkdownForUi(source: string): Promise<RenderedMarkdownDocument> {
 		const worker = getMarkdownWorker();
 		if (worker) {
+			const id = nextRenderRequestId++;
 			try {
-				const id = nextRenderRequestId++;
-				return await new Promise<RenderedMarkdownDocument>((resolve, reject) => {
+				const rendered = await new Promise<RenderedMarkdownDocument>((resolve, reject) => {
 					pendingMarkdownRenders.set(id, { resolve, reject });
 					worker.postMessage({ id, source });
 				});
+				markdownWorkerTransportFailures = 0;
+				return rendered;
 			} catch (err) {
-				markdownWorkerFailed = true;
-				markdownWorker?.terminate();
-				markdownWorker = null;
-				console.warn("Markdown worker render failed.", err);
+				const orphanedRequest = pendingMarkdownRenders.delete(id);
+				if (!orphanedRequest && markdownWorker === worker) {
+					// Document-level failure: the worker answered {id,error}, so it
+					// is healthy and stays alive. The same source would fail the
+					// same way on the main thread — propagate instead of retrying.
+					throw err;
+				}
+				// Transport-level failure (postMessage threw / worker error event
+				// / teardown): drop this worker and fail every in-flight render so
+				// pending preload/navigation promises can never hang. The next
+				// render lazily rebuilds a worker unless failures keep recurring.
+				if (markdownWorker === worker) {
+					noteMarkdownWorkerTransportFailure();
+					markdownWorker = null;
+				}
+				worker.terminate();
+				rejectPendingMarkdownRenders(err instanceof Error ? err : new Error(String(err)));
+				console.warn("Markdown worker render failed; falling back to main thread.", err);
 			}
 		}
 
@@ -1418,22 +1448,33 @@
 		await invoke("save_book_progress", { bookId: activeBook.manifest.bookId, progress });
 	}
 
-	async function preloadNextBookChapter() {
-		if (!activeBook || activeChapterIndex < 0 || readingProgress < 0.84 || preloadedChapter) return;
+	function preloadNextBookChapter(): Promise<void> {
+		if (!activeBook || activeChapterIndex < 0 || readingProgress < 0.84 || preloadedChapter) {
+			return Promise.resolve();
+		}
 		const index = activeChapterIndex + 1;
 		const chapter = activeBook.manifest.chapters[index];
-		if (!chapter) return;
+		if (!chapter) return Promise.resolve();
+		// Every scroll event past 84% re-enters here; without an in-flight guard
+		// each one would repeat the chapter file read + full markdown render
+		// while the first preload is still awaiting its IPC calls.
+		if (chapterPreloadInFlight) return chapterPreloadInFlight;
 		const bookId = activeBook.manifest.bookId;
-		try {
-			const path = await invoke<string>("get_book_chapter_path", { bookId, chapterId: chapter.id });
-			const result = await invoke<{ content: string; encoding: string }>("read_markdown_file", { path });
-			const rendered = await renderMarkdownForUi(result.content);
-			if (activeBook?.manifest.bookId === bookId && activeChapterIndex + 1 === index) {
-				preloadedChapter = { bookId, index, path, result, rendered };
+		chapterPreloadInFlight = (async () => {
+			try {
+				const path = await invoke<string>("get_book_chapter_path", { bookId, chapterId: chapter.id });
+				const result = await invoke<{ content: string; encoding: string }>("read_markdown_file", { path });
+				const rendered = await renderMarkdownForUi(result.content);
+				if (activeBook?.manifest.bookId === bookId && activeChapterIndex + 1 === index) {
+					preloadedChapter = { bookId, index, path, result, rendered };
+				}
+			} catch {
+				// The normal open path will show a concrete error if the next chapter is unavailable.
 			}
-		} catch {
-			// The normal open path will show a concrete error if the next chapter is unavailable.
-		}
+		})().finally(() => {
+			chapterPreloadInFlight = null;
+		});
+		return chapterPreloadInFlight;
 	}
 
 	type ChapterBoundaryRestore = {
@@ -2215,7 +2256,14 @@
 		let isClosing = false;
 		const finishExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
 			try {
-				await appWindow.hide();
+				try {
+					await appWindow.hide();
+				} catch (hideErr) {
+					// Hiding is best-effort: a missing allow-hide capability or an
+					// already-gone window must not skip the graceful flush below —
+					// quit_app still has to run or only the hard tray fallback exits.
+					console.warn("Window hide failed; continuing exit cleanup.", hideErr);
+				}
 				if (editingParagraph) {
 					await Promise.race([
 						finishEdit(),

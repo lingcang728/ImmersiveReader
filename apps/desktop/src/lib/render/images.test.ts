@@ -45,4 +45,54 @@ describe('resolveMarkdownImageSources', () => {
 		expect(result).toContain('src="asset://C:\\Users\\reader\\docs\\cover.png"');
 		expect(result).toContain('src="https://example.com/remote.png"');
 	});
+
+	it('adds lazy loading and async decoding to rewritten images', () => {
+		const result = resolveMarkdownImageSources(
+			'<img src="cover.png">',
+			'C:\\Users\\reader\\docs\\skills.md',
+			convert
+		);
+
+		expect(result).toBe(
+			'<img src="asset://C:\\Users\\reader\\docs\\cover.png" loading="lazy" decoding="async">'
+		);
+	});
+
+	it('defers remote and embedded images that are not rewritten', () => {
+		const result = resolveMarkdownImageSources(
+			'<img src="https://example.com/remote.png"> <img src="data:image/png;base64,abc">',
+			'C:\\docs\\skills.md',
+			convert
+		);
+
+		expect(result).toBe(
+			'<img src="https://example.com/remote.png" loading="lazy" decoding="async"> ' +
+				'<img src="data:image/png;base64,abc" loading="lazy" decoding="async">'
+		);
+	});
+
+	it('keeps author-specified loading and decoding attributes', () => {
+		const result = resolveMarkdownImageSources(
+			'<img src="cover.png" loading="eager" decoding="sync">',
+			'C:\\docs\\skills.md',
+			convert
+		);
+
+		expect(result).toContain('loading="eager"');
+		expect(result).toContain('decoding="sync"');
+		expect(result).not.toContain('loading="lazy"');
+		expect(result).not.toContain('decoding="async"');
+	});
+
+	it('inserts defer attributes before a self-closing slash', () => {
+		const result = resolveMarkdownImageSources(
+			'<img src="cover.png"/>',
+			'C:\\docs\\skills.md',
+			convert
+		);
+
+		expect(result).toBe(
+			'<img src="asset://C:\\docs\\cover.png" loading="lazy" decoding="async"/>'
+		);
+	});
 });
