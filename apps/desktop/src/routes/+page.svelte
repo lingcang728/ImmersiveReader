@@ -224,6 +224,15 @@
 	let navigationGuardOpen = false;
 	let navigationGuardReason = "";
 	let navigationGuardResolve: ((choice: NavigationGuardChoice) => void) | null = null;
+	// Themed replacement for window.confirm: destructive actions get a real
+	// dialog that follows the app theme instead of the OS-native prompt.
+	interface ActionConfirm {
+		message: string;
+		confirmLabel: string;
+		danger: boolean;
+		resolve: (ok: boolean) => void;
+	}
+	let actionConfirm: ActionConfirm | null = null;
 	// A focus unit is one *or more* sibling elements highlighted together —
 	// adjacent low-density lines (short list items, one-line paragraphs, table
 	// rows) merge into one unit so the spotlight doesn't step line by line.
@@ -879,6 +888,7 @@
 		// otherwise cover the non-top-layer dialogs, so yield it on open.
 		if (
 			navigationGuardOpen ||
+			actionConfirm !== null ||
 			podcastWorkflowOpen ||
 			zhihuWorkflowOpen ||
 			selectedBookDetail !== null ||
@@ -1081,7 +1091,11 @@
 			return;
 		}
 
-		mermaidModule.initialize({ startOnLoad: false, theme: getMermaidTheme() });
+		mermaidModule.initialize({
+			startOnLoad: false,
+			theme: getMermaidTheme(),
+			securityLevel: "strict"
+		});
 		let replaced = false;
 		for (const code of codes) {
 			const pre = code.closest("pre");
@@ -1130,7 +1144,11 @@
 			? (Array.from(article.querySelectorAll(".mermaid-diagram")) as HTMLElement[])
 			: [];
 		if (containers.length === 0) return;
-		mermaidModule.initialize({ startOnLoad: false, theme: getMermaidTheme() });
+		mermaidModule.initialize({
+			startOnLoad: false,
+			theme: getMermaidTheme(),
+			securityLevel: "strict"
+		});
 		for (const container of containers) {
 			const src = container.dataset.mermaidSource ?? "";
 			if (!src) continue;
@@ -1355,8 +1373,9 @@
 	}
 
 	async function removeLibraryBook(bookId: string, title: string, chapterCount: number) {
-		const ok = window.confirm(
-			`将《${title}》移出书架？\n\n${chapterCount} 篇内容会移到书库 .trash，可手动恢复，不会立刻永久删除。`
+		const ok = await confirmAction(
+			`将《${title}》移出书架？\n\n${chapterCount} 篇内容会移到书库 .trash，可手动恢复，不会立刻永久删除。`,
+			"移出书架"
 		);
 		if (!ok) return;
 		try {
@@ -1373,11 +1392,13 @@
 	}
 
 	async function deleteLibraryBook(bookId: string, title: string, chapterCount: number) {
-		const ok = window.confirm(
-			`永久删除《${title}》？\n\n将删除磁盘上的 ${chapterCount} 篇 Markdown 与阅读进度，不可恢复。`
+		const ok = await confirmAction(
+			`永久删除《${title}》？\n\n将删除磁盘上的 ${chapterCount} 篇 Markdown 与阅读进度，不可恢复。`,
+			"永久删除",
+			true
 		);
 		if (!ok) return;
-		const again = window.confirm("再次确认：此操作不可撤销。");
+		const again = await confirmAction("再次确认：此操作不可撤销。", "确认删除", true);
 		if (!again) return;
 		try {
 			const message = await invoke<string>("delete_book", { bookId });
@@ -1499,7 +1520,11 @@
 		action: "pause" | "resume" | "cancel" | "cancel_and_discard",
 		expectedRevision: number
 	) {
-		if (action === "cancel_and_discard" && !window.confirm("取消并丢弃该播客任务及缓存？")) return;
+		if (
+			action === "cancel_and_discard" &&
+			!(await confirmAction("取消并丢弃该播客任务及缓存？", "取消并丢弃", true))
+		)
+			return;
 		try {
 			await invoke("control_podcast_task", {
 				taskId,
@@ -1546,10 +1571,16 @@
 	}
 
 	async function permanentlyDeleteTrashItem(item: TrashItem): Promise<void> {
-		const confirmed = window.confirm(
-			`永久删除《${item.title}》？\n\n这会删除回收站中的全部正文、资源与阅读状态，无法恢复。`
+		const confirmed = await confirmAction(
+			`永久删除《${item.title}》？\n\n这会删除回收站中的全部正文、资源与阅读状态，无法恢复。`,
+			"永久删除",
+			true
 		);
-		if (!confirmed || !window.confirm("再次确认：只删除这个受管回收站条目。")) return;
+		if (
+			!confirmed ||
+			!(await confirmAction("再次确认：只删除这个受管回收站条目。", "确认删除", true))
+		)
+			return;
 		try {
 			const result = await invoke<TrashDeleteResult>("permanently_delete_trash_item", {
 				trashId: item.trashId,
@@ -2026,6 +2057,7 @@
 			// book-detail dialog and trash surface close.
 			if (
 				navigationGuardOpen ||
+				actionConfirm !== null ||
 				podcastWorkflowOpen ||
 				zhihuWorkflowOpen ||
 				selectedBookDetail !== null ||
@@ -2035,6 +2067,9 @@
 					if (navigationGuardOpen) {
 						e.preventDefault();
 						void chooseNavigationGuard("cancel");
+					} else if (actionConfirm !== null) {
+						e.preventDefault();
+						chooseActionConfirm(false);
 					} else if (selectedBookDetail !== null) {
 						e.preventDefault();
 						selectedBookDetail = null;
@@ -2425,6 +2460,7 @@
 					podcastWorkflowOpen ||
 					zhihuWorkflowOpen ||
 					navigationGuardOpen ||
+					actionConfirm !== null ||
 					selectedBookDetail !== null ||
 					trashOpen
 				) return;
@@ -3185,6 +3221,25 @@
 		const el = editingParagraph;
 		teardownEdit(el);
 		restoreEditedBlockHtml(el, originalText);
+	}
+
+	// Promise<boolean> confirm used by destructive actions; a second call while
+	// one is open resolves false rather than stacking dialogs.
+	function confirmAction(
+		message: string,
+		confirmLabel: string,
+		danger = false
+	): Promise<boolean> {
+		if (actionConfirm) return Promise.resolve(false);
+		return new Promise((resolve) => {
+			actionConfirm = { message, confirmLabel, danger, resolve };
+		});
+	}
+
+	function chooseActionConfirm(ok: boolean) {
+		const pending = actionConfirm;
+		actionConfirm = null;
+		pending?.resolve(ok);
 	}
 
 	function requestNavigationGuard(reason: string): Promise<NavigationGuardChoice> {
@@ -4923,6 +4978,28 @@
 		</div>
 	{/if}
 
+	{#if actionConfirm}
+		<div class="navigation-guard-backdrop" role="presentation">
+			<dialog
+				class="navigation-guard"
+				aria-labelledby="action-confirm-title"
+				open
+			>
+				<h2 id="action-confirm-title">确认操作</h2>
+				<p class="action-confirm-message">{actionConfirm.message}</p>
+				<div class="navigation-guard-actions">
+					<button
+						type="button"
+						class:primary={!actionConfirm.danger}
+						class:danger={actionConfirm.danger}
+						on:click={() => chooseActionConfirm(true)}
+					>{actionConfirm.confirmLabel}</button>
+					<button type="button" on:click={() => chooseActionConfirm(false)}>取消</button>
+				</div>
+			</dialog>
+		</div>
+	{/if}
+
 	<!-- Main content -->
 	<ReaderWorkspace flowActive={!!flowReaderSession} bind:element={contentEl}>
 		{#if flowReaderSession}
@@ -6364,6 +6441,14 @@
 		border-color: var(--link);
 		background: var(--link);
 		color: var(--bg);
+	}
+	.navigation-guard-actions button.danger {
+		border-color: #d4a099;
+		background: #d4a099;
+		color: var(--bg);
+	}
+	.action-confirm-message {
+		white-space: pre-line;
 	}
 
 	/* Reduced motion: drop non-essential animation/transitions on UI chrome.

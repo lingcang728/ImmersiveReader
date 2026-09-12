@@ -167,8 +167,8 @@
 		<button
 			type="button"
 			class="chrome-btn chrome-btn-close"
-			aria-label="关闭"
-			title="关闭"
+			aria-label="隐藏到托盘"
+			title="隐藏到托盘（在托盘图标中退出）"
 			on:click={() => void closeWindow()}
 		>
 			<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
