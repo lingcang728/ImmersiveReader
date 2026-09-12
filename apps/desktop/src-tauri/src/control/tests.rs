@@ -1271,3 +1271,209 @@ fn reap_stale_workers_marks_silent_running_tasks() {
     drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
+
+/// P2-9: a claim left in-progress by a crash is re-seized once it ages past
+/// the reclamation window — the retried request re-executes and completes
+/// instead of replaying COMMAND_IN_PROGRESS forever. Fresh in-progress claims
+/// and mismatched inputs are never reclaimed.
+#[test]
+fn abandoned_claim_is_reclaimed_after_timeout() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-claim-reclaim-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let database = ControlDb::open(&root.join("control.db")).expect("control database must open");
+
+    assert!(matches!(
+        database
+            .claim_command("req-stale", "add_podcast_files", "input-a")
+            .expect("claim must succeed"),
+        CommandClaim::New
+    ));
+    // A live in-progress claim replays as Existing — the duplicate request
+    // waits on the first executor's outcome rather than running twice.
+    match database
+        .claim_command("req-stale", "add_podcast_files", "input-a")
+        .expect("duplicate claim must replay")
+    {
+        CommandClaim::Existing(record) => assert!(record.completed_at.is_none()),
+        CommandClaim::New => panic!("fresh in-progress claim must not be reclaimed"),
+    }
+
+    // Age the claim past the reclamation window, as a crash leaves it.
+    let stale = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    database
+        .connection
+        .execute(
+            "UPDATE command_results SET created_at = ?2 WHERE request_id = ?1",
+            rusqlite::params!["req-stale", stale],
+        )
+        .expect("claim timestamp must update");
+
+    // A mismatched input can never reclaim — the id still belongs to the
+    // original request.
+    assert_eq!(
+        database
+            .claim_command("req-stale", "add_podcast_files", "other-input")
+            .expect_err("input mismatch must still fail"),
+        "IDEMPOTENCY_KEY_REUSED"
+    );
+
+    // The same request re-seizes the abandoned claim (New → re-execute).
+    assert!(matches!(
+        database
+            .claim_command("req-stale", "add_podcast_files", "input-a")
+            .expect("stale claim must be reclaimed"),
+        CommandClaim::New
+    ));
+    // The refreshed claim is live: a concurrent duplicate sees it in-progress.
+    assert!(matches!(
+        database
+            .claim_command("req-stale", "add_podcast_files", "input-a")
+            .expect("fresh reclaimed claim must replay"),
+        CommandClaim::Existing(_)
+    ));
+    database
+        .complete_command("req-stale", r#"{"tasks":[]}"#, None, None)
+        .expect("reclaimed command must complete");
+    match database
+        .claim_command("req-stale", "add_podcast_files", "input-a")
+        .expect("completed claim must replay")
+    {
+        CommandClaim::Existing(record) => {
+            assert_eq!(record.result_json.as_deref(), Some(r#"{"tasks":[]}"#));
+            assert!(record.completed_at.is_some());
+        }
+        CommandClaim::New => panic!("completed request must not re-execute"),
+    }
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P2-10: IMMEDIATE transactions take the reserved lock at BEGIN, so two
+/// connections doing read-then-write degrade to an ordinary busy wait
+/// covered by busy_timeout — under DEFERRED this intermittently died on
+/// SQLITE_BUSY_SNAPSHOT, which busy_timeout never retries.
+#[test]
+fn concurrent_writers_do_not_hit_busy_snapshot() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-immediate-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    ControlDb::open(&path).expect("schema must initialize");
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = (0..2)
+        .map(|writer| {
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            thread::spawn(move || {
+                let database = ControlDb::open(&path).expect("control database must open");
+                barrier.wait();
+                for step in 0..30_u64 {
+                    database
+                        .persist_task_event(&task_event_for(
+                            &format!("task-{writer}"),
+                            TaskKind::Podcast,
+                            "book-writer",
+                            step + 1,
+                            step + 1,
+                        ))
+                        .expect("event must persist without busy snapshot");
+                    // Exercise the second read-then-write transaction too.
+                    let _ = database
+                        .capture_cancel_discard()
+                        .expect("cancel capture must not busy snapshot");
+                    let request_id = format!("request-{writer}-{step}");
+                    assert!(matches!(
+                        database
+                            .claim_command(&request_id, "command", "input")
+                            .expect("claim must succeed"),
+                        CommandClaim::New
+                    ));
+                    database
+                        .complete_command(&request_id, "{}", None, None)
+                        .expect("complete must succeed");
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().expect("writer thread must finish");
+    }
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+/// P2-12: a healthy database at the current `user_version` opens without
+/// re-running the schema batch; a version-behind or partially-missing schema
+/// still bootstraps exactly once and heals.
+#[test]
+fn open_skips_schema_bootstrap_when_version_is_current() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-schema-gate-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+
+    let database = ControlDb::open(&path).expect("control database must open");
+    assert!(
+        database.schema_bootstrap_ran(),
+        "fresh database must run the schema batch"
+    );
+    drop(database);
+
+    let reopened = ControlDb::open(&path).expect("control database must reopen");
+    assert!(
+        !reopened.schema_bootstrap_ran(),
+        "versioned database must skip the schema batch"
+    );
+    let version: i64 = reopened
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("user_version must read");
+    assert_eq!(version, 1);
+    drop(reopened);
+
+    // Rewinding the version re-runs the batch once (upgrade path).
+    {
+        let behind = ControlDb::open(&path).expect("control database must reopen");
+        behind
+            .connection
+            .execute_batch("PRAGMA user_version = 0")
+            .expect("user_version must rewind");
+    }
+    let upgraded = ControlDb::open(&path).expect("control database must reopen");
+    assert!(
+        upgraded.schema_bootstrap_ran(),
+        "version-behind database must re-run the schema batch"
+    );
+    drop(upgraded);
+
+    // A database whose schema partially vanished bootstraps again and heals —
+    // the version stamp alone cannot prove the tables exist.
+    {
+        let broken = ControlDb::open(&path).expect("control database must reopen");
+        assert!(!broken.schema_bootstrap_ran());
+        broken
+            .connection
+            .execute_batch("DROP TABLE command_results")
+            .expect("sentinel table must drop");
+    }
+    let healed = ControlDb::open(&path).expect("control database must reopen");
+    assert!(
+        healed.schema_bootstrap_ran(),
+        "missing sentinel table must re-run the schema batch"
+    );
+    assert!(healed
+        .table_names()
+        .expect("tables must list")
+        .contains(&"command_results".to_string()));
+    drop(healed);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}

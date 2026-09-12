@@ -1,7 +1,10 @@
 use crate::tasks::{
     LifecycleState, RequiredAction, TaskErrorCode, TaskEvent, TaskKind, TaskOutcome, TaskSnapshot,
 };
-use rusqlite::{params, Connection, Error as SqliteError, ErrorCode, OptionalExtension};
+use rusqlite::{
+    params, Connection, Error as SqliteError, ErrorCode, OptionalExtension, Transaction,
+    TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +19,11 @@ pub struct CommandRecord {
     pub result_json: Option<String>,
     pub error_code: Option<String>,
     pub resulting_revision: Option<i64>,
+    /// P2-9: claim timestamps drive abandoned-claim reclamation — a claim that
+    /// stays un-completed past `ABANDONED_CLAIM_AFTER` belonged to a crashed
+    /// caller and may be re-seized by a retried request.
+    pub created_at: String,
+    pub completed_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,6 +45,33 @@ pub struct MigrationRunRecord {
 
 pub struct ControlDb {
     connection: Connection,
+    /// P2-12: whether this `open` ran the schema bootstrap batch. Healthy
+    /// databases at the current `user_version` skip it entirely instead of
+    /// re-executing every `CREATE TABLE IF NOT EXISTS` on each open.
+    schema_bootstrap_ran: bool,
+}
+
+/// P2-12: schema bootstrap runs only while `PRAGMA user_version` is below
+/// this. Bump it whenever the DDL batch grows a new (still idempotent)
+/// statement so existing databases get upgraded once on their next open.
+const CONTROL_SCHEMA_VERSION: i64 = 1;
+
+/// P2-9: a claim that stays `in-progress` (claimed but never completed) past
+/// this window belonged to a crashed or hung caller. Without reclamation the
+/// request_id would replay `COMMAND_IN_PROGRESS`/`COMMAND_RESULT_MISSING`
+/// forever. Ten minutes is far longer than any claim-holding command's real
+/// work while staying well inside a user's patience for an explicit retry.
+const ABANDONED_CLAIM_AFTER: Duration = Duration::from_secs(600);
+
+/// Age of a claim's `created_at` RFC3339 stamp. `None` when unparseable;
+/// callers treat that as reclaimable since a well-formed claim always has a
+/// valid timestamp — an undatable in-progress row would otherwise wedge the
+/// request_id exactly like a crash does. Future/skewed stamps yield ZERO
+/// (never stale).
+fn claim_age(created_at: &str) -> Option<Duration> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(created_at).ok()?;
+    let elapsed = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
+    Some(elapsed.to_std().unwrap_or(Duration::ZERO))
 }
 
 fn is_retryable_initialization_lock(error: &SqliteError) -> bool {
@@ -173,9 +208,18 @@ impl ControlDb {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| error.to_string())?;
-        let schema = r#"
+        // P2-12: per-connection pragmas still run on every open —
+        // `foreign_keys` is connection-scoped, and `journal_mode` re-asserts
+        // WAL. Both are also where "file is not a database" first surfaces on
+        // a corrupt file, which the quarantine path below relies on.
+        let preamble = r#"
                 PRAGMA journal_mode = WAL;
                 PRAGMA foreign_keys = ON;
+                "#;
+        // The DDL batch is version-gated: it only executes when
+        // `user_version` is behind CONTROL_SCHEMA_VERSION (fresh databases are
+        // 0) or the sentinel table is missing — never on a routine open.
+        let schema = r#"
                 CREATE TABLE IF NOT EXISTS task_snapshots (
                   id TEXT PRIMARY KEY NOT NULL,
                   kind TEXT NOT NULL,
@@ -249,8 +293,30 @@ impl ControlDb {
                 "#;
         let mut last_lock_error = None;
         for attempt in 0..=8 {
-            match connection.execute_batch(schema) {
-                Ok(()) => return Ok(Self { connection }),
+            let bootstrap = (|| -> Result<bool, SqliteError> {
+                connection.execute_batch(preamble)?;
+                let version: i64 =
+                    connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                // Sentinel check covers a database whose version was stamped
+                // without the full schema (interrupted bootstrap, hand edit).
+                let schema_missing: bool = connection.query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'command_results')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if version < CONTROL_SCHEMA_VERSION || schema_missing {
+                    connection.execute_batch(schema)?;
+                    return Ok(true);
+                }
+                Ok(false)
+            })();
+            match bootstrap {
+                Ok(schema_bootstrap_ran) => {
+                    return Ok(Self {
+                        connection,
+                        schema_bootstrap_ran,
+                    })
+                }
                 Err(error) if is_retryable_initialization_lock(&error) && attempt < 8 => {
                     last_lock_error = Some(error.to_string());
                     std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
@@ -271,26 +337,40 @@ impl ControlDb {
         Err(last_lock_error.unwrap_or_else(|| "Control database initialization failed".to_string()))
     }
 
+    /// P2-12: whether this `open` actually ran the schema bootstrap batch —
+    /// `false` on a routine open of an already-current database.
+    pub fn schema_bootstrap_ran(&self) -> bool {
+        self.schema_bootstrap_ran
+    }
+
+    /// P2-9/P2-10: the whole claim decision runs inside one IMMEDIATE
+    /// transaction. The write lock is taken up front (busy_timeout covers the
+    /// wait), so the insert → read → possible reclaim can never interleave
+    /// with a second claimant or trip SQLITE_BUSY_SNAPSHOT mid-upgrade the
+    /// way a DEFERRED read-then-write could.
     pub fn claim_command(
         &self,
         request_id: &str,
         command_name: &str,
         input_hash: &str,
     ) -> Result<CommandClaim, String> {
-        let inserted = self
-            .connection
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let inserted = transaction
             .execute(
                 "INSERT INTO command_results(request_id, command_name, input_hash, created_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(request_id) DO NOTHING",
-                params![request_id, command_name, input_hash, chrono::Utc::now().to_rfc3339()],
+                params![request_id, command_name, input_hash, now],
             )
             .map_err(|error| error.to_string())?;
         if inserted == 1 {
+            transaction.commit().map_err(|error| error.to_string())?;
             return Ok(CommandClaim::New);
         }
-        let record = self
-            .connection
+        let record = transaction
             .query_row(
-                "SELECT request_id, command_name, input_hash, task_id, result_json, error_code, resulting_revision FROM command_results WHERE request_id = ?1",
+                "SELECT request_id, command_name, input_hash, task_id, result_json, error_code, resulting_revision, created_at, completed_at FROM command_results WHERE request_id = ?1",
                 [request_id],
                 |row| {
                     Ok(CommandRecord {
@@ -301,17 +381,39 @@ impl ControlDb {
                         result_json: row.get(4)?,
                         error_code: row.get(5)?,
                         resulting_revision: row.get(6)?,
+                        created_at: row.get(7)?,
+                        completed_at: row.get(8)?,
                     })
                 },
             )
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "COMMAND_CLAIM_MISSING".to_string())?;
-        {
-            if record.command_name != command_name || record.input_hash != input_hash {
-                return Err("IDEMPOTENCY_KEY_REUSED".to_string());
-            }
+        if record.command_name != command_name || record.input_hash != input_hash {
+            // Rollback on drop — nothing was written. A mismatched input must
+            // not even reclaim: the id belongs to a different request.
+            return Err("IDEMPOTENCY_KEY_REUSED".to_string());
         }
+        // P2-9: an in-progress claim older than the reclamation window means
+        // the caller died between claim and complete. Re-seize the row —
+        // refreshing created_at makes THIS request the live claim — and let
+        // the retried command re-execute (command bodies are revision- or
+        // contract-checked, so a repeated run cannot double-apply).
+        let abandoned = record.completed_at.is_none()
+            && claim_age(&record.created_at)
+                .map(|age| age > ABANDONED_CLAIM_AFTER)
+                .unwrap_or(true);
+        if abandoned {
+            transaction
+                .execute(
+                    "UPDATE command_results SET created_at = ?2 WHERE request_id = ?1 AND completed_at IS NULL",
+                    params![request_id, now],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction.commit().map_err(|error| error.to_string())?;
+            return Ok(CommandClaim::New);
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
         Ok(CommandClaim::Existing(record))
     }
 
@@ -456,9 +558,16 @@ impl ControlDb {
 
     /// `&self` (not `&mut self`) so recovery paths such as
     /// `recover_interrupted_tasks` / `reap_stale_workers` can persist events
-    /// while holding an immutable handle. `unchecked_transaction` is the same
-    /// `BEGIN DEFERRED`; exclusivity is already guaranteed because no other
-    /// `&mut` use can coexist while this method runs.
+    /// while holding an immutable handle. `Transaction::new_unchecked` skips
+    /// the `&mut` compile-time nesting guard; exclusivity is already
+    /// guaranteed because no other `&mut` use can coexist while this runs.
+    ///
+    /// P2-10: BEGIN IMMEDIATE, not DEFERRED. The transaction reads the current
+    /// row then writes — under DEFERRED the write upgrade can fail with
+    /// SQLITE_BUSY_SNAPSHOT when another connection (worker pump thread,
+    /// snapshot poller, UI command) committed meanwhile, and busy_timeout
+    /// does not retry snapshot conflicts. IMMEDIATE takes the reserved lock
+    /// at BEGIN so contention degrades to an ordinary busy wait.
     pub fn persist_task_event(&self, event: &TaskEvent) -> Result<(), String> {
         if event.schema_version != 1
             || event.task_id != event.snapshot.id
@@ -471,10 +580,9 @@ impl ControlDb {
             i64::try_from(event.sequence).map_err(|_| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
         let event_revision =
             i64::try_from(event.revision).map_err(|_| "INVALID_TASK_REVISION".to_string())?;
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
         let current = transaction
             .query_row(
                 "SELECT revision, last_sequence FROM task_snapshots WHERE id = ?1",
@@ -854,11 +962,13 @@ impl ControlDb {
         Ok(reaped)
     }
 
+    /// P2-10: BEGIN IMMEDIATE — this reads every snapshot then writes intent
+    /// rows; under DEFERRED that read-then-write could die on
+    /// SQLITE_BUSY_SNAPSHOT against a concurrent worker-line commit.
     pub fn capture_cancel_discard(&self) -> Result<Vec<String>, String> {
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
         let mut statement = transaction
             .prepare("SELECT id, snapshot_json FROM task_snapshots")
             .map_err(|error| error.to_string())?;

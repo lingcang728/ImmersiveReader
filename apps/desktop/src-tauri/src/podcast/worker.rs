@@ -251,8 +251,69 @@ fn worker_fatal_line(line: &str) -> Option<String> {
     (value.get("type").and_then(Value::as_str) == Some("fatal")).then(|| line.to_string())
 }
 
+/// P2-11/P2-12: run `op` against the worker's held control.db connection
+/// (`held`, opened once per worker instead of per output line). On a write
+/// failure the possibly-poisoned connection is dropped and the op is retried
+/// once on a fresh open — a lost event leaves the task stuck Running, so
+/// silent `if let Ok` swallowing is not acceptable. Every failure is logged
+/// to stderr; the final error is returned for the caller to escalate.
+fn worker_db_call<T>(
+    task_id: &str,
+    held: &mut Option<ControlDb>,
+    op: impl Fn(&mut ControlDb) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut last_error = String::from("CONTROL_DB_UNAVAILABLE");
+    for attempt in 0..2 {
+        if held.is_none() {
+            match ControlDb::open_current() {
+                Ok(db) => *held = Some(db),
+                Err(error) => {
+                    eprintln!("podcast worker {task_id}: control.db open failed: {error}");
+                    last_error = error;
+                    continue;
+                }
+            }
+        }
+        match op(held.as_mut().expect("held connection was just opened")) {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                eprintln!(
+                    "podcast worker {task_id}: control.db write attempt {} failed: {error}",
+                    attempt + 1
+                );
+                last_error = error;
+                *held = None; // reopen on the next attempt
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// P2-11: `finish_worker_task` is the terminal event — losing it strands the
+/// task in Running until the stale-worker watchdog reaps it. Retry once on a
+/// fresh connection, and if persistence still fails say so loudly.
+fn finish_task_logged(
+    held: &mut Option<ControlDb>,
+    task_id: &str,
+    app: &AppHandle,
+    success: bool,
+    message: Option<&str>,
+) {
+    match worker_db_call(task_id, held, |control| {
+        control.finish_worker_task(task_id, success, message)
+    }) {
+        Ok(Some(event)) => emit_task(app, &event),
+        Ok(None) => {}
+        Err(error) => eprintln!(
+            "podcast worker {task_id}: terminal task event could not be persisted after retry: {error}; \
+             task stays non-terminal until the stale-worker watchdog marks it interrupted"
+        ),
+    }
+}
+
 fn apply_worker_line(
     task_id: &str,
+    db: &mut Option<ControlDb>,
     app: &AppHandle,
     stream: &str,
     line: &str,
@@ -265,14 +326,29 @@ fn apply_worker_line(
     if let Some(fatal) = worker_fatal_line(line) {
         *fatal_error = Some(fatal);
     }
-    if let Ok(mut control) = ControlDb::open_current() {
-        if let Ok(Some(event)) = control.record_worker_line(task_id, stream, line) {
-            emit_task(app, &event);
+    // P2-11: a dropped write here leaves the task Running forever — retry on
+    // a fresh connection once and log the loss instead of `if let Ok`.
+    match worker_db_call(task_id, db, |control| {
+        control.record_worker_line(task_id, stream, line)
+    }) {
+        Ok(Some(event)) => emit_task(app, &event),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("podcast worker {task_id}: worker line event lost after retry: {error}")
         }
     }
 }
 
 fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: Option<WorkerJob>) {
+    // P2-12: one control.db connection serves every line of worker output —
+    // opening per line re-ran the whole bootstrap each time. `None` degrades
+    // to a lazy open inside worker_db_call on first use.
+    let mut control_db: Option<ControlDb> = ControlDb::open_current()
+        .map_err(|error| {
+            eprintln!("podcast worker {task_id}: control.db open failed at start: {error}");
+            error
+        })
+        .ok();
     let (sender, receiver) = mpsc::channel();
     let mut child = match child_handle.lock() {
         Ok(mut slot) => match slot.take() {
@@ -312,6 +388,7 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
             Ok((stream, line)) => {
                 apply_worker_line(
                     &task_id,
+                    &mut control_db,
                     &app,
                     &stream,
                     &line,
@@ -347,6 +424,7 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
             while let Ok((stream, line)) = receiver.try_recv() {
                 apply_worker_line(
                     &task_id,
+                    &mut control_db,
                     &app,
                     &stream,
                     &line,
@@ -398,13 +476,13 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
         Ok(value) => (value.success(), resolved_error),
         Err(error) => (false, Some(error.to_string())),
     };
-    if let Ok(mut control) = ControlDb::open_current() {
-        if let Ok(Some(event)) =
-            control.finish_worker_task(&task_id, success, status_message.as_deref())
-        {
-            emit_task(&app, &event);
-        }
-    }
+    finish_task_logged(
+        &mut control_db,
+        &task_id,
+        &app,
+        success,
+        status_message.as_deref(),
+    );
     drop(job);
     release_worker_entry(&task_id);
     // P1-5: the concurrency slot is free — promote the next queued podcast
@@ -492,10 +570,10 @@ pub fn start_task(task_id: String, app: AppHandle) -> Result<(), String> {
     let (mut child, job) = match spawn_worker(&mut command) {
         Ok(value) => value,
         Err(error) => {
-            let mut control = ControlDb::open_current()?;
-            if let Ok(Some(event)) = control.finish_worker_task(&task_id, false, Some(&error)) {
-                emit_task(&app, &event);
-            }
+            // P2-11: persist the terminal failure with retry + logging — a
+            // lost event here strands the task in Starting forever.
+            let mut db = None;
+            finish_task_logged(&mut db, &task_id, &app, false, Some(&error));
             return Err(error);
         }
     };
@@ -506,13 +584,8 @@ pub fn start_task(task_id: String, app: AppHandle) -> Result<(), String> {
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            if let Ok(mut control) = ControlDb::open_current() {
-                if let Ok(Some(event)) =
-                    control.finish_worker_task(&task_id, false, Some(&error))
-                {
-                    emit_task(&app, &event);
-                }
-            }
+            let mut db = None;
+            finish_task_logged(&mut db, &task_id, &app, false, Some(&error));
             return Err(error);
         }
     };
