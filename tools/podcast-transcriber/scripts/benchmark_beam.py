@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -23,31 +24,16 @@ def load_config() -> dict:
     return json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig"))
 
 
-def load_model(asr: dict):
+def load_model(config: dict):
+    """Load the ASR model via the managed path (MODELS_DIR + resolve_model_reference)."""
     import transcribe_podcasts as tp
-    from faster_whisper import WhisperModel
 
-    tp.configure_nvidia_dll_paths()
-
-    model_path = str(asr.get("model") or "large-v3-turbo")
-    attempts = [("cuda", c) for c in asr.get("compute_type_preference") or ["int8_float16", "float16", "int8"]]
-    attempts.append(("cpu", "int8"))
-    last_exc: Exception | None = None
-    for device, compute_type in attempts:
-        try:
-            model = WhisperModel(
-                model_path,
-                device=device,
-                compute_type=compute_type,
-                download_root=str(ROOT / "models"),
-                cpu_threads=int(asr.get("cpu_threads") or 4),
-            )
-            print(f"模型加载成功: device={device}, compute_type={compute_type}")
-            return model
-        except Exception as exc:  # noqa: PERF203
-            last_exc = exc
-            print(f"加载失败 ({device}/{compute_type}): {exc}")
-    raise RuntimeError(f"无法加载 Whisper 模型: {last_exc}")
+    logger = logging.getLogger("benchmark-beam")
+    model, runtime, failures = tp.load_whisper_model(config, logger)
+    print(f"模型加载成功: {runtime}")
+    for failure in failures:
+        print(f"加载尝试失败: {failure}")
+    return model
 
 
 def transcribe_with_beam(model, audio: Path, beam: int, limit_seconds: float) -> tuple[float, str, int]:
@@ -81,7 +67,7 @@ def main() -> int:
     limit_seconds = args.minutes * 60
 
     config = load_config()
-    model = load_model(config.get("asr") or {})
+    model = load_model(config)
 
     results = []
     for beam in beams:

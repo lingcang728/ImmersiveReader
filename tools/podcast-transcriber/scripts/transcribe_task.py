@@ -23,6 +23,8 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+from podcast_transcriber.common import strip_host_paths  # noqa: E402
+
 TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 COMPATIBILITY_FIELDS = (
     "inputSha256",
@@ -64,8 +66,26 @@ _EXIT_FATAL = {
 }
 
 
-def _exit_fatal_payload(code: int, summary: dict[str, Any] | None) -> dict[str, Any]:
-    """Build the terminal fatal NDJSON for a non-zero pipeline exit code."""
+# Error codes (MODEL_INCOMPATIBLE, PATH_OUTSIDE_MANAGED_ROOT, …) must be
+# stripped before keyword-matching a log line to a stage: otherwise a fatal
+# payload or error line containing e.g. "MODEL_INCOMPATIBLE" hits the
+# "model" needle and the task's stage is mistranslated to load_model
+# (P3-27). The stage whitelist below only sees prose after this scrub.
+_ERROR_CODE_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+
+
+def _stage_haystack(message: str) -> str:
+    """Return ``message`` lowercased with SCREAMING error codes removed."""
+    return _ERROR_CODE_RE.sub(" ", message).lower()
+
+
+def _exit_fatal_payload(code: int, summary: dict[str, Any] | None, stage: str | None = None) -> dict[str, Any]:
+    """Build the terminal fatal NDJSON for a non-zero pipeline exit code.
+
+    ``stage`` echoes the last reported pipeline stage so the host's JSON
+    stage branch wins over its text heuristics (a bare fatal line like
+    ``MODEL_INCOMPATIBLE`` would otherwise parse as ``load_model``).
+    """
     error_code, base = _EXIT_FATAL.get(code, ("TRANSCRIPTION_FAILED", f"转写流水线退出码 {code}"))
     details: list[str] = []
     for item in (summary or {}).get("results", []):
@@ -76,7 +96,13 @@ def _exit_fatal_payload(code: int, summary: dict[str, Any] | None) -> dict[str, 
             details.append(detail)
     details.extend(str(failure) for failure in (summary or {}).get("failures", [])[-3:])
     message = base if not details else f"{base}；" + "；".join(details)
-    return {"type": "fatal", "errorCode": error_code, "message": message[:480]}
+    # The fatal line is the host's last_error: basenames only, never
+    # absolute host paths out of exception text (P3-27).
+    message = strip_host_paths(message)
+    payload: dict[str, Any] = {"type": "fatal", "errorCode": error_code, "message": message[:480]}
+    if stage:
+        payload["stage"] = stage
+    return payload
 
 
 def _managed_root(environment: dict[str, str], name: str) -> Path:
@@ -200,13 +226,25 @@ def main() -> int:
         spec = load_task_spec(args.task_spec)
     except (OSError, ValueError, json.JSONDecodeError, TaskSpecError) as error:
         code = error.code if isinstance(error, TaskSpecError) else "INVALID_TASK_SPEC"
-        payload: dict[str, Any] = {"type": "fatal", "errorCode": code, "message": str(error)}
+        payload: dict[str, Any] = {
+            "type": "fatal",
+            "errorCode": code,
+            "message": strip_host_paths(str(error)),
+            # The spec-validation failure happens during the prepare band;
+            # pin it so host text heuristics cannot remap e.g.
+            # MODEL_INCOMPATIBLE to load_model (P3-27).
+            "stage": "prepare",
+        }
         required_action = getattr(error, "required_action", None)
         if required_action:
             payload["requiredAction"] = required_action
         print(json.dumps(payload), file=sys.stderr, flush=True)
         return 2
     os.environ["PODCAST_TRANSCRIBER_RUN_ID"] = spec["taskId"]
+    # Pin the pipeline to the TaskSpec-validated input instead of scanning
+    # the whole inbox (P3-27): resolvedInputPath was verified (exists,
+    # size, SHA-256) above and is the only file this task may process.
+    os.environ["PODCAST_TRANSCRIBER_INPUT_FILE"] = spec["resolvedInputPath"]
     import transcribe_podcasts
     from deepseek_pricing import PodcastBudgetExceededError, PodcastUpstreamError, classify_upstream_error
 
@@ -235,6 +273,27 @@ def main() -> int:
     # Explicit "restart from scratch" paths pass --force via a dedicated entrypoint.
     from podcast_transcriber.progress_emit import get_emitter, report_stage_progress  # noqa: E402
 
+    # Last stage surfaced to the host — echoed back on the fatal line so the
+    # host's JSON stage branch wins over its text heuristics (P3-27).
+    last_stage: dict[str, str] = {"stage": "prepare"}
+
+    _emitter = get_emitter()
+    _emitter_emit = _emitter.emit
+    _emitter_heartbeat = _emitter.heartbeat
+
+    def _tracked_emit(**kwargs: Any) -> None:
+        if kwargs.get("stage"):
+            last_stage["stage"] = str(kwargs["stage"])
+        _emitter_emit(**kwargs)
+
+    def _tracked_heartbeat(stage: str, message: str | None = None) -> None:
+        if stage:
+            last_stage["stage"] = str(stage)
+        _emitter_heartbeat(stage, message)
+
+    _emitter.emit = _tracked_emit  # type: ignore[method-assign]
+    _emitter.heartbeat = _tracked_heartbeat  # type: ignore[method-assign]
+
     def emit(payload: dict[str, Any]) -> None:
         """Structured NDJSON for the desktop worker consumer (no secrets/full paths)."""
         safe = {
@@ -254,6 +313,8 @@ def main() -> int:
                 "requiredAction",
             }
         }
+        if safe.get("stage"):
+            last_stage["stage"] = str(safe["stage"])
         print(json.dumps(safe, ensure_ascii=False), flush=True)
 
     # Unmeasurable prepare stage: heartbeat only — do not invent a percent.
@@ -264,32 +325,39 @@ def main() -> int:
     def _bridge_units(stage: str, done: int, total: int, unit: str) -> None:
         report_stage_progress(stage, completed=done, total=total, unit=unit)
 
-    os.environ["PODCAST_PROGRESS_BRIDGE"] = "1"
-
     # Install a lightweight logger hook so stage lines also surface as NDJSON.
     # Prefer structured unit reports from the bridge; log hook is fallback only.
     class _NdjsonHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:  # noqa: A003
             message = record.getMessage()
+            stripped = message.strip()
+            # A log record that is itself a JSON document (structured error
+            # dumps, API bodies) is not prose: keyword-matching it could map
+            # embedded tokens ("model", "translate") to a bogus stage.
+            if stripped.startswith("{"):
+                return
             stage = "working"
-            lower = message.lower()
+            lower = _stage_haystack(message)
             if "polish" in lower:
                 stage = "polishing"
             elif "chunk" in lower:
                 stage = "chunking"
             elif "transcrib" in lower:
-                stage = "transcribe"
+                stage = "transcribing"
             elif "translat" in lower:
-                stage = "translate"
+                stage = "translating"
             elif "normal" in lower:
-                stage = "normalize"
+                # Canonical stage name — Rust maps "normalizing"; the bare
+                # "normalize" used to fall into the catch-all band (P3-27).
+                stage = "normalizing"
             elif "model" in lower:
                 stage = "load_model"
             elif "publish" in lower or "output" in lower:
-                stage = "write_output"
+                stage = "writing_output"
             # Do not invent percent from log tokens; only stage/heartbeat.
+            # Host-visible: scrub absolute paths from the log line (P3-27).
             try:
-                get_emitter().heartbeat(stage, message[:180])
+                get_emitter().heartbeat(stage, strip_host_paths(message[:180]))
             except Exception:
                 pass
 
@@ -321,7 +389,7 @@ def main() -> int:
             # line after the pipeline has gone quiet so it is not overwritten.
             summary = getattr(transcribe_podcasts, "LAST_RUN_SUMMARY", None)
             print(
-                json.dumps(_exit_fatal_payload(code, summary), ensure_ascii=False),
+                json.dumps(_exit_fatal_payload(code, summary, stage=last_stage["stage"]), ensure_ascii=False),
                 file=sys.stderr,
                 flush=True,
             )
@@ -337,7 +405,8 @@ def main() -> int:
             payload = {
                 "type": "fatal",
                 "errorCode": getattr(classified, "code", "UNKNOWN"),
-                "message": str(classified),
+                "message": strip_host_paths(str(classified)),
+                "stage": last_stage["stage"],
             }
             retry_after = getattr(classified, "retry_after_seconds", None)
             if retry_after is not None:
@@ -346,7 +415,12 @@ def main() -> int:
             if required_action:
                 payload["requiredAction"] = required_action
         else:
-            payload = {"type": "fatal", "errorCode": "UNKNOWN", "message": str(error)}
+            payload = {
+                "type": "fatal",
+                "errorCode": "UNKNOWN",
+                "message": strip_host_paths(str(error)),
+                "stage": last_stage["stage"],
+            }
         print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
         return 1
 

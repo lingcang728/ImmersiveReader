@@ -17,9 +17,29 @@ from podcast_transcriber.common import (
     iso_now,
     load_json,
     save_json,
+    strip_host_paths,
 )
 
 MANIFEST_LOCK = threading.Lock()
+
+
+def _write_state_best_effort(state_path: Path, state: dict[str, Any]) -> bool:
+    """Persist task state, treating an exhausted write as non-fatal.
+
+    State JSON is observability data: an OSError bubbling out of here used
+    to escape into the translation retry machinery and the per-file error
+    handlers, turning a disk/locking hiccup into a fake pipeline failure.
+    ``save_json`` already retries internally; when it still fails we log a
+    distinguishable warning and let the task proceed.
+    """
+    try:
+        save_json(state_path, state)
+        return True
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Task state write failed for %s (continuing): %s", state_path.name, exc
+        )
+        return False
 
 
 def append_lifecycle_log(event, task_id=None, audio=None, old_status=None, new_status=None, writer=None, worker_pid=None, run_id=None, reason=None):
@@ -76,8 +96,7 @@ def save_task_state_safe(state_path: Path, state: dict[str, Any], our_run_id: st
             reason="save_task_state_safe blocked by terminal state on disk",
         )
         return False
-    save_json(state_path, state)
-    return True
+    return _write_state_best_effort(state_path, state)
 
 
 def _state_is_owned_terminal_on_disk(state_path: Path, our_run_id: str) -> bool:
@@ -141,8 +160,10 @@ def update_task_state(
     if total_chunks is not None:
         state["total_chunks"] = int(total_chunks)
     if error_message is not None:
-        state["error_message"] = error_message
-        state["error"] = error_message
+        # Host-visible field: never leak absolute host paths (P3-27).
+        safe_message = strip_host_paths(error_message)
+        state["error_message"] = safe_message
+        state["error"] = safe_message
     if error_type is not None:
         state["error_type"] = error_type
     if log_path is not None:
@@ -158,7 +179,7 @@ def update_task_state(
     state["last_update_at"] = stamp
     if heartbeat and (status is None or status not in TERMINAL_TASK_STATUSES):
         state["last_heartbeat_at"] = stamp
-    save_json(state_path, state)
+    _write_state_best_effort(state_path, state)
 
 
 def touch_task_heartbeat(
@@ -192,7 +213,7 @@ def touch_task_heartbeat(
     state["updated_at"] = stamp
     state["last_update_at"] = stamp
     state["last_heartbeat_at"] = stamp
-    save_json(state_path, state)
+    _write_state_best_effort(state_path, state)
 
 
 class TaskHeartbeat:
@@ -245,7 +266,9 @@ def mark_task_failed(
 ) -> None:
     if logger:
         logger.exception("Task failed at stage %s", stage or state.get("stage") or "unknown")
-    state["traceback"] = traceback.format_exc()
+    # Tracebacks embed absolute host paths; the state file is host-visible,
+    # so persist a scrubbed copy (P3-27). Full detail stays in the file log.
+    state["traceback"] = strip_host_paths(traceback.format_exc())
     update_task_state(
         state_path,
         state,

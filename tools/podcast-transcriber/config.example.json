@@ -30,6 +30,7 @@
     "beam_size": 5,
     "batch_size": 4,
     "chunk_seconds": 1800,
+    "chunk_overlap_seconds": 15,
     "use_batched_inference": true,
     "cpu_threads": 4,
     "num_workers": 5
@@ -40,13 +41,8 @@
     "max_parallel_postprocess_files": 3,
     "max_deepseek_api_requests": 6
   },
-  "watchdog": {
-    "stall_seconds": 120,
-    "transcription_stall_seconds": 300
-  },
   "translation": {
     "english_required": true,
-    "chinese_skip": true,
     "backend": "deepseek",
     "ollama_url": "http://127.0.0.1:11434/api/generate",
     "auto_start_ollama": true,
@@ -66,7 +62,6 @@
     "max_tokens": 8192,
     "max_batch_workers": 6,
     "num_thread": 4,
-    "layout": "zh_then_en",
     "strict_output": true,
     "base_url": "https://api.deepseek.com",
     "api_key_env": "DEEPSEEK_API_KEY",
@@ -77,15 +72,7 @@
       "output": 0.28
     }
   },
-  "diarization": {
-    "enabled": true,
-    "fallback_roles": ["采访者", "受访者"]
-  },
   "markdown": {
-    "one_audio_one_md": true,
-    "include_metadata": true,
-    "include_english_original_for_english_audio": true,
-    "speaker_labels_enabled": false,
     "speaker_labels": {
       "host": "采访者",
       "guest": "受访者"
@@ -93,8 +80,6 @@
     "merge_same_speaker": true,
     "max_paragraph_chars": 700,
     "zh_max_paragraph_chars": 420,
-    "zh_merge_chars": 420,
-    "include_timestamps": false,
     "sponsor_mode": "section",
     "llm_polish": {
       "enabled": true,
@@ -127,11 +112,7 @@
   "always_reprocess_inputs": false,
   "launcher": {
     "open_folder_after_run": true,
-    "open_folder": "output",
-    "pause_on_exit": "interactive"
+    "open_folder": "output"
   },
-  "ffmpeg_threads": 2,
-  "omp_num_threads": 4,
-  "process_priority": "BelowNormal",
-  "process_affinity_mask": null
+  "ffmpeg_threads": 2
 }

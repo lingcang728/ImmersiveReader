@@ -46,30 +46,19 @@ def get_deepseek_semaphore(config: dict[str, Any]) -> Any:
     if _EXTERNAL_DEEPSEEK_SEMAPHORE is not None:
         return _EXTERNAL_DEEPSEEK_SEMAPHORE
     with _LOCAL_DEEPSEEK_SEMAPHORE_LOCK:
-        # 兜底：如果外部没有注入，在此创建
-        # 尝试寻找 config 中可能的位置
-        pipeline_cfg = config.get("pipeline") or config
-        limit = pipeline_cfg.get("max_deepseek_api_requests", 4)
-        try:
-            limit = max(1, min(8, int(limit)))
-        except (TypeError, ValueError):
-            limit = 4
-        _EXTERNAL_DEEPSEEK_SEMAPHORE = threading.Semaphore(limit)
+        # 兜底：如果外部没有注入，复用规范客户端的进程级限速器
+        _EXTERNAL_DEEPSEEK_SEMAPHORE = deepseek_api_semaphore(config)
         return _EXTERNAL_DEEPSEEK_SEMAPHORE
 
 from deepseek_pricing import (  # noqa: E402
     DEEPSEEK_DEFAULT_MODEL,
-    DEEPSEEK_MODEL_PRICING_PER_MILLION,
     PodcastBudgetExceededError,
     PromptBudgetError,
-    classify_upstream_error,
-    deepseek_chat_completions_url,
-    deepseek_thinking_config,
-    is_retryable_http_error,
     normalize_deepseek_model,
     reserve_budget,
     settle_budget,
 )
+from podcast_transcriber import deepseek as _deepseek_client  # noqa: E402
 from podcast_transcriber.common import (  # noqa: E402
     CONFIG_PATH,
     OUT_FINAL_MARKDOWN,
@@ -77,12 +66,20 @@ from podcast_transcriber.common import (  # noqa: E402
     STATE_DIR,
     WORK,
 )
+from podcast_transcriber.deepseek import (  # noqa: E402
+    DeepSeekLengthTruncatedError as DeepSeekLengthTruncatedError,
+)
+from podcast_transcriber.deepseek import (  # noqa: E402
+    deepseek_api_semaphore,
+    deepseek_prompt_limit,
+    effective_provider_name,
+    estimate_deepseek_cost,
+    estimate_text_tokens,
+)
 
 # Managed task cache final dir (Cache/.../Tasks/{id}/output). Never write under Data root.
 OUT_INTERVIEW = WORK / "internal" / "markdown_interview"
 DEEPSEEK_POLISH_USAGE_PATH = STATE_DIR / "deepseek_polish_usage.json"
-DEEPSEEK_PROMPT_TOKEN_LIMIT = 200_000
-DEEPSEEK_PROMPT_HARD_LIMIT = 220_000
 
 
 COMMON_REPLACEMENTS = {
@@ -579,62 +576,6 @@ def load_config() -> dict[str, Any]:
     return {}
 
 
-def provider_name(config: dict[str, Any]) -> str:
-    return str(config.get("backend", config.get("provider", "ollama"))).strip().lower()
-
-
-def has_api_entry(config: dict[str, Any], default_env: str = "DEEPSEEK_API_KEY") -> bool:
-    if not str(config.get("base_url") or "").strip():
-        return False
-    env_name = str(config.get("api_key_env") or default_env).strip()
-    return bool(env_name or str(config.get("api_key") or "").strip())
-
-
-def effective_provider_name(config: dict[str, Any]) -> str:
-    provider = provider_name(config)
-    if provider == "deepseek" and not has_api_entry(config):
-        raise RuntimeError("DeepSeek API backend is selected, but no base_url/API key entry is configured.")
-    return provider
-
-
-def resolve_api_key(config: dict[str, Any], default_env: str) -> str:
-    env_name = str(config.get("api_key_env") or default_env).strip()
-    if env_name and os.environ.get(env_name):
-        return str(os.environ[env_name]).strip()
-    return str(config.get("api_key") or "").strip()
-
-
-def estimate_text_tokens(text: str) -> int:
-    if not text:
-        return 0
-    return max(1, (len(text.encode("utf-8")) + 2) // 3)
-
-
-def deepseek_prompt_limit(config: dict[str, Any], hard: bool = False) -> int:
-    default = DEEPSEEK_PROMPT_HARD_LIMIT if hard else DEEPSEEK_PROMPT_TOKEN_LIMIT
-    key = "hard_prompt_token_limit" if hard else "prompt_token_limit"
-    try:
-        return max(1_000, int(config.get(key, default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def estimate_deepseek_cost(usage: dict[str, Any], config: dict[str, Any]) -> float:
-    model = normalize_deepseek_model(config.get("model"))
-    pricing = dict(DEEPSEEK_MODEL_PRICING_PER_MILLION.get(model, DEEPSEEK_MODEL_PRICING_PER_MILLION[DEEPSEEK_DEFAULT_MODEL]))
-    pricing.update(config.get("pricing_per_million_tokens") or {})
-    prompt_tokens = int(usage.get("prompt_tokens") or 0)
-    completion_tokens = int(usage.get("completion_tokens") or 0)
-    cache_hit = int(usage.get("prompt_cache_hit_tokens") or usage.get("cache_hit_tokens") or 0)
-    cache_miss = int(usage.get("prompt_cache_miss_tokens") or 0)
-    uncached_input = cache_miss if cache_miss else max(0, prompt_tokens - cache_hit)
-    return (
-        cache_hit * float(pricing.get("cache_hit_input", pricing["input"]))
-        + uncached_input * float(pricing["input"])
-        + completion_tokens * float(pricing["output"])
-    ) / 1_000_000
-
-
 _POLISH_USAGE_LOCK = threading.Lock()
 DEEPSEEK_POLISH_USAGE_LOCK_PATH = STATE_DIR / "deepseek_polish_usage.lock"
 
@@ -690,126 +631,10 @@ def record_deepseek_polish_usage(model: str, usage: dict[str, Any], elapsed_seco
             save_json(DEEPSEEK_POLISH_USAGE_PATH, data)
 
 
-class DeepSeekLengthTruncatedError(RuntimeError):
-    """API 返回 finish_reason=length，输出被截断"""
-    pass
-
-
-def _dynamic_throttle_deepseek_polish(config: dict[str, Any]) -> None:
-    """频繁 429 时临时降低并发到 1"""
-    sem = get_deepseek_semaphore(config)
-    if hasattr(sem, "set_limit"):
-        sem.set_limit(1)
-    else:
-        with _LOCAL_DEEPSEEK_SEMAPHORE_LOCK:
-            global _EXTERNAL_DEEPSEEK_SEMAPHORE
-            _EXTERNAL_DEEPSEEK_SEMAPHORE = threading.Semaphore(1)
-    logging.getLogger(__name__).warning("DeepSeek API concurrency throttled to 1 due to repeated 429s in polish stage")
-
-
 def deepseek_chat_completion(prompt: str, config: dict[str, Any], response_format: Any | None = None) -> tuple[str, dict[str, Any], float]:
-    api_key = resolve_api_key(config, "DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("DeepSeek API key is missing. Set DEEPSEEK_API_KEY or save it in config.")
-    estimated = estimate_text_tokens(prompt)
-    limit = deepseek_prompt_limit(config, hard=True)
-    if estimated > limit:
-        raise PromptBudgetError(f"DeepSeek prompt estimated at {estimated} tokens, above safety hard limit {limit}.")
-    
-    sem = get_deepseek_semaphore(config)
-    sem.acquire()
-    try:
-        model = normalize_deepseek_model(config.get("model"))
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": float(config.get("temperature", 0.1)),
-            "stream": False,
-            "thinking": deepseek_thinking_config(config),
-        }
-        max_tokens = config.get("max_tokens", config.get("num_predict"))
-        if max_tokens is not None:
-            payload["max_tokens"] = int(max_tokens)
-        if response_format is not None:
-            payload["response_format"] = {"type": "json_object"}
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        timeout = int(config.get("timeout_seconds", 300))
-        max_retries = 3
-        last_exc: BaseException | None = None
-        for attempt in range(max_retries + 1):
-            req = urllib.request.Request(
-                deepseek_chat_completions_url(config.get("base_url")),
-                data=data,
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-                method="POST",
-            )
-            started = time.perf_counter()
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    body = json.loads(response.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                last_exc = exc
-                classified = classify_upstream_error(exc, "DeepSeek API")
-                if classified and classified.code == "RATE_LIMITED":
-                    delay = float(min(120, max(1, classified.retry_after_seconds or (2 ** attempt + 1))))
-                    if attempt >= 2:
-                        _dynamic_throttle_deepseek_polish(config)
-                    
-                    logging.getLogger(__name__).warning(
-                        "DeepSeek API rate limit 429 in polish, waiting %.1fs (attempt %s/%s)",
-                        delay, attempt + 1, max_retries
-                    )
-                    if attempt < max_retries:
-                        time.sleep(delay)
-                        continue
-                    raise classified from exc
-                if is_retryable_http_error(exc):
-                    if attempt < max_retries:
-                        delay = 2 ** attempt
-                        logging.getLogger(__name__).warning(
-                            "DeepSeek API retryable error %s, retrying (%s/%s) in %ss",
-                            exc.code, attempt + 1, max_retries, delay,
-                        )
-                        time.sleep(delay)
-                        continue
-                if classified:
-                    raise classified from exc
-                detail = exc.read().decode("utf-8", errors="replace")[:500]
-                raise RuntimeError(f"DeepSeek API error {exc.code}: {detail}") from exc
-            except urllib.error.URLError as exc:
-                last_exc = exc
-                if is_retryable_http_error(exc):
-                    if attempt < max_retries:
-                        delay = 2 ** attempt
-                        logging.getLogger(__name__).warning(
-                            "DeepSeek API network error, retrying (%s/%s) in %ss: %s",
-                            attempt + 1, max_retries, delay, exc.reason,
-                        )
-                        time.sleep(delay)
-                        continue
-                classified = classify_upstream_error(exc, "DeepSeek API")
-                if classified:
-                    raise classified from exc
-                raise RuntimeError(f"DeepSeek API network error: {exc.reason}") from exc
-
-            elapsed = time.perf_counter() - started
-            choices = body.get("choices") or []
-            if not choices:
-                raise RuntimeError("DeepSeek API returned no choices.")
-            
-            finish_reason = choices[0].get("finish_reason", "")
-            if finish_reason == "length":
-                raise DeepSeekLengthTruncatedError(
-                    f"DeepSeek output truncated in polish (finish_reason=length), "
-                    f"prompt_tokens={body.get('usage', {}).get('prompt_tokens', '?')}, "
-                    f"completion_tokens={body.get('usage', {}).get('completion_tokens', '?')}"
-                )
-            
-            return str((choices[0].get("message") or {}).get("content") or "").strip(), dict(body.get("usage") or {}), elapsed
-
-        raise RuntimeError(f"DeepSeek API failed after {max_retries + 1} attempts") from last_exc
-    finally:
-        sem.release()
+    """Delegate to the canonical client; keeps this module's model normalization."""
+    normalized = {**config, "model": normalize_deepseek_model(config.get("model"))}
+    return _deepseek_client.deepseek_chat_completion(prompt, normalized, response_format)
 
 
 def format_hms(seconds: float | int | None) -> str:

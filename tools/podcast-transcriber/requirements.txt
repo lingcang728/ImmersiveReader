@@ -1,7 +1,5 @@
 faster-whisper==1.2.1
 av==17.0.1
-soundfile==0.13.1
-pywebview==5.4
 
 # Windows GPU runtime used by ctranslate2/faster-whisper.
 # CPU-only users can remove these four packages before installing.

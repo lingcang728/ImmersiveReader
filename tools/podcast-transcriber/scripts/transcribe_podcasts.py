@@ -85,6 +85,7 @@ from podcast_transcriber.common import (  # noqa: E402, F401
     now_stamp,
     resolve_model_reference,
     save_json,
+    strip_host_paths,
 )
 from podcast_transcriber.deepseek import (  # noqa: E402, F401
     DEEPSEEK_API_CONFIG_LIMIT,
@@ -143,6 +144,12 @@ TRANSLATION_SEMAPHORE_LOCK = threading.Lock()
 TRANSLATION_SEMAPHORES: dict[int, threading.Semaphore] = {}
 OLLAMA_PROCESS: subprocess.Popen[Any] | None = None
 RUN_LOCK_ACQUIRED = False
+# P3-27: once a CUDA inference failure forces a CPU fallback, later (re)loads
+# in this process must not retry CUDA, and the one CPU model is reused by
+# every file instead of paying another ~1.5GB load per failing file.
+_FORCE_CPU_DEVICE = False
+_CPU_FALLBACK_BUNDLE: dict[str, Any] | None = None
+_CPU_FALLBACK_LOCK = threading.Lock()
 # Compact machine-readable copy of the last write_run_summary call, kept so
 # transcribe_task.py can build a structured fatal line after main() returns
 # non-zero (P1-28). Populated on every terminal path that writes a summary.
@@ -183,6 +190,19 @@ def transcribe_lock_yield_seconds(config: dict[str, Any]) -> float:
         return max(0.0, min(3.0, float(value)))
     except (TypeError, ValueError):
         return 0.35
+
+
+def chunk_overlap_seconds(config: dict[str, Any]) -> float:
+    """Audio overlap each chunk keeps past its logical boundary (P3-27).
+
+    Sentences spanning a split point are captured complete by the chunk owning
+    their start; 15s comfortably covers a sentence. 0 disables overlap.
+    """
+    value = asr_config(config).get("chunk_overlap_seconds", 15)
+    try:
+        return max(0.0, min(120.0, float(value)))
+    except (TypeError, ValueError):
+        return 15.0
 
 
 def translation_semaphore(config: dict[str, Any]) -> threading.Semaphore:
@@ -322,9 +342,50 @@ def cleanup_work_artifacts(logger: logging.Logger | None = None, retention_secon
     ensure_dirs()
 
 
+def keep_task_work_on_failure() -> bool:
+    """Debug escape hatch: PODCAST_TRANSCRIBER_KEEP_WORK=1 keeps all artifacts."""
+    return os.environ.get("PODCAST_TRANSCRIBER_KEEP_WORK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def cleanup_task_work_artifacts(task_id: str, safe_stem: str, logger: logging.Logger | None = None) -> None:
+    """Delete this task's normalized-audio + chunk dirs after terminal success.
+
+    The normalized WAV plus the per-chunk WAVs roughly double the input size;
+    the global ``cleanup_work_artifacts`` only reclaims them after ~24h while
+    disk pressure warns below 1GB (P3-27). Once a task reached a terminal
+    non-failed state the artifacts are dead weight — state JSON and logs are
+    durable and never touched here. Failure artifacts are kept for debugging;
+    ``PODCAST_TRANSCRIBER_KEEP_WORK=1`` disables cleanup entirely.
+    """
+    if keep_task_work_on_failure():
+        return
+    for directory in (WORK / safe_stem, CHUNKS_DIR / task_id):
+        try:
+            resolved = directory.resolve()
+            # Guard: only ever delete inside the managed work roots.
+            if WORK.resolve() not in resolved.parents:
+                continue
+            if resolved.is_dir():
+                shutil.rmtree(resolved, ignore_errors=False)
+                if logger:
+                    logger.info("Cleaned task work artifacts: %s", resolved.name)
+        except OSError as exc:
+            if logger:
+                logger.warning("Could not clean task work artifacts for %s: %s", safe_stem, exc)
+
+
 def acquire_run_lock(logger: logging.Logger | None = None) -> bool:
     global RUN_LOCK_ACQUIRED
-    payload = json.dumps({"pid": os.getpid(), "started_at": now_stamp()}, ensure_ascii=False)
+    payload = json.dumps(
+        {
+            "pid": os.getpid(),
+            "started_at": now_stamp(),
+            # Process identity for the stale-lock check: PIDs recycle, so the
+            # lock also pins our creation time (P3-27).
+            "created": _process_creation_time(os.getpid()),
+        },
+        ensure_ascii=False,
+    )
     try:
         fd = os.open(str(RUN_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -335,18 +396,57 @@ def acquire_run_lock(logger: logging.Logger | None = None) -> bool:
         try:
             existing = load_json(RUN_LOCK_PATH, {})
             existing_pid = int(existing.get("pid") or 0) if isinstance(existing, dict) else 0
+            existing_created = existing.get("created") if isinstance(existing, dict) else None
             age = time.time() - RUN_LOCK_PATH.stat().st_mtime
-            if (existing_pid and not process_is_running(existing_pid)) or age > 12 * 3600:
+            if (
+                existing_pid and not process_is_running(existing_pid, expected_created=existing_created)
+            ) or age > 12 * 3600:
                 RUN_LOCK_PATH.unlink()
                 return acquire_run_lock(logger)
         except OSError:
             pass
         if logger:
-            logger.error("Another PodcastTranscriber run appears active: %s", RUN_LOCK_PATH)
+            logger.error("Another PodcastTranscriber run appears active: %s", RUN_LOCK_PATH.name)
         return False
 
 
-def process_is_running(pid: int) -> bool:
+def _process_creation_time(pid: int) -> int | None:
+    """Windows process creation time (FILETIME ticks) — PID-recycle identity.
+
+    Returns ``None`` when it cannot be determined (non-Windows, dead pid,
+    access denied); callers must then fall back to the pid-only check.
+    """
+    if sys.platform != "win32" or pid <= 0:
+        return None
+    try:
+        import ctypes  # noqa: E402
+
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            creation = ctypes.c_ulonglong()
+            exit_time = ctypes.c_ulonglong()
+            kernel_time = ctypes.c_ulonglong()
+            user_time = ctypes.c_ulonglong()
+            # FILETIME is two DWORDs; a c_ulonglong out-param holds it whole.
+            ok = kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            )
+            return int(creation.value) if ok else None
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
+def process_is_running(pid: int, expected_created: Any = None) -> bool:
     if pid <= 0:
         return False
     if sys.platform == "win32":
@@ -362,9 +462,23 @@ def process_is_running(pid: int) -> bool:
                 kernel32.CloseHandle(handle)
                 # STILL_ACTIVE (259) means the process is still running.
                 # Any other exit code means the process has already terminated.
-                return exit_code.value == 259
-            kernel32.CloseHandle(handle)
-            return False
+                if exit_code.value != 259:
+                    return False
+            else:
+                kernel32.CloseHandle(handle)
+                return False
+            # The pid answered as alive — but a recycled pid names a stranger.
+            # When the lock recorded the original process' creation time,
+            # compare identities before trusting this answer (P3-27).
+            if expected_created is not None:
+                try:
+                    expected_value = int(expected_created)
+                except (TypeError, ValueError):
+                    expected_value = 0
+                actual = _process_creation_time(pid)
+                if expected_value and actual is not None and actual != expected_value:
+                    return False
+            return True
         except Exception:
             return False
     try:
@@ -471,9 +585,12 @@ def validate_chunks_metadata(
     if actual_count is not None and len(chunk_files) != actual_count:
         logger.info("Chunk count mismatch (%s vs %s); will regenerate chunks.", len(chunk_files), actual_count)
         return None
+    if len(plan.chunks) != len(chunk_files):
+        logger.info("Chunk plan count does not match files; will regenerate chunks.")
+        return None
 
-    total_chunk_duration = 0.0
-    for i, chunk_path in enumerate(chunk_files):
+    total_logical_duration = 0.0
+    for i, (chunk_path, spec) in enumerate(zip(chunk_files, plan.chunks, strict=True)):
         try:
             dur = probe_duration(chunk_path, ffprobe, logger)
         except Exception:
@@ -482,22 +599,24 @@ def validate_chunks_metadata(
         if dur is None or dur <= 0:
             logger.warning("Chunk %s has invalid duration; will regenerate chunks.", chunk_path.name)
             return None
-        total_chunk_duration += dur
+        # The wav physically covers the logical range plus optional overlap pad.
+        expected_audio = spec.resolved_audio_end() - spec.resolved_audio_start()
+        if abs(dur - expected_audio) > max(1.5, expected_audio * 0.02):
+            logger.info("Chunk %s duration %.2f off plan audio span %.2f; will regenerate chunks.", chunk_path.name, dur, expected_audio)
+            return None
+        total_logical_duration += spec.source_end - spec.source_start
         if i < len(chunk_files) - 1 and dur < chunk_seconds * 0.5:
             logger.info("Non-last chunk %s unexpectedly short (%ss); will regenerate chunks.", chunk_path.name, dur)
             return None
 
     source_duration = probe_duration(source, ffprobe, logger)
     if source_duration and source_duration > 0:
-        ratio = total_chunk_duration / source_duration
+        ratio = total_logical_duration / source_duration
         if ratio < 0.95 or ratio > 1.05:
             logger.info("Total chunk duration ratio %.2f outside tolerance; will regenerate chunks.", ratio)
             return None
 
     logger.info("Chunk metadata validated; reusing existing chunks.")
-    if len(plan.chunks) != len(chunk_files):
-        logger.info("Chunk plan count does not match files; will regenerate chunks.")
-        return None
     if any(
         (chunk_dir / chunk.path).name != chunk_path.name
         for chunk, chunk_path in zip(plan.chunks, chunk_files, strict=True)
@@ -607,6 +726,30 @@ def infer_segments_language(segments: list[dict[str, Any]]) -> str | None:
     if cjk_count >= 20 and cjk_count >= latin_count:
         return "zh"
     return None
+
+
+def _dominant_chunk_language(state: dict[str, Any]) -> str | None:
+    """Most common language across per-chunk detections (P3-27).
+
+    ``transcribe_chunk`` records ``info.language`` per chunk instead of
+    letting each block overwrite the file-level ``detected_language``; the
+    file decision is a mode vote here (ties prefer the earlier chunk's
+    language — ``max`` keeps first-seen order).
+    """
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for chunk in (state.get("chunks") or {}).values():
+        if not isinstance(chunk, dict):
+            continue
+        language = normalize_language_code(chunk.get("language"))
+        if not language:
+            continue
+        if language not in counts:
+            order.append(language)
+        counts[language] = counts.get(language, 0) + 1
+    if not counts:
+        return None
+    return max(order, key=lambda language: counts[language])
 
 
 def should_translate_for_language(config: dict[str, Any], detected_language: Any, segments: list[dict[str, Any]] | None = None) -> bool:
@@ -1545,6 +1688,18 @@ def discover_audio_files() -> list[Path]:
     cfg = load_json(CONFIG_PATH, {})
     supported = {str(ext).lower() for ext in audio_config(cfg).get("supported_extensions", SUPPORTED_EXTENSIONS)}
     supported |= {str(ext).lower() for ext in (cfg.get("video") or {}).get("supported_extensions", VIDEO_EXTENSIONS)}
+    # Managed runs: the TaskSpec already verified exactly one input file
+    # (existence, size, SHA-256) and transcribe_task pins it here — the
+    # pipeline must not scan the whole inbox and pick up foreign files
+    # (P3-27: resolvedInputPath was validated but unused).
+    managed_input = os.environ.get("PODCAST_TRANSCRIBER_INPUT_FILE", "").strip()
+    if managed_input:
+        path = Path(managed_input)
+        if not path.is_file():
+            raise RuntimeError(f"Managed input file is missing: {path.name}")
+        if path.suffix.lower() not in supported:
+            raise RuntimeError(f"Managed input has an unsupported extension: {path.name}")
+        return [path]
     files = []
     by_stem: dict[str, list[Path]] = {}
     for path in sorted(INBOX.iterdir()):
@@ -1724,6 +1879,20 @@ def has_usable_sidecar_subtitle(
         return False
 
 
+class _ScrubHostPathsFormatter(logging.Formatter):
+    """Scrub absolute host paths (drive-letter/UNC) out of every emitted record.
+
+    Covers the message, exception text and traceback so forwarded console/stderr
+    lines never leak the host layout to the desktop host (P3-27).
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        try:
+            return strip_host_paths(super().format(record))
+        except Exception:
+            return super().format(record)
+
+
 def setup_file_logger(name: str) -> logging.Logger:
     # Guarantee the console handler below binds a UTF-8 stdout even if this
     # module's top-level reconfigure was bypassed (e.g. stdout re-seated later).
@@ -1733,7 +1902,7 @@ def setup_file_logger(name: str) -> logging.Logger:
     logger.handlers.clear()
     log_path = OUT_LOGS / f"{name}.log"
     handler = logging.FileHandler(log_path, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    handler.setFormatter(_ScrubHostPathsFormatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(handler)
     # P1-28: stdout also carries the NDJSON protocol lines consumed by the
     # desktop host, so keep INFO/WARNING there (plain text stays distinguishable
@@ -1741,12 +1910,12 @@ def setup_file_logger(name: str) -> logging.Logger:
     # last stderr line as the task's last_error, and real failures should land
     # there instead of being buried under stdout chatter.
     console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(logging.Formatter("%(message)s"))
+    console.setFormatter(_ScrubHostPathsFormatter("%(message)s"))
     console.addFilter(lambda record: record.levelno < logging.ERROR)
     logger.addHandler(console)
     errors = logging.StreamHandler(sys.stderr)
     errors.setLevel(logging.ERROR)
-    errors.setFormatter(logging.Formatter("%(message)s"))
+    errors.setFormatter(_ScrubHostPathsFormatter("%(message)s"))
     logger.addHandler(errors)
     return logger
 
@@ -1821,6 +1990,7 @@ def prepare_chunks(
     ffmpeg_threads: int = 2,
     ffprobe: str | None = None,
     force_reprocess: bool = False,
+    overlap_seconds: float = 0.0,
 ) -> ChunkPlan:
     chunk_dir = CHUNKS_DIR / task_id
     if force_reprocess and chunk_dir.exists():
@@ -1840,8 +2010,6 @@ def prepare_chunks(
     if not ffmpeg:
         raise RuntimeError("ffmpeg is required for resumable chunk processing but was not found.")
 
-    pattern = chunk_dir / "chunk_%05d.wav"
-
     # 切块边界优先对齐静音点，避免 30 分钟硬切把句子拦腰斩断
     split_points: list[float] = []
     source_duration = probe_duration(source, ffprobe, logger)
@@ -1855,6 +2023,67 @@ def prepare_chunks(
                 ", ".join(format_hms(p) for p in split_points),
             )
 
+    if source_duration and source_duration > 0:
+        # Boundary-based extraction with audio overlap: every chunk wav keeps
+        # `overlap_seconds` of neighbour audio so a sentence crossing a split
+        # point is still transcribed complete by the chunk that owns it
+        # (P3-27). Logical boundaries stay contiguous for resume validation.
+        boundaries = [0.0, *split_points, float(source_duration)]
+        plan = ChunkPlan.from_boundaries(boundaries, overlap_seconds, source_duration)
+        command_log: list[list[str]] = []
+        for spec in plan.chunks:
+            audio_start = spec.resolved_audio_start()
+            span = spec.resolved_audio_end() - audio_start
+            command = [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-threads",
+                str(max(1, ffmpeg_threads)),
+                "-ss",
+                f"{audio_start:.3f}",
+                "-t",
+                f"{span:.3f}",
+                "-i",
+                str(source),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                str(chunk_dir / spec.path),
+            ]
+            command_log.append(command)
+            run_command(command, logger, timeout=300)
+        chunks = sorted(chunk_dir.glob("chunk_*.wav"))
+        if len(chunks) != len(plan.chunks):
+            raise RuntimeError("ffmpeg did not produce the expected audio chunks.")
+        durations = [probe_duration(chunk, ffprobe, logger) for chunk in chunks]
+        if any(d is None or d <= 0 for d in durations):
+            raise RuntimeError("Unable to build a stable source-time chunk plan")
+        meta = {
+            "source_path": str(source),
+            "source_size": source.stat().st_size,
+            "source_mtime": source.stat().st_mtime_ns,
+            "source_fingerprint": file_fingerprint(source),
+            "chunk_seconds": chunk_seconds,
+            "overlap_seconds": overlap_seconds,
+            "split_points": split_points,
+            "ffmpeg_command": command_log[0] if command_log else [],
+            "actual_chunks": len(chunks),
+            "chunk_plan": plan.as_dict(),
+            "chunk_plan_signature": plan.signature(),
+            "created_at": now_stamp(),
+            "tool_version": "2.0",
+        }
+        try:
+            (chunk_dir / "chunk_metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Could not write chunk metadata: %s", exc)
+        return plan
+
+    # Duration probe failed — legacy contiguous segment-mux fallback.
+    pattern = chunk_dir / "chunk_%05d.wav"
     command = [
         ffmpeg,
         "-y",
@@ -1870,12 +2099,8 @@ def prepare_chunks(
         "16000",
         "-f",
         "segment",
-    ]
-    if split_points:
-        command += ["-segment_times", ",".join(f"{p:.3f}" for p in split_points)]
-    else:
-        command += ["-segment_time", str(chunk_seconds)]
-    command += [
+        "-segment_time",
+        str(chunk_seconds),
         "-reset_timestamps",
         "1",
         str(pattern),
@@ -1895,6 +2120,7 @@ def prepare_chunks(
         "source_mtime": source.stat().st_mtime_ns,
         "source_fingerprint": file_fingerprint(source),
         "chunk_seconds": chunk_seconds,
+        "overlap_seconds": 0,
         "split_points": split_points,
         "ffmpeg_command": command,
         "actual_chunks": len(chunks),
@@ -1955,6 +2181,11 @@ def load_whisper_model(config: dict[str, Any], logger: logging.Logger):
         devices = ["cpu"]
     else:
         devices = ["cuda", "cpu"] if nvidia_smi_available() else ["cpu"]
+    if _FORCE_CPU_DEVICE and devices != ["cpu"]:
+        # A CUDA inference failure already proved the GPU path unusable in
+        # this process — stay on CPU (P3-27 sticky fallback).
+        logger.info("Sticky CPU fallback active; skipping device(s): %s", ", ".join(devices))
+        devices = ["cpu"]
 
     gpu_compute = unique_list(list(acfg.get("compute_type_preference", [])) + ["int8"])
     cpu_compute = unique_list(["int8", "float32"])
@@ -1996,6 +2227,33 @@ def load_whisper_model(config: dict[str, Any], logger: logging.Logger):
     raise RuntimeError("No faster-whisper runtime could be loaded.\n" + "\n".join(failures[-10:]))
 
 
+def _cpu_fallback_runtime(config: dict[str, Any], logger: logging.Logger):
+    """Return the shared CPU runtime bundle, loading the CPU model at most once.
+
+    The first CUDA inference failure flips ``_FORCE_CPU_DEVICE`` for the whole
+    process so later ``load_whisper_model`` calls never retry the GPU, and the
+    single loaded CPU model is reused for every subsequent file instead of
+    holding a second (per-file) ~1.5GB model next to the CUDA one (P3-27).
+    """
+    global _FORCE_CPU_DEVICE, _CPU_FALLBACK_BUNDLE
+    with _CPU_FALLBACK_LOCK:
+        _FORCE_CPU_DEVICE = True
+        if _CPU_FALLBACK_BUNDLE is not None:
+            bundle = _CPU_FALLBACK_BUNDLE
+            return bundle["config"], bundle["model"], dict(bundle["runtime"]), list(bundle["failures"])
+        cpu_config = copy.deepcopy(config)
+        cpu_config["asr"] = dict(asr_config(config))
+        cpu_config["asr"]["device_preference"] = "cpu"
+        cpu_model, cpu_runtime, cpu_failures = load_whisper_model(cpu_config, logger)
+        _CPU_FALLBACK_BUNDLE = {
+            "config": cpu_config,
+            "model": cpu_model,
+            "runtime": dict(cpu_runtime),
+            "failures": list(cpu_failures),
+        }
+        return cpu_config, cpu_model, dict(cpu_runtime), list(cpu_failures)
+
+
 def transcribe_chunk(
     model: Any,
     chunk_path: Path,
@@ -2009,6 +2267,8 @@ def transcribe_chunk(
     duration: float | None,
     logger: logging.Logger,
     _job_id: str | None = None,
+    audio_start: float | None = None,
+    audio_end: float | None = None,
 ) -> list[dict[str, Any]]:
     acfg = asr_config(config)
     language = acfg.get("language", "auto")
@@ -2046,9 +2306,6 @@ def transcribe_chunk(
     save_every = max(1, int(config.get("state_save_every_segments", 25)))
     save_interval = max(1.0, float(config.get("state_save_interval_seconds", 5)))
     last_save = time.monotonic()
-    last_cancel_check = time.monotonic()
-    cancel_check_interval = max(1.0, min(save_interval, 3.0))  # Check at least every 3s
-    cancelled = False
     lock_acquired = False
     try:
         while not lock_acquired:
@@ -2058,16 +2315,29 @@ def transcribe_chunk(
 
         with TaskHeartbeat(state_path, state, status="transcribing", stage="transcribing", _job_id=_job_id):
             segments_iter, info = model.transcribe(str(chunk_path), **transcribe_kwargs)
-            state["detected_language"] = getattr(info, "language", None)
-            state["language_probability"] = getattr(info, "language_probability", None)
+            # Record the detection per chunk — the file-level language is
+            # decided once at aggregation so a stray last block can no longer
+            # overwrite it (P3-27).
+            state["chunks"][chunk_key]["language"] = getattr(info, "language", None)
+            state["chunks"][chunk_key]["language_probability"] = getattr(info, "language_probability", None)
 
+            # Segment times are relative to the physical chunk wav, which may
+            # start before source_start when overlap padding is enabled.
+            offset = source_start if audio_start is None else audio_start
             for idx, segment in enumerate(segments_iter, 1):
                 item = {
                     "id": len(state.get("segments", [])) + len(chunk_segments) + 1,
-                    "start": round(float(segment.start) + source_start, 3),
-                    "end": round(float(segment.end) + source_start, 3),
+                    "start": round(float(segment.start) + offset, 3),
+                    "end": round(float(segment.end) + offset, 3),
                     "text": segment.text.strip(),
                 }
+                # Ownership rule for overlapped chunk audio: a segment belongs
+                # to this chunk only when it starts inside the logical range
+                # [source_start, source_end). Boundary-spanning sentences are
+                # captured complete by the chunk owning their start; padded
+                # audio from neighbour ranges is dropped here (P3-27).
+                if item["start"] < source_start or item["start"] >= source_end:
+                    continue
                 for attr in ("avg_logprob", "compression_ratio", "no_speech_prob"):
                     value = getattr(segment, attr, None)
                     if value is not None:
@@ -2075,13 +2345,6 @@ def transcribe_chunk(
                 chunk_segments.append(item)
                 state["chunks"][chunk_key]["segments"] = chunk_segments
                 now = time.monotonic()
-                # Check for cancellation frequently (every segment or every cancel_check_interval)
-                if now - last_cancel_check >= cancel_check_interval or idx % save_every == 0:
-                    last_cancel_check = now
-                    if _job_cancelled_or_deleted(_job_id):
-                        logger.info("Job cancelled during segment loop at segment %d, aborting chunk.", idx)
-                        cancelled = True
-                        break
                 if idx % save_every == 0 or now - last_save >= save_interval:
                     if duration:
                         pct = min(98.0, max(float(state.get("progress_percent") or 8), (item["end"] / duration) * 98.0))
@@ -2110,19 +2373,13 @@ def transcribe_chunk(
             if delay > 0:
                 time.sleep(delay)
 
-    if cancelled:
-        state["chunks"][chunk_key] = {
-            "status": "cancelled",
-            "segments": chunk_segments,
-            "source_start": source_start,
-            "source_end": source_end,
-        }
-        return chunk_segments  # Caller must check _job_cancelled_or_deleted
     state["chunks"][chunk_key] = {
         "status": "done",
         "segments": chunk_segments,
         "source_start": source_start,
         "source_end": source_end,
+        "language": state["chunks"][chunk_key].get("language"),
+        "language_probability": state["chunks"][chunk_key].get("language_probability"),
     }
     update_task_state(state_path, state, status="transcribing", stage="transcribing", current_chunk=int(chunk_key) + 1, _job_id=_job_id)
     return chunk_segments
@@ -2524,11 +2781,6 @@ def process_file(
         result, failures = process_postprocess_stage(context, config, _job_id=_job_id)
         return result
 
-    if _job_cancelled_or_deleted(_job_id):
-        logger.info("Job %s was cancelled or deleted by user; aborting before preparing.", _job_id)
-        return {"file": source.name, "status": "cancelled", "task_id": task_id, "error": "cancelled by user"}
-
-    _transition_job_db(_job_id, "preparing", "preparing", progress_percent=0)
     update_task_state(
         state_path,
         state,
@@ -2554,12 +2806,7 @@ def process_file(
             heartbeat=False,
             _job_id=_job_id,
         )
-        _transition_job_db(_job_id, "failed", "preparing", error_message="input file unstable", event_type="job_failed")
         return {"file": source.name, "status": "failed", "task_id": task_id, "error": "input file unstable"}
-
-    if _job_cancelled_or_deleted(_job_id):
-        logger.info("Job %s was cancelled or deleted by user; aborting before normalizing.", _job_id)
-        return {"file": source.name, "status": "cancelled", "task_id": task_id, "error": "cancelled by user"}
 
     # ------------------------------------------------------------------
     # Sidecar subtitle shortcut: if a same-stem .srt/.ass sits next to the
@@ -2627,13 +2874,11 @@ def process_file(
             result, _ = process_postprocess_stage(context, config, _job_id=_job_id)
             return result
 
-    _transition_job_db(_job_id, "normalizing", "normalizing", progress_percent=1)
     update_task_state(state_path, state, status="normalizing", stage="normalizing", progress_percent=1, _job_id=_job_id)
     try:
         normalized_source = normalize_audio(source, task_work_dir, config, ffmpeg, logger)
     except Exception as exc:
         mark_task_failed(state_path, state, exc, stage="normalizing", logger=logger, _job_id=_job_id)
-        _transition_job_db(_job_id, "failed", "normalizing", error_message=str(exc), event_type="job_failed")
         raise
     state["normalized_source"] = str(normalized_source)
     update_task_state(state_path, state, status="normalizing", stage="normalizing", progress_percent=3, _job_id=_job_id)
@@ -2664,6 +2909,7 @@ def process_file(
             update_manifest_entry(task_id, {"outputs": outputs})
             state["outputs"] = outputs
             update_task_state(state_path, state, status="success", stage="completed", progress_percent=100, heartbeat=False, _job_id=_job_id)
+        cleanup_task_work_artifacts(task_id, safe_stem, logger)
         return {"file": source.name, "status": "skipped", "task_id": task_id, "outputs": outputs}
 
     logger.info("Processing %s", source)
@@ -2681,13 +2927,8 @@ def process_file(
         state.pop("translation_current_batch", None)
         state.pop("translation_running_batches", None)
         state.pop("outputs", None)
-    if _job_cancelled_or_deleted(_job_id):
-        logger.info("Job %s was cancelled or deleted by user; aborting before chunking.", _job_id)
-        return {"file": source.name, "status": "cancelled", "task_id": task_id, "error": "cancelled by user"}
-
     chunk_seconds = int(asr_config(config).get("chunk_seconds", config.get("chunk_seconds", 1800)))
     state["duration_seconds"] = duration
-    _transition_job_db(_job_id, "chunking", "chunking", progress_percent=5)
     update_task_state(state_path, state, status="chunking", stage="chunking", progress_percent=5, _job_id=_job_id)
     try:
         chunk_plan = prepare_chunks(
@@ -2699,10 +2940,10 @@ def process_file(
             int(config.get("ffmpeg_threads", 2)),
             ffprobe,
             force_reprocess=force_reprocess,
+            overlap_seconds=chunk_overlap_seconds(config),
         )
     except Exception as exc:
         mark_task_failed(state_path, state, exc, stage="chunking", logger=logger, _job_id=_job_id)
-        _transition_job_db(_job_id, "failed", "chunking", error_message=str(exc), event_type="job_failed")
         raise
     update_task_state(
         state_path,
@@ -2721,21 +2962,10 @@ def process_file(
         state["chunk_plan_signature"] = plan_signature
         save_task_state_safe(state_path, state)
     all_segments: list[dict[str, Any]] = []
-    _transition_job_db(
-        _job_id,
-        "transcribing",
-        "transcribing",
-        progress_percent=8,
-        current_chunk=0,
-        total_chunks=len(chunk_plan.chunks),
-    )
 
     chunk_dir = CHUNKS_DIR / task_id
     for index, chunk in enumerate(chunk_plan.chunks):
         chunk_path = chunk_dir / chunk.path
-        if _job_cancelled_or_deleted(_job_id):
-            logger.info("Job %s was cancelled or deleted by user; aborting during chunk %s.", _job_id, index)
-            return {"file": source.name, "status": "cancelled", "task_id": task_id, "error": "cancelled by user"}
 
         chunk_key = f"{index:05d}"
         chunk_state = state.get("chunks", {}).get(chunk_key, {})
@@ -2779,11 +3009,9 @@ def process_file(
             duration,
             logger,
             _job_id=_job_id,
+            audio_start=chunk.resolved_audio_start(),
+            audio_end=chunk.resolved_audio_end(),
         )
-        # If job was cancelled during chunk transcription, abort the chunk loop
-        if _job_cancelled_or_deleted(_job_id):
-            logger.info("Job cancelled after chunk %s, aborting transcription loop.", chunk_key)
-            break
         all_segments.extend(chunk_segments)
         state["segments"] = all_segments
         # Stage-local percent from real chunk completion (0–100 of transcribe stage).
@@ -2813,15 +3041,18 @@ def process_file(
         except Exception:
             pass
 
-    if _job_cancelled_or_deleted(_job_id):
-        logger.info("Job cancelled after transcription, skipping postprocess.")
-        return {"status": "cancelled"}
-
     all_segments = sorted(all_segments, key=lambda item: (item["start"], item["end"]))
     for idx, segment in enumerate(all_segments, 1):
         segment["id"] = idx
 
-    detected_language = state.get("detected_language") or infer_segments_language(all_segments)
+    # File-level language: per-chunk detections vote (a stray last block can
+    # no longer overwrite it), then persisted state, then segment inference.
+    detected_language = (
+        _dominant_chunk_language(state)
+        or state.get("detected_language")
+        or infer_segments_language(all_segments)
+    )
+    state["detected_language"] = detected_language
     runtime["detected_language"] = detected_language or ""
     runtime["language_probability"] = state.get("language_probability")
 
@@ -2829,7 +3060,6 @@ def process_file(
         needs_translation = should_translate_for_language(config, detected_language, all_segments)
         next_status = "postprocess_queued"
         next_stage = "postprocess_queued"
-        _transition_job_db(_job_id, next_status, next_stage, progress_percent=98)
         update_task_state(
             state_path, state,
             status=next_status, stage=next_stage,
@@ -2855,10 +3085,6 @@ def process_file(
             "detected_language": detected_language,
             "needs_translation": needs_translation,
         }
-
-    if _job_cancelled_or_deleted(_job_id):
-        logger.info("Job %s was cancelled or deleted by user; aborting before postprocess.", _job_id)
-        return {"file": source.name, "status": "cancelled", "task_id": task_id, "error": "cancelled by user"}
 
     # Build context for postprocess stage and delegate
     context = {
@@ -2927,7 +3153,6 @@ def process_postprocess_stage(
         state["stage"] = "failed"
         state["error"] = str(exc)
         save_task_state_safe(state_path, state)
-        _transition_job_db(_job_id, "failed", "failed", error_message=str(exc), event_type="postprocess_failed")
         manifest_entry = {
             "status": "failed",
             "source_path": str(source),
@@ -2947,18 +3172,11 @@ def _run_postprocess_body(
 ):
     """Internal: core postprocess logic wrapped by process_postprocess_stage for error safety."""
     translation_status: str = "skipped"
-    if _job_cancelled_or_deleted(_job_id):
-        logger.info("Job %s was cancelled or deleted by user; aborting before postprocess.", _job_id)
-        return {"file": source.name, "status": "cancelled", "task_id": task_id, "error": "cancelled by user"}
 
     if needs_translation:
         translation_config = config.get("translation") or {}
         try:
-            if _job_cancelled_or_deleted(_job_id):
-                logger.info("Job %s was cancelled or deleted by user; aborting before translation.", _job_id)
-                return {"file": source.name, "status": "cancelled", "task_id": task_id, "error": "cancelled by user"}
             logger.info("Detected language '%s'; starting automatic translation.", detected_language or "unknown")
-            _transition_job_db(_job_id, "translating", "translating", progress_percent=98)
             update_task_state(state_path, state, status="translating", stage="translating", progress_percent=98, _job_id=_job_id)
             state["translation_status"] = "running"
             save_task_state_safe(state_path, state)
@@ -2974,8 +3192,6 @@ def _run_postprocess_body(
             logger.error("Translation failed: %s", exc)
             state["translation_error"] = str(exc)
             translation_status = "failed"
-            _transition_job_db(_job_id, "translating", "translating",
-                                error_message=str(exc), error_type=type(exc).__name__)
             update_task_state(
                 state_path,
                 state,
@@ -2986,11 +3202,6 @@ def _run_postprocess_body(
                 _job_id=_job_id,
             )
 
-    if _job_cancelled_or_deleted(_job_id):
-        logger.info("Job %s was cancelled or deleted by user; aborting before writing output.", _job_id)
-        return {"file": source.name, "status": "cancelled", "task_id": task_id, "error": "cancelled by user"}
-
-    _transition_job_db(_job_id, "writing_output", "writing_output", progress_percent=99)
     update_task_state(state_path, state, status="writing_output", stage="writing_output", progress_percent=99, _job_id=_job_id)
     outputs = write_outputs(
         source,
@@ -3017,8 +3228,6 @@ def _run_postprocess_body(
         state["completed_at"] = now_stamp()
         state["last_update_at"] = now_stamp()
         save_task_state_safe(state_path, state)
-        _transition_job_db(_job_id, "failed", "failed",
-                           error_message=str(exc), event_type="job_failed")
         manifest_entry = {
             "status": "failed",
             "source_path": str(source),
@@ -3043,7 +3252,6 @@ def _run_postprocess_body(
     state["segments"] = all_segments
     state["outputs"] = outputs
     state["completed_at"] = now_stamp()
-    _transition_job_db(_job_id, "completed", "completed", progress_percent=100, event_type="job_completed")
     update_task_state(state_path, state, status=overall_status, stage="completed", progress_percent=100, heartbeat=False, _job_id=_job_id)
 
     manifest_entry = {
@@ -3055,6 +3263,9 @@ def _run_postprocess_body(
         "translation_status": translation_status,
     }
     update_manifest_processed(task_id, manifest_entry)
+    # Terminal state reached — reclaim the normalized WAV + per-chunk WAVs
+    # (state JSON and logs are durable and never touched). Kept on failure.
+    cleanup_task_work_artifacts(task_id, safe_stem, logger)
     logger.info("Completed: %s (status=%s, translation=%s)", source.name, overall_status, translation_status)
     return {
         "file": source.name,
@@ -3296,16 +3507,6 @@ def preflight_checks(config: dict[str, Any], logger: logging.Logger) -> bool:
     return True
 
 
-def _transition_job_db(job_id: str | None, status: str, stage: str, **kwargs: Any) -> None:
-    """No-op stub — SQLite job store removed in v2 refactor."""
-    pass
-
-
-def _job_cancelled_or_deleted(job_id: str | None) -> bool:
-    """No-op stub — always returns False (no DB to check)."""
-    return False
-
-
 def process_source_with_fallback(
     source: Path,
     config: dict[str, Any],
@@ -3355,6 +3556,24 @@ def process_source_with_fallback(
         logger.exception("Failed to load Podcast task state for %s", source.name)
         return {"file": source.name, "status": "failed", "error": str(exc), "task_id": task_id}, local_failures
 
+    if _FORCE_CPU_DEVICE and (runtime or {}).get("device") == "cuda":
+        # A prior file already hit a CUDA inference failure in this process —
+        # run this file on the shared CPU model instead of retrying the GPU.
+        try:
+            config, model, runtime, cpu_failures = _cpu_fallback_runtime(config, logger)
+            local_failures.extend(cpu_failures)
+            runtime = dict(runtime)
+            runtime["fallback_from"] = "cuda"
+            logger.info("Using shared CPU fallback model for %s", source.name)
+        except Exception as exc:
+            logger.exception("CPU fallback model unavailable for %s", source.name)
+            return {
+                "file": source.name,
+                "status": "failed",
+                "error": f"CPU fallback model unavailable: {exc}",
+                "task_id": task_id,
+            }, local_failures
+
     # Normal path: call process_file
     try:
         result = process_file(
@@ -3378,11 +3597,8 @@ def process_source_with_fallback(
             failure = f"CUDA inference failed; switching this file to CPU. Error: {exc}"
             fallback_logger.warning(failure)
             local_failures.append(failure)
-            cpu_config = copy.deepcopy(config)
-            cpu_config["asr"] = dict(asr_config(config))
-            cpu_config["asr"]["device_preference"] = "cpu"
             try:
-                cpu_model, cpu_runtime, cpu_failures = load_whisper_model(cpu_config, fallback_logger)
+                cpu_config, cpu_model, cpu_runtime, cpu_failures = _cpu_fallback_runtime(config, fallback_logger)
                 local_failures.extend(cpu_failures)
                 result = process_file(
                     source,
@@ -3416,20 +3632,12 @@ def process_source_with_fallback(
             except Exception as cpu_exc:
                 logger.exception("CPU fallback also failed for %s", source.name)
                 local_failures.append(f"CPU fallback failed: {cpu_exc}")
-                _transition_job_db(
-                    _job_id,
-                    "failed",
-                    "failed",
-                    error_message=f"CUDA failed: {exc}; CPU fallback failed: {cpu_exc}",
-                    event_type="job_failed",
-                )
                 return {
                     "file": source.name,
                     "status": "failed",
                     "error": f"CUDA failed: {exc}; CPU fallback failed: {cpu_exc}",
                     "task_id": task_id,
                 }, local_failures
-        _transition_job_db(_job_id, "failed", "failed", error_message=str(exc), event_type="job_failed")
         return {"file": source.name, "status": "failed", "error": str(exc), "task_id": file_fingerprint(source)}, []
 
     # No exception path: handle result based on mode
@@ -3464,7 +3672,7 @@ def main() -> int:
         return translate_existing_outputs(config, force=args.force_translate, no_open_output=args.no_open_output)
 
     if not acquire_run_lock():
-        print(f"Another PodcastTranscriber run appears active: {RUN_LOCK_PATH}")
+        print(f"Another PodcastTranscriber run appears active: {RUN_LOCK_PATH.name}")
         return 4
     cleanup_work_artifacts()
     run_logger = setup_file_logger("run")
@@ -3592,7 +3800,7 @@ def main() -> int:
     pp_executor.shutdown(wait=False)
 
     summary_path = write_run_summary(results, runtime, failures)
-    print(f"Run summary: {summary_path}")
+    print(f"Run summary: {Path(summary_path).name if summary_path else 'n/a'}")
     open_output_folder(config, run_logger, no_open_output=args.no_open_output)
     has_failed = any(item.get("status") == "failed" for item in results)
     if not has_failed:

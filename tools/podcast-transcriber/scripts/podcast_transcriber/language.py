@@ -15,7 +15,9 @@ _NON_SCRIPT_RE = re.compile(
     r"!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~"
     r"。，、；：？！…—·「」『』（）【】《》〈〉]+"
 )
-_CJK_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+# Han characters only — kana (3040-30ff) and Hangul (ac00-d7af) must not
+# count as Chinese, otherwise Japanese/Korean text is misclassified as zh.
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 
 

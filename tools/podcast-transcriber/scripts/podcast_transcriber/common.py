@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -200,7 +202,21 @@ def load_json(path: Path, default: Any) -> Any:
         return default
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception:
+    except json.JSONDecodeError as exc:
+        # Corrupt payload — the caller falls back to ``default``, but the
+        # fault must stay visible (a silently-degraded manifest/state file
+        # previously looked identical to a missing one).
+        logging.getLogger(__name__).warning(
+            "Ignoring unreadable JSON %s (decode error): %s", path.name, exc
+        )
+        return default
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Could not read JSON %s: %s", path.name, exc)
+        return default
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Ignoring unreadable JSON %s (%s): %s", path.name, type(exc).__name__, exc
+        )
         return default
 
 
@@ -239,6 +255,31 @@ def save_json(path: Path, data: Any) -> None:
 
 def iso_now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+# Absolute host paths (drive-letter or UNC) must never reach the desktop
+# host: fatal NDJSON lines, task state and log records expose basenames only
+# (P3-27). URLs are untouched — a scheme like ``https://`` ends in a letter
+# before the ``:`` so the lookbehind rejects it; drive letters only count at
+# a non-alphanumeric boundary (start, space, quote, paren…).
+_HOST_ABS_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9:])[A-Za-z]:[\\/][^\s\"'|><*?]*|\\\\[^\s\"'|><*?]+"
+)
+
+
+def strip_host_paths(text: Any) -> str:
+    """Replace absolute host paths in ``text`` with their final component.
+
+    Keeps the readable tail (usually the file or directory name) so error
+    payloads and log lines stay meaningful without leaking the host layout.
+    """
+    def _basename(match: re.Match[str]) -> str:
+        raw = match.group(0).rstrip("\\/.,:;)\"'")
+        parts = [part for part in re.split(r"[\\/]+", raw) if part]
+        tail = parts[-1].rstrip(".,:;)\"'") if parts else raw
+        return tail or raw
+
+    return _HOST_ABS_PATH_RE.sub(_basename, str(text))
 
 
 def _ensure_utf8_stdio() -> None:
