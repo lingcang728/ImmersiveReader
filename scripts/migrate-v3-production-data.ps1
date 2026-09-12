@@ -174,12 +174,23 @@ function Read-JsonObject {
 
 function Get-DeepSeekValue {
     param($Config)
-    if ($null -eq $Config -or $null -eq $Config.translation) { return $null }
-    $property = $Config.translation.PSObject.Properties['api_key']
-    if ($null -eq $property) { return $null }
-    $value = [string]$property.Value
-    if ([string]::IsNullOrWhiteSpace($value)) { return $null }
-    return $value
+    # A plaintext key can sit in either LLM section of the podcast config
+    # (translation.api_key or markdown.llm_polish.api_key). Reading only the
+    # first under-reported legacyCredentialFieldPresent in the receipt when the
+    # secret actually lived in the polish section. Property-by-property
+    # traversal keeps this StrictMode-safe when sections are absent.
+    if ($null -eq $Config) { return $null }
+    foreach ($sectionPath in @('translation', 'markdown.llm_polish')) {
+        $node = $Config
+        foreach ($part in ($sectionPath -split '\.')) {
+            $property = if ($null -ne $node) { $node.PSObject.Properties[$part] } else { $null }
+            $node = if ($null -ne $property) { $property.Value } else { $null }
+        }
+        $keyProperty = if ($null -ne $node) { $node.PSObject.Properties['api_key'] } else { $null }
+        $value = if ($null -ne $keyProperty) { [string]$keyProperty.Value } else { $null }
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+    return $null
 }
 
 function Initialize-CredentialApi {
@@ -283,6 +294,32 @@ function Invoke-SqliteScalar {
     return ([string]($result -join "`n")).Trim()
 }
 
+function Test-SqliteIntegrityViaCopy {
+    # Runs integrity_check against a throwaway copy (db + -wal/-shm sidecars).
+    # Opening the live WAL database directly — even for a read-only PRAGMA —
+    # can create or replay -shm/-wal in the source tree, mutating the very
+    # migration source a preview run must leave untouched.
+    param(
+        [Parameter(Mandatory)][string]$Sqlite,
+        [Parameter(Mandatory)][string]$Database
+    )
+    $work = Join-Path ([IO.Path]::GetTempPath()) ("immersive-dbcheck-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    try {
+        $copy = Join-Path $work 'source.db'
+        Copy-Item -LiteralPath $Database -Destination $copy
+        foreach ($suffix in @('-wal', '-shm')) {
+            $sidecar = "$Database$suffix"
+            if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+                Copy-Item -LiteralPath $sidecar -Destination "$copy$suffix"
+            }
+        }
+        return Invoke-SqliteScalar -Sqlite $Sqlite -Database $copy -Sql 'PRAGMA integrity_check;'
+    } finally {
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Backup-FileIfPresent {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -376,7 +413,7 @@ $preview = [ordered]@{
         libraryReadingStateFiles = @(Get-ChildItem -LiteralPath $LibraryRoot -File -Recurse -Filter '.reading.json').Count
         podcastOutputFiles = @(Get-TreeFiles -Root (Join-Path $LegacyPodcastRoot 'output')).Count
         legacyCredentialFieldPresent = $legacyKeyPresent
-        zhihuDatabaseIntegrity = Invoke-SqliteScalar -Sqlite $sqlite -Database $legacyDatabase -Sql 'PRAGMA integrity_check;'
+        zhihuDatabaseIntegrity = Test-SqliteIntegrityViaCopy -Sqlite $sqlite -Database $legacyDatabase
         zhihuProfile = Get-TreeSummary -Root $legacyProfile -ExcludedDirectories $ExcludedProfileDirectories
         zhihuMarkdown = Get-TreeSummary -Root $zhihuLibrary -Filter '*.md' -ExcludedFileNames @('index.md')
     }
@@ -450,7 +487,13 @@ if ($settingsBackup) {
 } else {
     Add-RollbackAction ([pscustomobject]@{ type = 'deleteFile'; target = $targetSettings })
 }
-Write-JsonAtomic -Path $targetSettings -Value ([ordered]@{ schemaVersion = 3; libraryRoot = [System.IO.Path]::GetFullPath($LibraryRoot) })
+# Merge into the existing settings object instead of replacing it — a flat
+# rewrite would silently drop any keys a newer app version added since.
+$existingSettings = if ($settingsBackup) { Read-JsonObject -Path $targetSettings } else { $null }
+$settingsObject = if ($existingSettings -is [pscustomobject]) { $existingSettings } else { [pscustomobject]@{} }
+$settingsObject | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 3 -Force
+$settingsObject | Add-Member -NotePropertyName libraryRoot -NotePropertyValue ([System.IO.Path]::GetFullPath($LibraryRoot)) -Force
+Write-JsonAtomic -Path $targetSettings -Value $settingsObject
 $libraryReadingStates = @(Get-ChildItem -LiteralPath $LibraryRoot -File -Recurse -Filter '.reading.json')
 foreach ($state in $libraryReadingStates) { $null = Read-JsonObject -Path $state.FullName }
 

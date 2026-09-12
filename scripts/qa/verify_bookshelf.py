@@ -1,3 +1,6 @@
+# QA harness (manual): serves the built frontend with a mocked Tauri backend
+# (bookshelf_mock.js) and screenshots/asserts bookshelf states via Playwright.
+# Not wired into scripts\verify.ps1 — run by hand during release QA.
 import json
 import os
 import shutil

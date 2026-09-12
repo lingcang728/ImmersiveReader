@@ -1,3 +1,6 @@
+# QA/design harness (manual): renders the docs/design prototype pages through
+# Playwright and captures challenge screenshots into docs/design/challenges.
+# Not part of scripts\verify.ps1 — run by hand when refreshing design docs.
 import sys
 from pathlib import Path
 

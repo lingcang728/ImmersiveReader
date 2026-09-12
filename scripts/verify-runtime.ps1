@@ -1,3 +1,9 @@
+# verify-runtime.ps1 — re-hashes every critical file listed in
+# runtime\manifest.json against its recorded size/SHA-256.
+# LIMITATION: this is a self-proof — the unsigned manifest sits next to the
+# files it describes. It catches torn/corrupted provisioning and accidental
+# edits; it cannot detect deliberate tampering that also rewrites the manifest.
+
 [CmdletBinding()]
 param(
     [string]$RuntimeRoot = '',
@@ -8,6 +14,26 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$Path)
+    # Get-FileHash is the fast path, but some Windows PowerShell 5.1 images lack
+    # it — fall back to raw .NET so this gate runs under either shell.
+    if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    }
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $algorithm = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '')
+        } finally {
+            $algorithm.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
 
 $root = Get-RepoRoot
 if (-not $RuntimeRoot) {
@@ -52,7 +78,7 @@ foreach ($entry in $entries) {
     if ([int64]$item.Length -ne [int64]$entry.bytes) {
         throw "Managed runtime size mismatch: $relative"
     }
-    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    $hash = Get-Sha256Hex -Path $path
     if ($hash -ine [string]$entry.sha256) {
         throw "Managed runtime SHA-256 mismatch: $relative"
     }

@@ -1,10 +1,14 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
+import { fileURLToPath } from "node:url";
 
 const host = process.env.TAURI_DEV_HOST;
-const decodeNamedCharacterReference = decodeURIComponent(
-  new URL("./node_modules/decode-named-character-reference/index.js", import.meta.url).pathname,
-).replace(/^\/([A-Za-z]:)/, "$1");
+// fileURLToPath handles percent-decoding and the Windows drive-letter slash;
+// URL.pathname + manual regex breaks as soon as the checkout path contains
+// spaces or non-ASCII characters.
+const decodeNamedCharacterReference = fileURLToPath(
+  new URL("./node_modules/decode-named-character-reference/index.js", import.meta.url),
+);
 
 // https://vite.dev/config/
 export default defineConfig(async () => {

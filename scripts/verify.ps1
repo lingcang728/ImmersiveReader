@@ -10,10 +10,52 @@ function Invoke-Checked {
     )
 
     Write-Output "[verify] $Label"
+    # Reset before invoking: a block that runs no native command would
+    # otherwise inherit a stale code from the previous step, and $null must
+    # read as success rather than rendering an empty "退出码 " in the message.
+    $global:LASTEXITCODE = $null
     & $Command
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label 失败，退出码 $LASTEXITCODE"
+    $exitCode = $LASTEXITCODE
+    if ($null -ne $exitCode -and $exitCode -ne 0) {
+        throw "$Label 失败，退出码 $exitCode"
     }
+}
+
+function Invoke-Optional {
+    # Report-only audit step: findings warn but never fail — verify.ps1 stays a
+    # build gate, not an audit gate.
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][scriptblock]$Command
+    )
+
+    Write-Output "[verify] $Label (report-only)"
+    $global:LASTEXITCODE = $null
+    try {
+        & $Command
+        if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            Write-Warning "[verify] $Label 报告了问题（退出码 $LASTEXITCODE），详见上方输出；不阻断构建门槛。"
+        }
+    } catch {
+        Write-Warning "[verify] $Label 运行失败：$($_.Exception.Message)"
+    }
+}
+
+function Assert-VersionConsistency {
+    # release.yml asserts the same trio right before `tauri build`; catching a
+    # drifted Cargo.toml/tauri.conf.json version here is much cheaper.
+    $desktopVersion = [string](Get-Content -LiteralPath (Join-Path $root 'apps\desktop\package.json') -Raw | ConvertFrom-Json).version
+    $tauriVersion = [string](Get-Content -LiteralPath (Join-Path $root 'apps\desktop\src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json).version
+    $cargoToml = Get-Content -LiteralPath (Join-Path $root 'apps\desktop\src-tauri\Cargo.toml') -Raw
+    $packageSection = [regex]::Match($cargoToml, '(?ms)^\[package\](.*?)(?=^\[)')
+    if (-not $packageSection.Success) { throw 'Cargo.toml is missing a [package] section.' }
+    $cargoMatch = [regex]::Match($packageSection.Groups[1].Value, '(?m)^\s*version\s*=\s*"([^"]+)"')
+    if (-not $cargoMatch.Success) { throw 'Cargo.toml [package] is missing a version.' }
+    $cargoVersion = $cargoMatch.Groups[1].Value
+    if ($desktopVersion -cne $tauriVersion -or $desktopVersion -cne $cargoVersion) {
+        throw "版本不一致：package.json=$desktopVersion tauri.conf.json=$tauriVersion Cargo.toml=$cargoVersion"
+    }
+    Write-Output "[verify] version fields aligned at $desktopVersion"
 }
 
 function Assert-NoLegacyRuntimeReferences {
@@ -73,7 +115,13 @@ if (-not (Test-Path -LiteralPath $typescript -PathType Leaf)) {
     throw '未找到 apps/desktop 已安装的 TypeScript 编译器；请先在该目录执行 npm ci。'
 }
 Assert-NoLegacyRuntimeReferences
-Invoke-Checked 'contract schema parity' { & $python $root\scripts\verify_contract_parity.py }
+Assert-VersionConsistency
+$parityScript = Join-Path $root 'scripts\verify_contract_parity.py'
+if ((Split-Path -Leaf $python) -ieq 'py.exe') {
+    Invoke-Checked 'contract schema parity' { & $python -3 $parityScript }
+} else {
+    Invoke-Checked 'contract schema parity' { & $python $parityScript }
+}
 
 Push-Location (Join-Path $root 'packages\contracts')
 try {
@@ -98,6 +146,26 @@ try {
     Invoke-Checked 'desktop Rust clippy' {
         & $cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets --all-features -- -D warnings
     }
+    # rustfmt is optional tooling: run the check when it is on PATH, but keep it
+    # report-only — the tree is not yet rustfmt-clean; promote to Invoke-Checked
+    # once a formatting pass lands.
+    if (Get-Command cargo-fmt.exe -ErrorAction SilentlyContinue) {
+        Invoke-Optional 'desktop Rust fmt --check' {
+            & $cargo fmt --manifest-path src-tauri\Cargo.toml -- --check
+        }
+    } else {
+        Write-Warning '[verify] cargo-fmt 未安装，跳过 fmt --check。'
+    }
+    $cargoAudit = Get-Command cargo-audit.exe -ErrorAction SilentlyContinue
+    if ($cargoAudit) {
+        Invoke-Optional 'cargo audit (Rust deps)' {
+            Push-Location src-tauri
+            try { & $cargoAudit.Source audit } finally { Pop-Location }
+        }
+    } else {
+        Write-Warning '[verify] cargo-audit 未安装，跳过 Rust 依赖审计。'
+    }
+    Invoke-Optional 'npm audit (apps/desktop)' { & $npm audit }
 } finally {
     Pop-Location
 }
@@ -109,6 +177,7 @@ try {
     Invoke-Checked 'Zhihu tests' { & $npm test }
     Invoke-Checked 'Zhihu TypeScript build' { & $npm run build }
     Invoke-Checked 'Zhihu Reader compile' { & $npm run compile-reader }
+    Invoke-Optional 'npm audit (tools/zhihu-packer)' { & $npm audit }
 } finally {
     Pop-Location
 }
@@ -125,6 +194,35 @@ try {
     }
 } finally {
     Pop-Location
+}
+
+$pssa = Get-Module -ListAvailable PSScriptAnalyzer | Select-Object -First 1
+if ($pssa) {
+    Write-Output '[verify] PSScriptAnalyzer (report-only)'
+    try {
+        $findings = @(Invoke-ScriptAnalyzer -Path (Join-Path $root 'scripts') -Recurse -Severity 'Warning', 'Error')
+        if ($findings.Count -gt 0) {
+            Write-Warning "[verify] PSScriptAnalyzer 报告 $($findings.Count) 项（scripts\ 目录），不阻断构建门槛。"
+            $findings | Select-Object -First 20 | ForEach-Object {
+                Write-Output "  [pssa] $($_.ScriptName):$($_.Line) $($_.RuleName) $($_.Message)"
+            }
+        }
+    } catch {
+        Write-Warning "[verify] PSScriptAnalyzer 运行失败：$($_.Exception.Message)"
+    }
+} else {
+    Write-Warning '[verify] PSScriptAnalyzer 未安装，跳过脚本静态检查。'
+}
+
+# Managed-runtime integrity gate: hard check when the vendored runtime is
+# provisioned, warn-only skip on a dev checkout that lacks it.
+$runtimeManifest = Join-Path $root 'runtime\manifest.json'
+if (Test-Path -LiteralPath $runtimeManifest -PathType Leaf) {
+    Invoke-Checked 'managed runtime manifest' {
+        & (Join-Path $PSScriptRoot 'verify-runtime.ps1')
+    }
+} else {
+    Write-Warning '[verify] runtime\manifest.json 不存在——该检出未包含受管运行时，跳过完整性校验（可运行 scripts\prepare-runtime.ps1 生成）。'
 }
 
 Write-Output '[verify] all checks passed'

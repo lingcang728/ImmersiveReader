@@ -112,13 +112,12 @@ jobs:
           if (-not (Test-Path -LiteralPath $notesFile -PathType Leaf)) {
             throw "Release notes missing for $version: $notesFile"
           }
+          # The first step already asserted exactly one Release exists for this
+          # tag, so a create-from-scratch fallback here can never run — upload
+          # into the verified draft instead of maintaining a dead else branch.
           gh release view '${{ github.ref_name }}' *> $null
-          $exists = $LASTEXITCODE -eq 0
+          if ($LASTEXITCODE -ne 0) { throw '当前 Tag 的 GitHub Release 不存在。' }
           $global:LASTEXITCODE = 0
           $installer = (Get-ChildItem -LiteralPath output/release -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
-          if ($exists) {
-            gh release upload '${{ github.ref_name }}' $installer output/release/latest.json --clobber
-            gh release edit '${{ github.ref_name }}' --draft=false --prerelease=false --title "沉浸阅读 ${{ github.ref_name }}" --notes-file $notesFile
-          } else {
-            gh release create '${{ github.ref_name }}' --verify-tag --title "沉浸阅读 ${{ github.ref_name }}" --notes-file $notesFile $installer output/release/latest.json
-          }
+          gh release upload '${{ github.ref_name }}' $installer output/release/latest.json --clobber
+          gh release edit '${{ github.ref_name }}' --draft=false --prerelease=false --title "沉浸阅读 ${{ github.ref_name }}" --notes-file $notesFile

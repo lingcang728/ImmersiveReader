@@ -1,3 +1,6 @@
+# QA harness (manual): drives the app via Playwright and asserts the reader
+# server surface. Not wired into scripts\verify.ps1 — it needs a live app
+# session and the global Playwright install; run it by hand during release QA.
 import json
 import os
 import sys

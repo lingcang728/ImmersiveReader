@@ -36,6 +36,7 @@ $podcastModels = if ($PodcastSource) {
     Join-Path $runtime 'podcast\models'
 }
 $node = Require-Command -Name 'node.exe'
+$npm = Require-Command -Name 'npm.cmd'
 $ffmpeg = Require-Command -Name 'ffmpeg.exe'
 $ffprobe = Require-Command -Name 'ffprobe.exe'
 
@@ -67,6 +68,35 @@ function Copy-Tree {
     & robocopy @arguments
     if ($LASTEXITCODE -gt 7) {
         throw "复制运行时失败：$Source -> $Destination（robocopy $LASTEXITCODE）"
+    }
+}
+
+# Directories/files that must never reach the vendored zhihu sidecar app:
+# src/ and tests/ are compile-time only (the sidecar runs dist\server.js),
+# tools/ is a manual utility, output/ is dev-generated content, and the
+# profile/cache dirs are machine-local state (see TOOL_LOCAL_STATE_DIRS in
+# tools/zhihu-packer/src/runtime-paths.ts — keep both lists in sync).
+$ZhihuAppExcludedDirectories = @(
+    '.git', 'src', 'tests', 'tools', 'output',
+    '.browser-profile', '.obscura-profile', '.browser-cache'
+)
+$ZhihuAppExcludedFiles = @('*.log', '*.db', '*.db-*')
+
+function Prune-DevDependencies {
+    # The runtime copy of node_modules still contains devDependencies — strip
+    # them so the bundle ships production deps only (tsx/typescript/esbuild/
+    # jsdom/marked/pinyin-pro are compile-time; nothing in the sidecar chain
+    # imports them). npm prune removes packages without touching the network.
+    param([Parameter(Mandatory)][string]$AppDir)
+
+    Push-Location $AppDir
+    try {
+        & $npm prune --omit=dev | Write-Output
+        if ($LASTEXITCODE -ne 0) {
+            throw "npm prune --omit=dev 失败：$AppDir（退出码 $LASTEXITCODE）"
+        }
+    } finally {
+        Pop-Location
     }
 }
 
@@ -247,8 +277,9 @@ if ($RefreshApps) {
     Reset-AppDestination -Destination $podcastApp
     Reset-AppDestination -Destination $contractsRuntime
     Copy-Tree -Source $zhihuSource -Destination $zhihuApp `
-        -ExcludeDirectories @('.git', '.browser-profile', '.obscura-profile', '.browser-cache') `
-        -ExcludeFiles @('*.log', '*.db', '*.db-*')
+        -ExcludeDirectories $ZhihuAppExcludedDirectories `
+        -ExcludeFiles $ZhihuAppExcludedFiles
+    Prune-DevDependencies -AppDir $zhihuApp
     Copy-Tree -Source $podcastAppSource -Destination $podcastApp `
         -ExcludeDirectories @('.git', '.venv', 'models', 'input', 'output', 'work', '.pytest_cache', '__pycache__') `
         -ExcludeFiles @('config.json', '*.log', '*.pyc')
@@ -325,8 +356,9 @@ $podcastRuntime = Join-Path $stagingRuntime 'podcast'
 New-Item -ItemType Directory -Path (Join-Path $zhihuRuntime 'node') -Force | Out-Null
 Copy-Item -LiteralPath $node -Destination (Join-Path $zhihuRuntime 'node\node.exe')
 Copy-Tree -Source $zhihuSource -Destination (Join-Path $zhihuRuntime 'app') `
-    -ExcludeDirectories @('.git', '.browser-profile', '.obscura-profile', '.browser-cache') `
-    -ExcludeFiles @('*.log', '*.db', '*.db-*')
+    -ExcludeDirectories $ZhihuAppExcludedDirectories `
+    -ExcludeFiles $ZhihuAppExcludedFiles
+Prune-DevDependencies -AppDir (Join-Path $zhihuRuntime 'app')
 Copy-Tree -Source $EdgeRoot -Destination (Join-Path $zhihuRuntime 'chromium')
 Copy-Tree -Source $contractsSource -Destination (Join-Path $stagingRuntime 'packages\contracts') `
     -ExcludeDirectories @('.git', 'node_modules')

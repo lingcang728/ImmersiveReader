@@ -2,12 +2,23 @@
 name = "immersive-reader"
 version = "1.2.0"
 description = "A local-first immersive reading library"
-authors = ["you"]
+authors = ["lingcang728"]
 edition = "2021"
 
 [lib]
 name = "immersive_reader_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop-only crate: staticlib/cdylib exist solely for Tauri mobile targets
+# (this repo has no gen/android|gen/apple), and white-linking them also builds
+# unused .dll/.a artifacts. rlib is all src/main.rs needs to link the lib.
+crate-type = ["rlib"]
+
+[profile.release]
+# Size/speed tuning for the shipped NSIS bundle: full LTO + single codegen
+# unit, and strip symbols (Windows PDB is separate; nothing consumes embedded
+# debug info at runtime).
+lto = true
+codegen-units = 1
+strip = "symbols"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

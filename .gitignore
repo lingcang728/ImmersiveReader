@@ -10,6 +10,11 @@
 
 # Local runtimes and models
 runtime/
+# Transient swap dirs created by scripts/prepare-runtime.ps1
+runtime.__staging__/
+runtime.__previous__/
+# Local dev-install output (see docs/release/*/release-manifest.json)
+.dev-install/
 **/.venv/
 **/venv/
 **/models/
@@ -37,6 +42,11 @@ runtime/
 **/*.pem
 **/*.p12
 **/*.pfx
+# DPAPI-encrypted updater key backups (see apps/desktop/scripts/package-and-install.ps1)
+**/*.dpapi
+# Local signing/test certificates must never be committed
+**/*.cer
+**/*.crt
 **/*.msi
 **/*.exe
 # Deployed shell icon next to the production EXE (copied by ship:local)

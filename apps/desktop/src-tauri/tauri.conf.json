@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run check && npm run build",
     "frontendDist": "../build"
   },
   "app": {
@@ -49,6 +49,12 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "lingcang728",
+    "windows": {
+      "nsis": {
+        "languages": ["SimpChinese"]
+      }
+    },
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",

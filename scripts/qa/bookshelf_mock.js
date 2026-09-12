@@ -1,3 +1,6 @@
+// Mock __TAURI_INTERNALS__ backend injected by verify_bookshelf.py so the
+// built frontend can be exercised without a Tauri shell. Manual QA asset —
+// loaded via Playwright addScriptTag, never shipped.
 (() => {
   let nextCallback = 1;
   const callbacks = new Map();
