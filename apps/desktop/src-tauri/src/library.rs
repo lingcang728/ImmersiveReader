@@ -213,8 +213,57 @@ fn read_json_file_capped(path: &Path) -> Result<String, String> {
 
 fn read_manifest(path: &Path) -> Result<Manifest, String> {
     let raw = read_json_file_capped(path)?;
-    let manifest: Manifest = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    match serde_json::from_str::<Manifest>(&raw) {
+        Ok(manifest) => {
+            validate_manifest(&manifest)?;
+            Ok(manifest)
+        }
+        Err(error) => repair_legacy_null_manifest(path, &raw, error),
+    }
+}
+
+/// Manifests written before the explicit-null fix carry `"sourceId": null`
+/// (and per-chapter `"date"/"metadataStatus": null`) — keys the schema
+/// requires to be omitted. Rather than leaving those books unloadable,
+/// strip nulls on the known optional-string fields, persist the canonical
+/// serialization once, and re-validate. Any other parse error is reported
+/// unchanged.
+fn repair_legacy_null_manifest(
+    path: &Path,
+    raw: &str,
+    original: serde_json::Error,
+) -> Result<Manifest, String> {
+    const OPTIONAL_STRING_FIELDS: &[&str] = &["sourceId", "date", "metadataStatus"];
+    fn strip_nulls(object: &mut serde_json::Map<String, serde_json::Value>) -> bool {
+        let mut changed = false;
+        for key in OPTIONAL_STRING_FIELDS {
+            if object.get(*key).is_some_and(|value| value.is_null()) {
+                object.remove(*key);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    let mut value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| original.to_string())?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| original.to_string())?;
+    let mut changed = strip_nulls(object);
+    if let Some(chapters) = object.get_mut("chapters").and_then(|c| c.as_array_mut()) {
+        for chapter in chapters.iter_mut().filter_map(|c| c.as_object_mut()) {
+            changed |= strip_nulls(chapter);
+        }
+    }
+    if !changed {
+        return Err(original.to_string());
+    }
+    let manifest: Manifest =
+        serde_json::from_value(value).map_err(|_| original.to_string())?;
     validate_manifest(&manifest)?;
+    let canonical = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    crate::atomic_file::write(path, canonical.as_bytes())?;
     Ok(manifest)
 }
 
@@ -573,6 +622,44 @@ mod tests {
         assert_eq!(scan.books[0].book_id, "manual:healthy");
         assert_eq!(scan.issues.len(), 1);
         assert!(scan.issues[0].path.contains("坏书"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_null_manifest_heals_itself_on_scan() {
+        // Pre-null-fix writers persisted `"sourceId": null` etc.; those books
+        // must load (and the file must be rewritten canonically) instead of
+        // sitting in the issue list forever.
+        let root = temp_library("null-heal");
+        let book = root.join("手动").join("旧书");
+        fs::create_dir_all(&book).expect("book dir");
+        let mut manifest: Manifest = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/manifest.valid.json"
+        ))
+        .expect("fixture");
+        manifest.book_id = "manual:legacy-null".to_string();
+        let mut value = serde_json::to_value(&manifest).expect("to value");
+        let object = value.as_object_mut().expect("object");
+        object.insert("sourceId".to_string(), serde_json::Value::Null);
+        let chapters = object
+            .get_mut("chapters")
+            .and_then(|c| c.as_array_mut())
+            .expect("chapters");
+        chapters[0]
+            .as_object_mut()
+            .expect("chapter")
+            .insert("date".to_string(), serde_json::Value::Null);
+        let manifest_path = book.join("manifest.json");
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&value).expect("json"))
+            .expect("write manifest");
+
+        let scan = scan_library(&root).expect("scan");
+        assert_eq!(scan.books.len(), 1);
+        assert_eq!(scan.books[0].book_id, "manual:legacy-null");
+        assert!(scan.issues.is_empty(), "issues: {:?}", scan.issues);
+        // The on-disk file is healed — a second read sees no nulls.
+        let healed = fs::read_to_string(&manifest_path).expect("read healed");
+        assert!(!healed.contains(": null"), "healed manifest: {healed}");
         let _ = fs::remove_dir_all(&root);
     }
 
