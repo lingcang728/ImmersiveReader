@@ -23,13 +23,14 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
- * P3-29：wordCount 的规范口径 = Unicode 标量（code point）数。
+ * P3-29：wordCount 的规范口径 = 非空白的 Unicode 标量（code point）数。
  * String.prototype.length 数的是 UTF-16 码元，星外来字（如 emoji、生僻字）会
  * 被数成 2，与 Rust 端按 scalar 统计的口径分叉。用展开迭代按 code point 计数。
- * 同时剥掉全部空白——与既有的 `.replace(/\s+/g, '').length` 语义一致。
+ * 空白集合用 `\p{White_Space}` 而非 `\s`：JS `\s` 多算 U+FEFF、漏算 U+0085
+ * NEL，与 Rust `char::is_whitespace`（Unicode White_Space 属性）差两个码点。
  */
 export function countWordChars(text: string): number {
-  return [...text.replace(/\s+/g, '')].length;
+  return [...text.replace(/\p{White_Space}+/gu, '')].length;
 }
 
 export function randomSleep(min = 2000, max = 5000): Promise<void> {

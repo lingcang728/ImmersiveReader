@@ -339,12 +339,45 @@ async function injectStoredCookies(context: BrowserContext): Promise<void> {
   }
 }
 
-export function getBrowserContext(headless = true): Promise<BrowserContext> {
-  return withBrowserLock(() => getBrowserContextLocked(headless));
+/**
+ * 互杀防护（P2）：有头登录窗口与任务抓取共享同一个持久化 profile——一方持有
+ * context 时另一方换模式只能先把对方 close 掉。于是「任务运行中点登录」会
+ * 杀掉正在抓取的浏览器，「登录窗口开着跑任务」会把用户正在验证的窗口关掉。
+ * 用目的标记拒绝越权切换，而不是杀死对方：
+ * - `interactive`（登录）期间，task 请求无头 context → 明确报错；
+ * - `task`（抓取）持有期间，interactive 请求有头 context → 明确报错。
+ * 任务内部的人机验证有头窗口属于 task 目的，不受第一条限制。
+ */
+export type BrowserPurpose = 'task' | 'interactive';
+let interactiveSessionActive = false;
+let taskBrowsingActive = false;
+
+export function markInteractiveSession(active: boolean): void {
+  interactiveSessionActive = active;
 }
 
-async function getBrowserContextLocked(headless: boolean): Promise<BrowserContext> {
+export function markTaskBrowsing(active: boolean): void {
+  taskBrowsingActive = active;
+}
+
+export function getBrowserContext(headless = true, purpose: BrowserPurpose = 'task'): Promise<BrowserContext> {
+  return withBrowserLock(() => getBrowserContextLocked(headless, purpose));
+}
+
+async function getBrowserContextLocked(headless: boolean, purpose: BrowserPurpose): Promise<BrowserContext> {
   const backend = shouldUseObscura(headless) ? 'obscura' : 'playwright';
+
+  if (headless && purpose === 'task' && interactiveSessionActive) {
+    throw new Error('知乎登录/验证窗口正在使用中，请先完成或关闭该窗口再运行任务。');
+  }
+  if (!headless && purpose === 'interactive' && taskBrowsingActive) {
+    throw new Error('归档任务正在使用浏览器，请先暂停或取消任务后再登录。');
+  }
+  // 在锁内立旗：interactive 的窗口从创建起就受保护，不存在「窗口已开、
+  // 标记未立」的竞态窗口被任务请求关掉。
+  if (purpose === 'interactive') {
+    interactiveSessionActive = true;
+  }
 
   // 如果已存在 Context 且 headless 模式与当前请求的不一致，我们需要先关闭旧的
   if (activeContext && (currentHeadlessMode !== headless || currentBackend !== backend)) {

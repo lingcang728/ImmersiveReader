@@ -9,6 +9,7 @@
 	export let onStartZhihuTask: (taskId: string, revision: number) => void;
 	export let onOpenTaskResult: (taskId: string) => void;
 	export let onRestartTask: (taskId: string) => void;
+	export let onApproveBudget: (taskId: string, budgetLimitCny: number) => void;
 	export let onControlTask: (
 		taskId: string,
 		action: 'pause' | 'resume' | 'cancel' | 'cancel_and_discard',
@@ -167,6 +168,7 @@
 		| { kind: 'relogin' }
 		| { kind: 'open' }
 		| { kind: 'cancel' }
+		| { kind: 'approveBudget' }
 		| null;
 
 	function primaryAction(task: TaskSnapshot): { action: Action; label: string } | null {
@@ -181,6 +183,12 @@
 		}
 		if (task.requiredAction === 'login') {
 			return { action: { kind: 'relogin' }, label: '去登录' };
+		}
+		// Terminal approve_budget tasks are deliberately can_retry=false: a plain
+		// retry must not silently spend past the approved ceiling. The dedicated
+		// action asks for a new limit first.
+		if (task.requiredAction === 'approve_budget' && task.kind === 'podcast') {
+			return { action: { kind: 'approveBudget' }, label: '提高预算重试' };
 		}
 		if (task.errorCode === 'ENGINE_CRASHED' || task.outcome === 'interrupted') {
 			return { action: { kind: 'reconnect' }, label: '重试' };
@@ -225,6 +233,8 @@
 	// P3-12: themed confirm instead of window.confirm — the cancel only
 	// dispatches after the user confirms inside the dialog.
 	let pendingCancelAction: Action = null;
+	let pendingBudgetAction = false;
+	let budgetInput = '';
 
 	function runAction(action: Action) {
 		if (!action) return;
@@ -239,6 +249,11 @@
 			pendingCancelAction = action;
 			return;
 		}
+		if (action.kind === 'approveBudget') {
+			budgetInput = '';
+			pendingBudgetAction = true;
+			return;
+		}
 		dispatchAction(action);
 	}
 
@@ -248,14 +263,29 @@
 		dispatchAction(action);
 	}
 
-	function dispatchAction(action: Action) {
-		if (!action) return;
+	$: parsedBudgetLimit = Number.parseFloat(budgetInput);
+	$: budgetValid = Number.isFinite(parsedBudgetLimit) && parsedBudgetLimit > 0;
+
+	function confirmBudgetAction() {
+		if (!budgetValid) return;
+		const limit = parsedBudgetLimit;
+		pendingBudgetAction = false;
+		armBusy();
+		onApproveBudget(task.id, limit);
+	}
+
+	function armBusy() {
 		actionBusy = true;
 		actionStamp = `${task.revision}:${task.lifecycleState}`;
 		actionTimer = setTimeout(() => {
 			actionBusy = false;
 			actionTimer = undefined;
 		}, ACTION_TIMEOUT_MS);
+	}
+
+	function dispatchAction(action: Action) {
+		if (!action) return;
+		armBusy();
 		if (action.kind === 'start') {
 			if (task.kind === 'podcast') onStartTask(task.id);
 			else onStartZhihuTask(task.id, task.revision);
@@ -266,12 +296,15 @@
 			else onControlZhihuTask(task.id, 'pause', task.revision);
 			return;
 		}
-		if (action.kind === 'resume' || action.kind === 'reconnect' || action.kind === 'relogin') {
+		if (action.kind === 'resume' || action.kind === 'relogin') {
 			if (task.kind === 'podcast') onControlTask(task.id, 'resume', task.revision);
 			else onControlZhihuTask(task.id, 'resume', task.revision);
 			return;
 		}
-		if (action.kind === 'retry') {
+		// 'reconnect' (interrupted/crashed) and 'retry' (terminal failure) are the
+		// same underlying operation: the worker/sidecar run is already dead, so
+		// resume is meaningless — re-run via the task restart path.
+		if (action.kind === 'retry' || action.kind === 'reconnect') {
 			if (task.kind === 'podcast') onRestartTask(task.id);
 			else onStartZhihuTask(task.id, task.revision);
 			return;
@@ -327,11 +360,11 @@
 	</div>
 
 	{#if percent !== null}
-		<output class="task-pct">{Math.round(percent)}%</output>
+		<output class="task-pct" aria-live="off">{Math.round(percent)}%</output>
 	{:else if isActive(task)}
-		<output class="task-pct task-ellipsis">…</output>
+		<output class="task-pct task-ellipsis" aria-live="off">…</output>
 	{:else}
-		<output class="task-pct task-idle">—</output>
+		<output class="task-pct task-idle" aria-live="off">—</output>
 	{/if}
 
 	<div class="task-actions">
@@ -378,6 +411,39 @@
 			</div>
 		</WorkflowDialogShell>
 	{/if}
+
+	{#if pendingBudgetAction}
+		<WorkflowDialogShell
+			titleId={`task-budget-title-${task.id}`}
+			descriptionId={`task-budget-desc-${task.id}`}
+			title="提高预算重试"
+			description="该任务因超出 API 预算上限而停止。输入新的单任务预算上限（元）后将重新转写。"
+			maxWidth="420px"
+			onClose={() => (pendingBudgetAction = false)}
+		>
+			<label class="task-budget-field">
+				<span>新的预算上限（元）</span>
+				<input
+					type="number"
+					min="0.01"
+					step="0.1"
+					placeholder="例如 2.0"
+					bind:value={budgetInput}
+				/>
+			</label>
+			<div slot="footer" class="task-confirm-actions">
+				<button type="button" class="wf-quiet" on:click={() => (pendingBudgetAction = false)}
+					>暂不重试</button
+				>
+				<button
+					type="button"
+					class="wf-primary"
+					disabled={!budgetValid}
+					on:click={confirmBudgetAction}>确认并重试</button
+				>
+			</div>
+		</WorkflowDialogShell>
+	{/if}
 </article>
 
 <style>
@@ -385,5 +451,21 @@
 		display: flex;
 		justify-content: flex-end;
 		gap: 8px;
+	}
+
+	.task-budget-field {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		font-size: 13px;
+	}
+
+	.task-budget-field input {
+		padding: 8px 10px;
+		border: 1px solid var(--line, rgba(0, 0, 0, 0.18));
+		border-radius: 8px;
+		font-size: 14px;
+		background: var(--bg, #fff);
+		color: var(--text, #111);
 	}
 </style>

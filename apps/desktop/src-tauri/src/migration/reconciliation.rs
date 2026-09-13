@@ -90,7 +90,9 @@ fn markdown_files(root: &Path, files: &mut Vec<PathBuf>, depth: usize) -> Result
         return Ok(());
     }
     let metadata = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
-    if metadata.file_type().is_symlink() {
+    // Junctions are reparse points, not symlinks — following one would read
+    // files outside the archive root into the report.
+    if metadata.file_type().is_symlink() || crate::atomic_file::is_reparse_point(&metadata) {
         return Ok(());
     }
     if metadata.is_file() {

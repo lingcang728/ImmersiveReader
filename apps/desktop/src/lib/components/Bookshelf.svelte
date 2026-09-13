@@ -31,6 +31,7 @@
 	export let onStartZhihuTask: (taskId: string, revision: number) => void;
 	export let onOpenTaskResult: (taskId: string) => void;
 	export let onRestartTask: (taskId: string) => void;
+	export let onApproveBudget: (taskId: string, budgetLimitCny: number) => void;
 	export let onControlTask: (taskId: string, action: 'pause' | 'resume' | 'cancel' | 'cancel_and_discard', revision: number) => void;
 	export let onControlZhihuTask: (taskId: string, action: 'pause' | 'resume' | 'cancel', revision: number) => void;
 	export let onChooseLibrary: () => void;
@@ -88,7 +89,7 @@
 		minute: '2-digit'
 	});
 
-	function lastReadLabel(value?: string): string {
+	function lastReadLabel(value?: string | null): string {
 		if (!value) return '尚未开卷';
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) return '有阅读记录';
@@ -321,6 +322,7 @@
 			{onStartZhihuTask}
 			{onOpenTaskResult}
 			{onRestartTask}
+			{onApproveBudget}
 			{onControlTask}
 			{onControlZhihuTask}
 		/>

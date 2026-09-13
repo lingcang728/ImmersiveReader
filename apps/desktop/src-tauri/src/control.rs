@@ -525,6 +525,70 @@ impl ControlDb {
         Ok(CommandClaim::Existing(Box::new(record)))
     }
 
+    /// Drop an un-completed claim so an immediate retry starts fresh instead
+    /// of replaying COMMAND_RESULT_MISSING until the abandoned-claim window
+    /// expires. Used for transient failures (revision/sequence conflicts, IO
+    /// errors) that must not be cached as terminal command results.
+    pub fn release_command(&self, request_id: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM command_results WHERE request_id = ?1 AND completed_at IS NULL",
+                params![request_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Requeue a terminal task so the engine start path (which requires
+    /// Queued) can run it again. Only `can_retry` terminal tasks may requeue —
+    /// cancelled tasks stay cancelled.
+    pub fn requeue_terminal_task(
+        &mut self,
+        task_id: &str,
+    ) -> Result<Option<TaskEvent>, String> {
+        let Some(mut snapshot) = self.task_snapshot(task_id)? else {
+            return Err("TASK_NOT_FOUND".to_string());
+        };
+        if snapshot.lifecycle_state != LifecycleState::Terminal || !snapshot.can_retry {
+            return Ok(None);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        snapshot.last_sequence = snapshot
+            .last_sequence
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+        snapshot.lifecycle_state = LifecycleState::Queued;
+        snapshot.outcome = TaskOutcome::None;
+        snapshot.required_action = RequiredAction::None;
+        snapshot.error_code = None;
+        snapshot.error_message = None;
+        snapshot.retry_after_seconds = None;
+        snapshot.engine_stage = "queued".to_string();
+        snapshot.engine_status = "waiting".to_string();
+        snapshot.progress.mode = crate::tasks::ProgressMode::Indeterminate;
+        snapshot.progress.percent = None;
+        snapshot.can_pause = false;
+        snapshot.can_resume = false;
+        snapshot.can_retry = false;
+        snapshot.can_cancel = true;
+        snapshot.updated_at = now.clone();
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: snapshot.id.clone(),
+            sequence: snapshot.last_sequence,
+            revision: snapshot.revision,
+            event_type: "requeued".to_string(),
+            snapshot,
+            created_at: now,
+        };
+        self.persist_task_event(&event)?;
+        Ok(Some(event))
+    }
+
     pub fn complete_command(
         &self,
         request_id: &str,
@@ -1938,6 +2002,15 @@ fn worker_error_code(message: Option<&str>) -> Option<TaskErrorCode> {
         "RATE_LIMITED" => Some(TaskErrorCode::RateLimited),
         "UPSTREAM_TIMEOUT" => Some(TaskErrorCode::UpstreamTimeout),
         "UPSTREAM_UNAVAILABLE" => Some(TaskErrorCode::UpstreamUnavailable),
+        "TRANSCRIPTION_FAILED" => Some(TaskErrorCode::TranscriptionFailed),
+        "MODEL_LOAD_FAILED" => Some(TaskErrorCode::ModelLoadFailed),
+        "ENGINE_BUSY" => Some(TaskErrorCode::EngineBusy),
+        "INVALID_TASK_SPEC" => Some(TaskErrorCode::InvalidTaskSpec),
+        "PATH_OUTSIDE_MANAGED_ROOT" => Some(TaskErrorCode::PathOutsideManagedRoot),
+        "PROMPT_BUDGET_EXCEEDED" => Some(TaskErrorCode::PromptBudgetExceeded),
+        "LOCAL_IO" => Some(TaskErrorCode::LocalIo),
+        "LOCAL_NETWORK" => Some(TaskErrorCode::LocalNetwork),
+        "LOCAL_TIMEOUT" => Some(TaskErrorCode::LocalTimeout),
         _ => None,
     }
 }
@@ -2214,7 +2287,12 @@ fn controlled_event(mut snapshot: TaskSnapshot, action: &str) -> Result<TaskEven
             snapshot.can_resume = false;
             "resumed"
         }
-        "cancel" if is_active_task(&snapshot.lifecycle_state) => {
+        // Queued tasks cancel too — the row shows a real 取消 button and
+        // refusing it stranded queued tasks forever.
+        "cancel"
+            if is_active_task(&snapshot.lifecycle_state)
+                || snapshot.lifecycle_state == LifecycleState::Queued =>
+        {
             snapshot.lifecycle_state = LifecycleState::Terminal;
             snapshot.outcome = TaskOutcome::Cancelled;
             snapshot.error_code = Some(TaskErrorCode::CancelledByUser);
@@ -2228,7 +2306,10 @@ fn controlled_event(mut snapshot: TaskSnapshot, action: &str) -> Result<TaskEven
             snapshot.can_cancel = false;
             "cancelled"
         }
-        "cancel_and_discard" if is_active_task(&snapshot.lifecycle_state) => {
+        "cancel_and_discard"
+            if is_active_task(&snapshot.lifecycle_state)
+                || snapshot.lifecycle_state == LifecycleState::Queued =>
+        {
             snapshot.lifecycle_state = LifecycleState::Terminal;
             snapshot.outcome = TaskOutcome::Cancelled;
             snapshot.error_code = Some(TaskErrorCode::CancelledByUser);

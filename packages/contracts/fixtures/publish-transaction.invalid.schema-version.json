@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "transactionId": "tx-abc123",
+  "taskId": "task-abc123",
+  "bookId": "podcast:source-1",
+  "incomingRelativePath": ".incoming/task-abc123",
+  "finalRelativePath": "播客/source-1",
+  "rollbackRelativePath": ".rollback/source-1",
+  "manifestSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "provenanceSha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "revision": 1,
+  "phase": "committed",
+  "createdAt": "2026-07-10T00:00:00+00:00",
+  "updatedAt": "2026-07-10T00:01:00+00:00"
+}

@@ -254,9 +254,14 @@ test("path safety mirrors the shared segment ruleset", () => {
 
 type FixtureExpectation = {
   readonly fixture: string;
-  readonly contract: "manifest" | "reading";
+  readonly contract: "manifest" | "reading" | "provenance" | "publish-transaction";
   readonly expect: "valid" | "invalid";
 };
+
+// This package only ships manifest/reading validators — provenance and
+// publish-transaction fixtures are verified by the JSON schema (via
+// scripts/verify_contract_parity.py) and the Rust parity suite instead.
+const TS_PARITY_CONTRACTS = new Set(["manifest", "reading"]);
 
 // P1-22 parity: the Rust suite (contracts.rs::shared_fixtures_match_*) runs this
 // exact table against the same fixtures — the two implementations can never
@@ -266,6 +271,9 @@ const expectations = loadFixture("expectations.json") as FixtureExpectation[];
 test("shared fixtures produce the same verdicts as schema and Rust", () => {
   const manifest = parseFixtureManifest();
   for (const { fixture, contract, expect } of expectations) {
+    if (!TS_PARITY_CONTRACTS.has(contract)) {
+      continue;
+    }
     const act = () => {
       const data = loadFixture(fixture);
       if (contract === "manifest") {

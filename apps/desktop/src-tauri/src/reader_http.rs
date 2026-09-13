@@ -284,27 +284,10 @@ fn content_response(session: &ReaderSession, raw_relative: &str) -> ReaderRespon
     }
 }
 
-/// P2-21 read-merge-write — mirrors `library::merge_progress` exactly so both
-/// writers (the Svelte 精读 workspace via `save_book_progress` and this
-/// reader via PUT /progress) converge on the same `.reading.json` instead of
-/// losing each other's update. The `read` set is a union; the cursor
-/// (current/position/updated) goes to whichever side saved most recently,
-/// ordered by the RFC-3339 `updated` stamp.
-fn merge_progress(existing: &ReadingProgress, incoming: &ReadingProgress) -> ReadingProgress {
-    let mut merged = incoming.clone();
-    for id in &existing.read {
-        if !merged.read.iter().any(|known| known == id) {
-            merged.read.push(id.clone());
-        }
-    }
-    if existing.updated > merged.updated {
-        merged.current = existing.current.clone();
-        merged.position = existing.position;
-        merged.updated = existing.updated.clone();
-    }
-    merged
-}
-
+/// P2-21 read-merge-write — shares `library::merge_progress` so both writers
+/// (the Svelte 精读 workspace via `save_book_progress` and this reader via
+/// PUT /progress) converge on the same `.reading.json` under one merge
+/// implementation instead of drifting copies.
 fn progress_put(request: &ReaderRequest, origin: &str, session: &ReaderSession) -> ReaderResponse {
     if request.header("origin") != Some(origin) {
         return response(
@@ -332,7 +315,7 @@ fn progress_put(request: &ReaderRequest, origin: &str, session: &ReaderSession) 
     // already quarantined it), keep the writer's payload rather than dropping
     // the update entirely.
     let merged = match crate::progress::load_progress(&session.book_root, &session.manifest) {
-        Ok(existing) => merge_progress(&existing, &progress),
+        Ok(existing) => crate::library::merge_progress(&existing, &progress),
         Err(_) => progress,
     };
     match crate::progress::save_progress(&session.book_root, &session.manifest, &merged) {
@@ -382,9 +365,10 @@ pub(crate) fn handle(
 #[cfg(test)]
 mod tests {
     use super::{
-        insert_session_at, is_book_resource, merge_progress, prune_expired_sessions,
-        ReaderSession, Sessions, MAX_READER_SESSIONS, READER_SESSION_TTL,
+        insert_session_at, is_book_resource, prune_expired_sessions, ReaderSession, Sessions,
+        MAX_READER_SESSIONS, READER_SESSION_TTL,
     };
+    use crate::library::merge_progress;
     use crate::contracts::{Manifest, ReadingProgress};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -490,5 +474,17 @@ mod tests {
         assert_eq!(merged.current, "ch-1");
         assert_eq!(merged.position, 0.2);
         assert_eq!(merged.read.len(), 2);
+        // Fractional seconds break lexicographic order: "…:00.1Z" sorts before
+        // "…:00Z" yet is newer — the newer cursor must still win.
+        let newer_fractional = progress("ch-9", 0.5, &[], "2026-07-15T10:00:00.1Z");
+        let merged = merge_progress(&existing, &newer_fractional);
+        assert_eq!(merged.current, "ch-9");
+        assert_eq!(merged.position, 0.5);
+        // Offset-vs-Z: "+08:00" is not lexicographically comparable to "Z".
+        // 2026-07-15T18:00:00+08:00 == 10:00:00Z — neither wins the cursor,
+        // but a later instant in +08:00 must beat the earlier Z-stamped one.
+        let later_offset = progress("ch-7", 0.4, &[], "2026-07-15T19:00:00+08:00");
+        let merged = merge_progress(&existing, &later_offset);
+        assert_eq!(merged.current, "ch-7");
     }
 }

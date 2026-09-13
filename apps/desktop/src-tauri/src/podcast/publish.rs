@@ -88,11 +88,19 @@ fn free_rollback_relative_path(
     Err("PUBLISH_FAILED: no free rollback path remains".to_string())
 }
 
+/// Bound the publish output walk — a junction loop would otherwise recurse
+/// without limit.
+const MAX_PUBLISH_WALK_DEPTH: usize = 64;
+
 fn collect_markdown(
     root: &Path,
     dir: &Path,
     files: &mut Vec<(String, PathBuf)>,
+    depth: usize,
 ) -> Result<(), String> {
+    if depth > MAX_PUBLISH_WALK_DEPTH {
+        return Err("PUBLISH_FAILED: output tree is too deep".to_string());
+    }
     for entry in fs::read_dir(dir).map_err(|error| format!("PUBLISH_FAILED: {error}"))? {
         let entry = entry.map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
         let file_type = entry
@@ -101,8 +109,18 @@ fn collect_markdown(
         if file_type.is_symlink() {
             return Err("PUBLISH_FAILED: output contains a symlink".to_string());
         }
+        // Junctions are reparse points, not symlinks — treat them the same:
+        // published output must be a plain managed tree.
+        if file_type.is_dir()
+            && entry
+                .metadata()
+                .map(|meta| crate::atomic_file::is_reparse_point(&meta))
+                .unwrap_or(false)
+        {
+            return Err("PUBLISH_FAILED: output contains a junction".to_string());
+        }
         if file_type.is_dir() {
-            collect_markdown(root, &entry.path(), files)?;
+            collect_markdown(root, &entry.path(), files, depth + 1)?;
             continue;
         }
         let is_markdown = entry
@@ -156,7 +174,7 @@ fn copy_outputs(
             continue;
         }
         let mut candidate = Vec::new();
-        collect_markdown(&root, &root, &mut candidate)?;
+        collect_markdown(&root, &root, &mut candidate, 0)?;
         if !candidate.is_empty() {
             files = candidate;
             source_root = Some(root);
@@ -192,6 +210,14 @@ fn copy_outputs(
         if !destination_names.insert(collision_key) {
             return Err(format!(
                 "PUBLISH_FAILED: output chapter path collides on Windows: {file_name}"
+            ));
+        }
+        // A worker output named `con.md`/`nul.md` resolves to a Win32 device
+        // node at the destination — reject it before `fs::copy` with a clear
+        // error instead of a confusing OS failure.
+        if !crate::contracts::is_safe_path_segment(&file_name) {
+            return Err(format!(
+                "PUBLISH_FAILED: output chapter name is unsafe: {file_name}"
             ));
         }
         let destination = incoming.join(&file_name);

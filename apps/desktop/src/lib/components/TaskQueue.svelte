@@ -17,6 +17,7 @@
 	export let onStartZhihuTask: (taskId: string, revision: number) => void;
 	export let onOpenTaskResult: (taskId: string) => void;
 	export let onRestartTask: (taskId: string) => void;
+	export let onApproveBudget: (taskId: string, budgetLimitCny: number) => void;
 	export let onControlTask: (
 		taskId: string,
 		action: 'pause' | 'resume' | 'cancel' | 'cancel_and_discard',
@@ -37,14 +38,18 @@
 		return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 	}
 
+	// Intl.DateTimeFormat construction is expensive — one shared formatter
+	// instead of a new object per rendered event row.
+	const eventTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+		hour: '2-digit',
+		minute: '2-digit',
+		second: '2-digit'
+	});
+
 	function eventTime(value: string): string {
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) return '--:--';
-		return new Intl.DateTimeFormat('zh-CN', {
-			hour: '2-digit',
-			minute: '2-digit',
-			second: '2-digit'
-		}).format(date);
+		return eventTimeFormatter.format(date);
 	}
 
 	function dismissQueue() {
@@ -66,7 +71,7 @@
 </script>
 
 {#if showQueue}
-	<section class="task-queue" aria-label="统一任务队列" aria-live="polite">
+	<section class="task-queue" aria-label="统一任务队列">
 		<div class="task-queue-shell">
 			<header class="task-queue-header">
 				<div>
@@ -109,6 +114,7 @@
 						{onStartZhihuTask}
 						{onOpenTaskResult}
 						{onRestartTask}
+						{onApproveBudget}
 						{onControlTask}
 						{onControlZhihuTask}
 					/>

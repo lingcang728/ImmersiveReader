@@ -462,21 +462,28 @@ fn task_has_markdown_artifacts(locations: &StorageLocations, task_id: &str) -> b
 }
 
 /// User-facing retry: prefer re-publish of existing markdown (fast, no re-transcribe);
-/// otherwise clone a fresh task revision for a full re-run.
+/// otherwise clone a fresh task revision for a full re-run. `budget_limit_cny`
+/// approves a higher per-task API ceiling — the only way forward for terminal
+/// `approve_budget` tasks, which deliberately stay `can_retry = false` so a
+/// plain retry cannot silently spend more than the approved limit.
 pub fn retry_task_at(
     control: &mut crate::control::ControlDb,
     locations: &StorageLocations,
     task_id: &str,
+    budget_limit_cny: Option<f64>,
 ) -> Result<(TaskSnapshot, RetryKind), String> {
     validate_task_id(task_id)?;
     let snapshot = control
         .task_snapshot(task_id)?
         .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
-    if !snapshot.can_retry
-        || !matches!(
-            snapshot.lifecycle_state,
-            crate::tasks::LifecycleState::Terminal
-        )
+    let budget_approved = matches!(
+        snapshot.required_action,
+        crate::tasks::RequiredAction::ApproveBudget
+    ) && budget_limit_cny.is_some_and(|limit| limit.is_finite() && limit > 0.0);
+    if !matches!(
+        snapshot.lifecycle_state,
+        crate::tasks::LifecycleState::Terminal
+    ) || (!snapshot.can_retry && !budget_approved)
     {
         return Err("TASK_NOT_RETRYABLE".to_string());
     }
@@ -526,7 +533,8 @@ pub fn retry_task_at(
         }
     }
 
-    let restarted = restart_incompatible_task_at(control, locations, task_id)?;
+    let restarted =
+        restart_incompatible_task_at(control, locations, task_id, budget_limit_cny)?;
     Ok((restarted, RetryKind::Restarted))
 }
 
@@ -540,16 +548,20 @@ pub fn restart_incompatible_task_at(
     control: &mut crate::control::ControlDb,
     locations: &StorageLocations,
     task_id: &str,
+    budget_limit_cny: Option<f64>,
 ) -> Result<TaskSnapshot, String> {
     validate_task_id(task_id)?;
     let snapshot = control
         .task_snapshot(task_id)?
         .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
-    if !snapshot.can_retry
-        || !matches!(
-            snapshot.lifecycle_state,
-            crate::tasks::LifecycleState::Terminal
-        )
+    let budget_approved = matches!(
+        snapshot.required_action,
+        crate::tasks::RequiredAction::ApproveBudget
+    ) && budget_limit_cny.is_some_and(|limit| limit.is_finite() && limit > 0.0);
+    if !matches!(
+        snapshot.lifecycle_state,
+        crate::tasks::LifecycleState::Terminal
+    ) || (!snapshot.can_retry && !budget_approved)
     {
         return Err("TASK_NOT_RETRYABLE".to_string());
     }
@@ -661,6 +673,14 @@ pub fn restart_incompatible_task_at(
             publish_obj["revision"] = json!(revision);
             publish_obj["incomingRelativePath"] =
                 Value::String(format!(".incoming/{new_task_id}"));
+        }
+        if let Some(limit) = budget_limit_cny {
+            if let Some(options_obj) = new_spec.get_mut("options") {
+                // The worker reads budgetLimitCny (falling back to
+                // maxApiCostCny); raising it is the user's explicit approval
+                // to spend up to the new ceiling on this re-run.
+                options_obj["budgetLimitCny"] = json!(limit);
+            }
         }
         let new_task_root = crate::atomic_file::long_path(
             &locations
@@ -941,7 +961,7 @@ mod tests {
             .persist_task_event(&event)
             .expect("failed task must persist");
 
-        let restarted = restart_incompatible_task_at(&mut control, &locations, "task-old")
+        let restarted = restart_incompatible_task_at(&mut control, &locations, "task-old", None)
             .expect("restart must create a new revision");
         assert_ne!(restarted.id, "task-old");
         assert_eq!(restarted.revision, 1);
@@ -1082,7 +1102,7 @@ mod tests {
         control.persist_task_event(&event).expect("persist failed task");
 
         let (result, kind) =
-            retry_task_at(&mut control, &locations, task_id).expect("retry must republish");
+            retry_task_at(&mut control, &locations, task_id, None).expect("retry must republish");
         assert_eq!(kind, RetryKind::Republished);
         assert_eq!(result.id, task_id);
         assert_eq!(result.outcome, TaskOutcome::Success);

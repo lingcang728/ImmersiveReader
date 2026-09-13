@@ -70,7 +70,17 @@ async function loadCurrentVersion(): Promise<void> {
 	patch({ currentVersion: await getVersion() });
 }
 
-export async function checkForDesktopUpdate(manual = false): Promise<void> {
+let checkInFlight: Promise<void> | null = null;
+
+export function checkForDesktopUpdate(manual = false): Promise<void> {
+	if (checkInFlight) return checkInFlight;
+	checkInFlight = doCheckForDesktopUpdate(manual).finally(() => {
+		checkInFlight = null;
+	});
+	return checkInFlight;
+}
+
+async function doCheckForDesktopUpdate(manual: boolean): Promise<void> {
 	if (!isTauriRuntime()) return;
 	patch({ status: "checking", error: "" });
 	try {

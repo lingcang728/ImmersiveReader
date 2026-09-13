@@ -38,9 +38,11 @@ export interface BookSummary {
 	chapterCount: number;
 	readCount: number;
 	progress: number;
-	currentChapterTitle?: string;
+	// Rust `Option<String>` serializes as explicit `null`, not a missing key —
+	// the type must say so or `?.`/truthiness hides the real shape.
+	currentChapterTitle?: string | null;
 	updatedAt: string;
-	lastReadAt?: string;
+	lastReadAt?: string | null;
 }
 
 export interface LibraryIssue {

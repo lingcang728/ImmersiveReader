@@ -20,6 +20,10 @@ pub enum PublishPhase {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishTransaction {
+    // Accept integral floats (`1.0`) — the schema `const` is numeric-equal
+    // semantics, and a journal written/rewritten by another implementation
+    // must not strand publish recovery.
+    #[serde(deserialize_with = "crate::contracts::deserialize_schema_version")]
     pub schema_version: u32,
     pub transaction_id: String,
     pub task_id: String,
@@ -29,6 +33,7 @@ pub struct PublishTransaction {
     pub rollback_relative_path: String,
     pub manifest_sha256: String,
     pub provenance_sha256: String,
+    #[serde(deserialize_with = "crate::contracts::deserialize_u64")]
     pub revision: u64,
     pub phase: PublishPhase,
     pub created_at: String,
@@ -399,4 +404,105 @@ pub fn recover_transaction(
     let mut transaction = load_transaction(root, transaction_id)?;
     advance(root, &mut transaction, None)?;
     Ok(transaction)
+}
+
+/// Keep `.revisions/<source>` rollback slots bounded — without a cap every
+/// republish archives another copy forever.
+const MAX_REVISION_SLOTS_PER_SOURCE: usize = 8;
+
+/// Startup GC for publish residue no journal can ever reclaim:
+/// - `.incoming/<tx>` staging dirs whose `.transactions/<tx>.json` journal is
+///   gone (a retry deletes the journal before re-running; a crash in that gap
+///   strands the staging dir permanently). `failed-*` quarantine copies are
+///   the only salvage of rejected content — never auto-deleted.
+/// - `.revisions/<source>` slots beyond the newest few per source.
+///
+/// Runs inside `setup`, before any publish can be in flight — anything left
+/// here is crash residue by definition.
+pub fn sweep_publish_residue(root: &Path) {
+    let incoming = root.join(".incoming");
+    if let Ok(entries) = fs::read_dir(&incoming) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("failed-") {
+                continue;
+            }
+            // A reparse point gets unlinked, never traversed.
+            let is_reparse = entry
+                .metadata()
+                .map(|meta| crate::atomic_file::is_reparse_point(&meta))
+                .unwrap_or(false);
+            if is_reparse {
+                let _ = fs::remove_dir(&path);
+                continue;
+            }
+            if !path.is_dir() {
+                continue;
+            }
+            let journal = root.join(".transactions").join(format!("{name}.json"));
+            if journal.exists() {
+                continue;
+            }
+            if let Err(error) = fs::remove_dir_all(&path) {
+                eprintln!(
+                    "publish residue sweep could not remove orphaned staging {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+    let revisions = root.join(".revisions");
+    if let Ok(sources) = fs::read_dir(&revisions) {
+        for source in sources.flatten() {
+            let source_path = source.path();
+            let is_reparse = source
+                .metadata()
+                .map(|meta| crate::atomic_file::is_reparse_point(&meta))
+                .unwrap_or(false);
+            if is_reparse {
+                let _ = fs::remove_dir(&source_path);
+                continue;
+            }
+            if !source_path.is_dir() {
+                continue;
+            }
+            let Ok(mut slots) = fs::read_dir(&source_path).map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| {
+                        let modified = entry
+                            .metadata()
+                            .and_then(|meta| meta.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        (entry.path(), modified)
+                    })
+                    .collect::<Vec<_>>()
+            }) else {
+                continue;
+            };
+            if slots.len() <= MAX_REVISION_SLOTS_PER_SOURCE {
+                continue;
+            }
+            // Newest first; everything past the cap is deleted.
+            slots.sort_by_key(|slot| std::cmp::Reverse(slot.1));
+            for (slot, _) in slots.into_iter().skip(MAX_REVISION_SLOTS_PER_SOURCE) {
+                let is_reparse = slot
+                    .symlink_metadata()
+                    .map(|meta| crate::atomic_file::is_reparse_point(&meta))
+                    .unwrap_or(false);
+                let result = if is_reparse {
+                    fs::remove_dir(&slot)
+                } else {
+                    fs::remove_dir_all(&slot)
+                };
+                if let Err(error) = result {
+                    eprintln!(
+                        "publish residue sweep could not remove revision slot {}: {error}",
+                        slot.display()
+                    );
+                }
+            }
+        }
+    }
 }

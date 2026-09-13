@@ -119,5 +119,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw '当前 Tag 的 GitHub Release 不存在。' }
           $global:LASTEXITCODE = 0
           $installer = (Get-ChildItem -LiteralPath output/release -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
+          if (-not $installer -or -not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+            throw 'output/release 下没有 NSIS 安装包，拒绝发布空 Release。'
+          }
+          if (-not (Test-Path -LiteralPath 'output/release/latest.json' -PathType Leaf)) {
+            throw 'output/release/latest.json 缺失，拒绝发布。'
+          }
+          # gh is a native CLI: pwsh does NOT turn a non-zero exit code into a
+          # terminating error — check every gh call or a failed upload would
+          # silently publish a Release with no installer.
           gh release upload '${{ github.ref_name }}' $installer output/release/latest.json --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload 失败（exit $LASTEXITCODE）。" }
           gh release edit '${{ github.ref_name }}' --draft=false --prerelease=false --title "沉浸阅读 ${{ github.ref_name }}" --notes-file $notesFile
+          if ($LASTEXITCODE -ne 0) { throw "gh release edit 失败（exit $LASTEXITCODE）。" }

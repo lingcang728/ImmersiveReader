@@ -52,7 +52,8 @@
     "publisher": "lingcang728",
     "windows": {
       "nsis": {
-        "languages": ["SimpChinese"]
+        "languages": ["SimpChinese"],
+        "installerHooks": "installer-hooks.nsi"
       }
     },
     "createUpdaterArtifacts": true,

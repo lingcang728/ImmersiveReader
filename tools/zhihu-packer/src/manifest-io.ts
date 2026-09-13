@@ -29,12 +29,23 @@ export function authorDirectoryName(authorName: string, authorId: string): strin
   return sanitizeFilename(authorName, authorId);
 }
 
-function resolveArticlePath(projectRoot: string, authorPath: string, outputPath: string): string | null {
-  const candidates = [
-    path.isAbsolute(outputPath) ? outputPath : path.resolve(projectRoot, outputPath),
-    path.join(authorPath, path.basename(outputPath)),
+function resolveArticlePath(
+  projectRoot: string,
+  authorPath: string,
+  outputPath: string,
+): { filePath: string; usedBasenameFallback: boolean } | null {
+  const candidates: Array<{ filePath: string; usedBasenameFallback: boolean }> = [
+    {
+      filePath: path.isAbsolute(outputPath) ? outputPath : path.resolve(projectRoot, outputPath),
+      usedBasenameFallback: false,
+    },
+    { filePath: path.join(authorPath, path.basename(outputPath)), usedBasenameFallback: true },
   ];
-  return candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile()) ?? null;
+  return (
+    candidates.find(
+      (candidate) => fs.existsSync(candidate.filePath) && fs.statSync(candidate.filePath).isFile(),
+    ) ?? null
+  );
 }
 
 function listMarkdownFiles(root: string, current = root): readonly string[] {
@@ -76,15 +87,21 @@ export function generateAuthorManifest(input: GenerateAuthorManifestInput): Mani
   const archivedItems: ArchivedItem[] = [];
   const representedPaths = new Set<string>();
   for (const item of items) {
-    const filePath = resolveArticlePath(projectRoot, authorPath, item.output_path);
-    if (filePath === null) {
+    const resolved = resolveArticlePath(projectRoot, authorPath, item.output_path);
+    if (resolved === null) {
       missingItems += 1;
       continue;
     }
-    const relativePath = path.relative(authorPath, filePath).replaceAll("\\", "/");
-    const markdown = fs.readFileSync(filePath, "utf8");
+    const relativePath = path.relative(authorPath, resolved.filePath).replaceAll("\\", "/");
+    const markdown = fs.readFileSync(resolved.filePath, "utf8");
     representedPaths.add(relativePath.toLowerCase());
-    representedPaths.add(path.basename(relativePath).toLowerCase());
+    // Registering the bare basename unconditionally would wrongly suppress a
+    // real orphan that merely shares a file name with this chapter in a
+    // different subdirectory — only mark it when resolution actually went
+    // through the basename fallback.
+    if (resolved.usedBasenameFallback) {
+      representedPaths.add(path.basename(relativePath).toLowerCase());
+    }
     archivedItems.push({
       id: item.id,
       authorId: item.author_id,

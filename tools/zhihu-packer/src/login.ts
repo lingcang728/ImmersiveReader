@@ -1,4 +1,4 @@
-import { getBrowserContext, closeBrowserContext, syncCookiesToObscuraStorage } from './browser.js';
+import { getBrowserContext, closeBrowserContext, syncCookiesToObscuraStorage, markInteractiveSession } from './browser.js';
 import { logger } from './utils.js';
 
 export async function runLogin(): Promise<void> {
@@ -7,7 +7,9 @@ export async function runLogin(): Promise<void> {
   try {
     // 浏览器启动/开页也可能抛错：必须进 try，否则 finally 的 closeBrowserContext
     // 走不到，泄漏的有头窗口会一直被复用（P1-7/P1-8）。
-    const context = await getBrowserContext(false); // 有头模式
+    // purpose=interactive：任务持有浏览器时拒绝登录而不是互杀（P2）；
+    // 会话旗标在 getBrowserContext 锁内立起。
+    const context = await getBrowserContext(false, 'interactive');
     const page = await context.newPage();
     await page.goto('https://www.zhihu.com/signin', { waitUntil: 'domcontentloaded' });
     
@@ -53,6 +55,7 @@ export async function runLogin(): Promise<void> {
   } catch (e: any) {
     logger.error(`登录过程中发生错误: ${e.message}`);
   } finally {
+    markInteractiveSession(false);
     await closeBrowserContext();
     logger.info('浏览器已关闭，登录态已保存。');
   }

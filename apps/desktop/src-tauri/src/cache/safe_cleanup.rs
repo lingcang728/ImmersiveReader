@@ -31,12 +31,28 @@ pub struct CacheClearResult {
     pub protected_roots_verified: bool,
 }
 
+/// Bound the cleanup walk — a junction loop would otherwise recurse forever.
+const MAX_CLEANUP_WALK_DEPTH: usize = 64;
+
 fn walk_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    walk_files_at(root, files, 0)
+}
+
+fn walk_files_at(root: &Path, files: &mut Vec<PathBuf>, depth: usize) -> Result<(), String> {
+    if depth > MAX_CLEANUP_WALK_DEPTH {
+        return Ok(());
+    }
     if !root.exists() {
         return Ok(());
     }
     let metadata = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
-    if metadata.file_type().is_symlink() || metadata.is_file() {
+    // Junctions are reparse points, not symlinks — push the link itself so
+    // the caller unlinks it instead of enumerating the target's children
+    // (which would resolve outside the cache root).
+    if metadata.file_type().is_symlink()
+        || crate::atomic_file::is_reparse_point(&metadata)
+        || metadata.is_file()
+    {
         files.push(root.to_path_buf());
         return Ok(());
     }
@@ -46,7 +62,7 @@ fn walk_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
-        walk_files(&entry.path(), files)?;
+        walk_files_at(&entry.path(), files, depth + 1)?;
     }
     Ok(())
 }
@@ -85,8 +101,14 @@ fn remove_managed_path(locations: &StorageLocations, path: &Path) -> Result<(u64
     }
     let metrics = tree_metrics(&managed)?;
     let metadata = fs::symlink_metadata(&managed).map_err(|error| error.to_string())?;
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+    if metadata.is_dir()
+        && !metadata.file_type().is_symlink()
+        && !crate::atomic_file::is_reparse_point(&metadata)
+    {
         fs::remove_dir_all(managed).map_err(|error| error.to_string())?;
+    } else if metadata.is_dir() {
+        // A junction/mount point: unlink the link itself — never recurse.
+        fs::remove_dir(managed).map_err(|error| error.to_string())?;
     } else {
         fs::remove_file(managed).map_err(|error| error.to_string())?;
     }

@@ -89,8 +89,9 @@ export type PublishPhase = "prepared" | "old_moved" | "new_moved" | "committed" 
  * `.transactions/<transactionId>.json` written by Rust
  * `publish/transaction.rs`. Mirrors `PublishTransaction` and
  * `schemas/publish-transaction.schema.json`. (The zhihu-packer journal is a
- * separate, similar contract — it carries `sourceId` instead of
- * `transactionId`/`taskId`.)
+ * separate, similar contract — it carries `authorId`/`sourceId` in addition
+ * to `transactionId`/`taskId`, so it does not validate against this schema's
+ * `additionalProperties: false`.)
  */
 export type PublishTransaction = {
   readonly schemaVersion: 1;
@@ -130,7 +131,10 @@ function requireRecord(value: unknown, field: string): Readonly<Record<string, u
 }
 
 function requireString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
+  // Blank check uses the Unicode White_Space property so it agrees with Rust
+  // `str::trim` exactly — JS `trim` would accept NEL-only strings and reject
+  // FEFF-only ones that Rust treats the opposite way.
+  if (typeof value !== "string" || !/\P{White_Space}/u.test(value)) {
     throw new ContractParseError(field, "must be a non-empty string");
   }
   return value;

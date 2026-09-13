@@ -28,7 +28,12 @@ if (-not (Test-Path -LiteralPath $source) -or -not (Test-Path -LiteralPath $sign
 }
 
 New-Item -ItemType Directory -Force -Path $output | Out-Null
-Get-ChildItem -LiteralPath $output -File -ErrorAction SilentlyContinue | Remove-Item -Force
+# Only prior release artifacts may be removed — the "inside the repo" check
+# above still permits pointing at a source directory; wiping every file there
+# would delete tracked sources. Non-artifact files must survive.
+Get-ChildItem -LiteralPath $output -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -like '*-setup.exe' -or $_.Name -eq 'latest.json' } |
+  Remove-Item -Force
 $installerName = "ImmersiveReader_${version}_x64-setup.exe"
 $installer = Join-Path $output $installerName
 Copy-Item -LiteralPath $source -Destination $installer -Force

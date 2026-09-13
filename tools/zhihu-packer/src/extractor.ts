@@ -896,12 +896,13 @@ export async function writeMarkdownFile(
     fs.mkdirSync(authorPath, { recursive: true });
   }
 
-  // 2. 格式化日期 YYYY-MM-DD
+  // 2. 格式化日期 YYYY-MM-DD — out-of-range timestamps produce an Invalid
+  // Date whose getFullYear()/getMonth() return NaN; a `NaN-NaN-NaN` filename
+  // is garbage, so fall back to a stable placeholder instead.
   const dateObj = new Date(extracted.createdTime * 1000);
-  const yyyy = dateObj.getFullYear();
-  const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
-  const dd = String(dateObj.getDate()).padStart(2, '0');
-  const dateStr = `${yyyy}-${mm}-${dd}`;
+  const dateStr = Number.isNaN(dateObj.getTime())
+    ? 'unknown'
+    : `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
 
   // 3. 构造文件名: YYYY-MM-DD-问题/文章标题_ID.md
   const rawId = extracted.id.split(':')[1];

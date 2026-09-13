@@ -1,5 +1,5 @@
 import type { Page } from 'playwright-core';
-import { getBrowserContext, closeBrowserContext, syncCookiesToObscuraStorage } from './browser.js';
+import { getBrowserContext, closeBrowserContext, syncCookiesToObscuraStorage, markTaskBrowsing } from './browser.js';
 import { scanLimitForSelection, scrapePeopleIndex, ScrapedIndexItem, selectIndexItems } from './indexer.js';
 import { scrapeAnswer, scrapeArticle, writeMarkdownFile } from './extractor.js';
 import { 
@@ -330,6 +330,8 @@ async function runTaskInternal(taskId: string) {
   let context;
   try {
     context = await getBrowserContext(true); // 无头模式
+    // 任务持有浏览器期间，interactive（登录）请求被拒而不是互杀（P2）。
+    markTaskBrowsing(true);
     let page = await context.newPage();
     const outputBaseDir = path.resolve(process.cwd(), task.output_dir);
 
@@ -797,6 +799,7 @@ async function runTaskInternal(taskId: string) {
       emitProgress(taskId, 'failed', `严重错误导致任务异常中止: ${e.message}`);
     }
   } finally {
+    markTaskBrowsing(false);
     await closeBrowserContext();
   }
 }
@@ -853,6 +856,13 @@ export function generateAuthorIndex(
   const answers = items.filter(i => i.item_type === 'answer');
   const articles = items.filter(i => i.item_type === 'article');
 
+  // created_time can be missing/out of range in the DB — an Invalid Date
+  // would throw inside toISOString and kill the whole index generation.
+  const indexItemDate = (createdTime: number): string => {
+    const date = new Date(createdTime * 1000);
+    return Number.isNaN(date.getTime()) ? '未知' : date.toISOString().split('T')[0];
+  };
+
   let md = `# ${authorName} 的内容归档\n\n`;
   md += `> 本归档由 Zhihu Packer 自动生成。  \n`;
   md += `> 共归档回答: **${answers.length}** 篇，文章: **${articles.length}** 篇。  \n\n`;
@@ -864,7 +874,7 @@ export function generateAuthorIndex(
     for (const item of answers) {
       if (!item.output_path) continue;
       const fileName = path.basename(item.output_path);
-      const dateStr = new Date(item.created_time * 1000).toISOString().split('T')[0];
+      const dateStr = indexItemDate(item.created_time);
       md += `- [[${escapeWikilinkComponent(fileName)}|${escapeWikilinkComponent(item.title)}]] (发布于: ${dateStr} | 赞同数: ${item.voteup_count})\n`;
     }
     md += `\n`;
@@ -877,7 +887,7 @@ export function generateAuthorIndex(
     for (const item of articles) {
       if (!item.output_path) continue;
       const fileName = path.basename(item.output_path);
-      const dateStr = new Date(item.created_time * 1000).toISOString().split('T')[0];
+      const dateStr = indexItemDate(item.created_time);
       md += `- [[${escapeWikilinkComponent(fileName)}|${escapeWikilinkComponent(item.title)}]] (发布于: ${dateStr} | 赞同数: ${item.voteup_count})\n`;
     }
     md += `\n`;

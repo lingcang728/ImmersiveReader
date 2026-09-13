@@ -497,6 +497,35 @@ export function publishTaskStage(
 ): ZhihuPublishResult {
   const root = path.resolve(outputRoot);
   const incomingRoot = taskIncomingRoot(root, taskId);
+  // Crash recovery: a journal left in prepared/old_moved/new_moved means the
+  // process died mid-transaction. new_moved + final present → the new tree
+  // already landed, just commit it; otherwise restore the rollback copy of
+  // the previous archive so the retry sees the same world the first attempt
+  // did (without this, a re-run threw "expected exactly one author directory"
+  // or silently dropped the previously published chapters).
+  const crashed = readTransaction(root, taskId);
+  if (
+    crashed &&
+    crashed.authorId === authorId &&
+    (crashed.phase === "prepared" || crashed.phase === "old_moved" || crashed.phase === "new_moved")
+  ) {
+    const crashedFinal = safePublishedRoot(root, crashed.finalRelativePath);
+    const crashedRollback = safePublishedRoot(root, crashed.rollbackRelativePath);
+    if (crashed.phase === "new_moved" && fs.existsSync(crashedFinal)) {
+      validateMetadata(root, crashed, crashed.finalRelativePath);
+      setPhase(root, crashed, "committed");
+      cleanupPublishArtifacts(root, taskId, authorId);
+      return {
+        transaction: crashed,
+        finalRoot: crashedFinal,
+        authorDirectory: path.basename(crashedFinal),
+      };
+    }
+    if (!fs.existsSync(crashedFinal) && fs.existsSync(crashedRollback)) {
+      ensureDirectory(path.dirname(crashedFinal));
+      fs.renameSync(crashedRollback, crashedFinal);
+    }
+  }
   const existingResult = committedResult(root, taskId, authorId, metadata);
   let authorDirectories = listAuthorDirectories(incomingRoot);
   if (authorDirectories.length === 0 && existingResult) {
@@ -527,6 +556,11 @@ export function publishTaskStage(
       throw new Error("ZHIHU_PUBLISH_FAILED: retry author directory changed");
     }
     copyPublishedTree(previousFinal, incomingAuthor);
+  } else if (fs.existsSync(finalRoot) && fs.existsSync(incomingAuthor)) {
+    // Crash-recovered or cross-task republish: the existing archive may hold
+    // chapters this run did not re-fetch — merge them into the staging tree
+    // instead of dropping them into the rollback copy.
+    copyPublishedTree(finalRoot, incomingAuthor);
   }
   const revision = nextRevision(revisionDirectory(root, authorId), finalRoot);
   const rollbackRoot = path.join(revisionDirectory(root, authorId), String(revision));

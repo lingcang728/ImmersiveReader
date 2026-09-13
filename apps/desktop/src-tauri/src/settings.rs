@@ -10,12 +10,27 @@ mod recovery;
 use recovery::load_status_from;
 pub use recovery::SettingsLoadState;
 
+/// Same acceptance set as `contracts::deserialize_schema_version`, pinned to
+/// the settings schema `const: 3` — the schema treats `3` and `3.0` as the
+/// same number, so the reader must too.
+fn deserialize_settings_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value.as_f64() {
+        Some(3.0) => Ok(3),
+        _ => Err(serde::de::Error::custom("unsupported settings schema version")),
+    }
+}
+
 // P2-29: `additionalProperties: false` in settings.schema.json — unknown keys
 // must fail here too instead of being silently dropped on load.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    #[serde(deserialize_with = "deserialize_settings_schema_version")]
     pub schema_version: u32,
     pub library_root: String,
 }
@@ -81,9 +96,15 @@ pub(crate) fn load_compatible_from(path: &Path) -> Result<AppSettings, String> {
     // "expected value at line 1 column 1".
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw.as_str());
     let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    // Accept integral floats (`3.0`, `3e0`) — the schema `const` and TS treat
+    // them as the same number; a bare as_u64 would misread them as "missing".
     let version = value
         .get("schemaVersion")
-        .and_then(serde_json::Value::as_u64)
+        .and_then(|raw| raw.as_u64().or_else(|| {
+            raw.as_f64()
+                .filter(|float| float.fract() == 0.0 && *float >= 0.0 && *float <= u64::MAX as f64)
+                .map(|float| float as u64)
+        }))
         .ok_or_else(|| "Settings schema version is missing".to_string())?;
     let settings = match version {
         1 | 2 => {
@@ -159,6 +180,16 @@ pub fn load_settings() -> Result<AppSettings, String> {
     remember_file_stamp(&path);
     match load_status_from(&path) {
         SettingsLoadState::Active(settings) => {
+            // Load/save must be symmetric: an externally written
+            // `libraryRoot` of `C:\` or one overlapping a managed root would
+            // bypass the save-side `validate_library_root` entirely. Validate
+            // on load too — a bad root enters Recovery instead of taking
+            // effect.
+            let locations = crate::storage::StorageLocations::current()?;
+            crate::storage::validate_library_root(
+                Path::new(&settings.library_root),
+                &locations,
+            )?;
             // Always keep production library at Documents/沉浸阅读/Library.
             // Repair any legacy project-path override silently.
             Ok(normalize_production_library_root(settings)?)

@@ -168,7 +168,25 @@ fn title_from_path(relative: &str) -> String {
 pub fn sweep_staging_dirs(library_root: &Path) {
     let staging_root =
         crate::atomic_file::long_path(&library_root.join("手动").join(IMPORT_STAGING_DIR));
-    if !staging_root.is_dir() {
+    // Junction/mount-point guard: `is_dir()` follows reparse points, so a
+    // `.incoming` swapped for a junction would make read_dir enumerate the
+    // *target's* children and remove_dir_all delete them outside the library.
+    // A reparse-point root gets unlinked (remove_dir drops the link, never
+    // the target) instead of traversed; the same applies per entry.
+    let root_meta = match fs::symlink_metadata(&staging_root) {
+        Ok(meta) => meta,
+        Err(_) => return,
+    };
+    if crate::atomic_file::is_reparse_point(&root_meta) {
+        if let Err(error) = fs::remove_dir(&staging_root) {
+            eprintln!(
+                "import staging sweep could not unlink reparse point {}: {error}",
+                staging_root.display()
+            );
+        }
+        return;
+    }
+    if !root_meta.is_dir() {
         return;
     }
     let entries = match fs::read_dir(&staging_root) {
@@ -183,7 +201,17 @@ pub fn sweep_staging_dirs(library_root: &Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if let Err(error) = fs::remove_dir_all(crate::atomic_file::long_path(&path)) {
+        let is_reparse = entry
+            .metadata()
+            .map(|meta| crate::atomic_file::is_reparse_point(&meta))
+            .unwrap_or(false);
+        let result = if is_reparse {
+            // Unlink the link itself; never recurse through it.
+            fs::remove_dir(crate::atomic_file::long_path(&path))
+        } else {
+            fs::remove_dir_all(crate::atomic_file::long_path(&path))
+        };
+        if let Err(error) = result {
             eprintln!(
                 "import staging sweep could not remove {}: {error}",
                 path.display()
@@ -236,6 +264,14 @@ pub fn import_markdown_folder(source: &Path, library_root: &Path) -> Result<Impo
                 .unwrap_or(false);
             if oversized {
                 issue(&mut issues, &path, "MARKDOWN_FILE_TOO_LARGE");
+                continue;
+            }
+            // A source file named `con.md`/`nul.md` (producible via `\\?\`,
+            // WSL or zip) resolves to a Win32 device node at the destination
+            // — the copy fails with a confusing OS error. Check the relative
+            // path up front so the file is reported with a precise issue.
+            if !crate::contracts::is_safe_relative_path(&relative) {
+                issue(&mut issues, &path, "UNSAFE_RELATIVE_PATH");
                 continue;
             }
             let destination = crate::atomic_file::long_path(

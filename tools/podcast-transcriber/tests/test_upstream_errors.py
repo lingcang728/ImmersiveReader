@@ -195,6 +195,37 @@ def test_budget_dead_pid_reservation_is_swept(tmp_path, monkeypatch) -> None:
     assert "dead-1" not in live
 
 
+def test_budget_spend_is_scoped_per_task_run(tmp_path, monkeypatch) -> None:
+    """The approved limit is per task: spend booked under run A must not eat
+    run B's approval, while the same run's spend stays cumulative."""
+    ledger = tmp_path / "budget.json"
+    monkeypatch.setenv("PODCAST_TRANSCRIBER_BUDGET_LIMIT_CNY", "0.00005")
+    monkeypatch.setenv("PODCAST_TRANSCRIBER_BUDGET_STATE_PATH", str(ledger))
+    config = {"model": "deepseek-v4-flash", "max_tokens": 16}
+
+    # Run A spends against its budget.
+    monkeypatch.setenv("PODCAST_TRANSCRIBER_RUN_ID", "task-a")
+    reservation = reserve_budget("short prompt", config, retry_attempts=1)
+    settle_budget(reservation, {"prompt_tokens": 1, "completion_tokens": 1}, config)
+
+    # Run B — a different task with its own approval — still has headroom.
+    monkeypatch.setenv("PODCAST_TRANSCRIBER_RUN_ID", "task-b")
+    assert reserve_budget("short prompt", config, retry_attempts=1) > 0
+
+    # Same task, new attempt: run A's spend is cumulative within the bucket.
+    monkeypatch.setenv("PODCAST_TRANSCRIBER_RUN_ID", "task-a")
+    try:
+        reserve_budget("short prompt", config, retry_attempts=4)
+    except PodcastBudgetExceededError as error:
+        assert error.code == "BUDGET_CONFIRMATION_REQUIRED"
+    else:
+        raise AssertionError("run A must not regain budget already spent")
+
+    state = json.loads(ledger.read_text())
+    assert state["spent_by_run"]["task-a"] > 0
+    assert state["spent_cny"] > 0  # global total retained for diagnostics
+
+
 def test_release_budget_returns_reservation(tmp_path, monkeypatch) -> None:
     ledger = tmp_path / "budget.json"
     monkeypatch.setenv("PODCAST_TRANSCRIBER_BUDGET_LIMIT_CNY", "100")

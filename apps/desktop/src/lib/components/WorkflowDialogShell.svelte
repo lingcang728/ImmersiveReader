@@ -190,6 +190,8 @@
 		font-size: 13px;
 		line-height: 1.55;
 		max-width: 52ch;
+		/* Action-confirm messages carry \n\n paragraphs. */
+		white-space: pre-line;
 	}
 
 	.workflow-close {

@@ -4,6 +4,7 @@ use crate::storage::StorageLocations;
 use crate::tasks::{LifecycleState, TaskEvent, TaskKind};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -86,10 +87,6 @@ fn worker_lifecycle_state(task_id: &str) -> Option<String> {
         .and_then(|control| control.task_lifecycle_state(task_id).ok().flatten())
 }
 
-fn is_paused_state(state: &str) -> bool {
-    state.eq_ignore_ascii_case("paused") || state.eq_ignore_ascii_case("pausing")
-}
-
 fn is_terminal_state(state: &str) -> bool {
     state.eq_ignore_ascii_case("terminal") || state.eq_ignore_ascii_case("stopping")
 }
@@ -122,6 +119,20 @@ fn podcast_worker_command(
     for path in [&executable, &script, &task_spec, &data_root, &cache_root] {
         if !path.exists() {
             return Err(format!("WORKER_RUNTIME_MISSING: {}", path.display()));
+        }
+    }
+    // First run: seed <data_root>\config.json from the bundled example. With
+    // no config the pipeline resolves its translation backend to the "ollama"
+    // default — the DeepSeek key the app injects is then never used and every
+    // translation fails on a missing local Ollama install.
+    let worker_config = data_root.join("config.json");
+    if !worker_config.is_file() {
+        let example = locations
+            .runtime_root
+            .join("podcast/app/config.example.json");
+        if example.is_file() {
+            let bytes = fs::read(&example).map_err(|error| error.to_string())?;
+            crate::atomic_file::write(&worker_config, &bytes)?;
         }
     }
     let mut path_parts = vec![locations.runtime_root.join("podcast/ffmpeg")];
@@ -654,17 +665,17 @@ pub fn pause_task(task_id: &str) -> Result<(), String> {
     let entry = active
         .get_mut(task_id)
         .ok_or_else(|| "WORKER_NOT_RUNNING".to_string())?;
-    // P1-4: suspend must be idempotent. Two guards:
-    //  1. `entry.suspended` — the pairing flag; survives the DB being flipped
-    //     Paused->Running when buffered worker lines are replayed through
-    //     record_worker_line.
-    //  2. DB lifecycle — if the host already recorded Paused, never stack a
-    //     second suspend count on the process.
+    // P1-4: suspend must be idempotent. `entry.suspended` is the pairing
+    // truth; it survives the DB being flipped Paused->Running when buffered
+    // worker lines are replayed through record_worker_line.
+    //
+    // The DB lifecycle is NOT consulted for the paused check: the caller
+    // (control_podcast_task) records durable intent first, so by the time we
+    // run the DB already reads Paused and a lifecycle guard would make
+    // suspend_process_tree unreachable — the pause button would lie. Only the
+    // terminal check stays: a finished worker must not be suspended.
     let lifecycle = worker_lifecycle_state(task_id);
-    if entry.suspended
-        || lifecycle.as_deref().is_some_and(is_paused_state)
-        || lifecycle.as_deref().is_some_and(is_terminal_state)
-    {
+    if entry.suspended || lifecycle.as_deref().is_some_and(is_terminal_state) {
         return Ok(());
     }
     #[cfg(windows)]

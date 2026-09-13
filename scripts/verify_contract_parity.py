@@ -15,7 +15,12 @@ Every fixture listed in ``packages/contracts/fixtures/expectations.json`` and
      ``--with-rust`` to also run those tests from here.
 
 The tables include negative fixtures (unsafe paths, explicit nulls, missing
-required fields, non-canonical dates, unknown fields), not just valid samples.
+required fields, non-canonical dates, unknown fields, non-integer numerics),
+not just valid samples. ``provenance``/``publish-transaction`` fixtures run
+the schema + Rust legs only — the TS library has no parser for them, and the
+Rust readers are intentionally more tolerant than the schemas (all-Option
+fields, no ``deny_unknown_fields``) so old journals still load; only fixtures
+where every leg's verdict agrees are listed.
 Exit code is non-zero on any disagreement.
 """
 

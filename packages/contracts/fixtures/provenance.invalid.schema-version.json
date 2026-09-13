@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 2,
+  "bookId": "podcast:source-1",
+  "sourceId": "source-1",
+  "sourceKind": "podcast",
+  "createdByTaskId": "task-abc123",
+  "lastSuccessfulTaskId": "task-abc123",
+  "revision": 1,
+  "manifestSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "engineVersion": "engine-1",
+  "updatedAt": "2026-07-10T00:00:00+00:00"
+}

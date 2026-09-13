@@ -2,7 +2,10 @@ param(
     [switch]$DryRun,
     [Parameter(Mandatory)][string]$SourceRoot,
     [string]$LibraryRoot = (Join-Path $env:USERPROFILE 'Documents\沉浸阅读\Library'),
-    [string]$RuntimeRoot = (Join-Path $env:LOCALAPPDATA 'ImmersiveReader\zhihu')
+    # Matches storage.rs: the sidecar DB lives at Data\Zhihu\zhihu-packer.db and
+    # the browser profile at Data\Private\ZhihuProfile — not a top-level
+    # "zhihu" dir (that was the pre-v3 layout).
+    [string]$DataRoot = (Join-Path $env:LOCALAPPDATA 'ImmersiveReader\Data')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -150,9 +153,9 @@ if (-not (Test-Path -LiteralPath $SourceRoot)) {
 $sourceOutput = Join-Path $SourceRoot 'output'
 $targetOutput = Join-Path $LibraryRoot '知乎'
 $sourceDb = Join-Path $SourceRoot 'zhihu-packer.db'
-$targetDb = Join-Path $RuntimeRoot 'zhihu-packer.db'
+$targetDb = Join-Path $DataRoot 'Zhihu\zhihu-packer.db'
 $sourceProfile = Join-Path $SourceRoot '.browser-profile'
-$targetProfile = Join-Path $RuntimeRoot 'browser-profile'
+$targetProfile = Join-Path $DataRoot 'Private\ZhihuProfile'
 $reports = [System.Collections.Generic.List[object]]::new()
 
 foreach ($book in Get-ChildItem -LiteralPath $sourceOutput -Directory) {
@@ -191,7 +194,7 @@ $report = [ordered]@{
     dryRun = $DryRun.IsPresent
     sourceRoot = $SourceRoot
     libraryRoot = $LibraryRoot
-    runtimeRoot = $RuntimeRoot
+    dataRoot = $DataRoot
     database = $dbState
     trees = @($reports)
 }

@@ -37,12 +37,19 @@ pub struct LibraryScan {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookProvenance {
+    // Integral floats (`1.0`) are valid per the schema `const`; keep the read
+    // set identical to manifest/reading schemaVersion handling.
+    #[serde(deserialize_with = "crate::contracts::deserialize_schema_version")]
     pub schema_version: u32,
     pub book_id: String,
     pub source_id: Option<String>,
     pub source_kind: Option<String>,
     pub created_by_task_id: Option<String>,
     pub last_successful_task_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::contracts::deserialize_optional_u64"
+    )]
     pub revision: Option<u64>,
     pub manifest_sha256: Option<String>,
     pub engine_version: Option<String>,
@@ -111,7 +118,32 @@ fn collect_manifests(
         if file_type.is_symlink() {
             continue;
         }
+        // A junction is a reparse point, not a symlink — `is_symlink()` does
+        // not catch it. Skipping reparse points keeps an out-of-library
+        // junction from being collected as a book (it would be readable yet
+        // undeletable: ensure_book_inside_library rejects the resolved root).
+        match entry.metadata() {
+            Ok(metadata) if crate::atomic_file::is_reparse_point(&metadata) => continue,
+            Ok(_) => {}
+            Err(error) => {
+                issues.push(LibraryIssue {
+                    path: entry.path().to_string_lossy().into_owned(),
+                    message: format!("条目元数据无法读取：{error}"),
+                });
+                continue;
+            }
+        }
         if file_type.is_file() && entry.file_name() == "manifest.json" {
+            // A manifest directly at the library root would make the root
+            // itself a phantom book: visible and readable (including .trash
+            // contents via chapter paths) but impossible to remove.
+            if entry.path().parent() == Some(dir) && depth == 0 {
+                issues.push(LibraryIssue {
+                    path: entry.path().to_string_lossy().into_owned(),
+                    message: "manifest.json 必须位于书籍子目录，书库根的清单已忽略".to_string(),
+                });
+                continue;
+            }
             manifests.push(entry.path());
         } else if file_type.is_dir() {
             let name = entry.file_name();
@@ -207,11 +239,15 @@ fn progress_value(manifest: &Manifest, progress: &ReadingProgress) -> f64 {
     if manifest.chapters.is_empty() {
         return 0.0;
     }
+    // `read` is a set — count each known chapter id once even if a dirty
+    // array repeats it (mirrors the TS `Set` semantics in
+    // packages/contracts `progressValue`).
     let read_count = progress
         .read
         .iter()
         .filter(|id| manifest.chapters.iter().any(|chapter| &chapter.id == *id))
-        .count();
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     let current_is_read = progress.read.contains(&progress.current);
     let current_exists = manifest
         .chapters
@@ -417,7 +453,18 @@ pub(crate) fn merge_progress(
             merged.read.push(id.clone());
         }
     }
-    if existing.updated > merged.updated {
+    // RFC-3339 strings do not order chronologically under plain string
+    // compare: "…T01:00:00.1Z" < "…T01:00:00Z" lexicographically yet is newer,
+    // and "+08:00"/"-08:00" offsets vs "Z" are not comparable at all. Parse
+    // first; fall back to the lexical order only when a side is unparseable.
+    let existing_wins = match (
+        chrono::DateTime::parse_from_rfc3339(&existing.updated),
+        chrono::DateTime::parse_from_rfc3339(&merged.updated),
+    ) {
+        (Ok(existing_at), Ok(merged_at)) => existing_at > merged_at,
+        _ => existing.updated > merged.updated,
+    };
+    if existing_wins {
         merged.current = existing.current.clone();
         merged.position = existing.position;
         merged.updated = existing.updated.clone();

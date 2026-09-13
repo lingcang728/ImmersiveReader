@@ -281,6 +281,12 @@ pub fn start_task(
     crate::cache::validate_task_id(task_id)?;
     let mut control = ControlDb::open_current()?;
     control.validate_task_control(task_id, TaskKind::Zhihu, expected_revision)?;
+    // Retry path: a terminal task with can_retry is requeued first so the
+    // engine-start transition (Queued → Starting) applies.
+    if let Some(event) = control.requeue_terminal_task(task_id)? {
+        app.emit(TASK_EVENT_NAME, event)
+            .map_err(|error| error.to_string())?;
+    }
     if let Some(event) = control.mark_task_starting(task_id)? {
         app.emit(TASK_EVENT_NAME, event)
             .map_err(|error| error.to_string())?;
@@ -383,9 +389,18 @@ pub fn control_task(
                             .map_err(|error| error.to_string())?;
                         Ok(event.snapshot)
                     }
-                    Err(error) if is_transient_persist_conflict(&error) => control
-                        .task_snapshot(task_id)?
-                        .ok_or_else(|| "TASK_NOT_FOUND".to_string()),
+                    Err(error)
+                        if is_transient_persist_conflict(&error)
+                            || error == "INVALID_TASK_CONTROL" =>
+                    {
+                        // The sidecar already applied the action — the local
+                        // transition only failed because the row was already
+                        // in (or past) the target state. Return the freshest
+                        // snapshot instead of reporting failure.
+                        control
+                            .task_snapshot(task_id)?
+                            .ok_or_else(|| "TASK_NOT_FOUND".to_string())
+                    }
                     Err(error) => Err(error),
                 }
             })();
@@ -403,11 +418,12 @@ pub fn control_task(
                 }
                 Err(error) => {
                     // P2-26: REVISION_CONFLICT / EVENT_SEQUENCE_CONFLICT are
-                    // transient, not terminal results. The claim is left
-                    // un-completed so claim_command's abandoned-claim window
-                    // reclaims it for a retry instead of replaying a cached
-                    // failure forever.
-                    if !is_transient_persist_conflict(&error) {
+                    // transient, not terminal results. Release the claim so an
+                    // immediate retry re-executes cleanly — the remote action
+                    // is idempotent on the sidecar side.
+                    if is_transient_persist_conflict(&error) {
+                        control.release_command(request_id)?;
+                    } else {
                         control.complete_command(request_id, "{}", Some(&error), None)?;
                     }
                     Err(error)
@@ -584,7 +600,7 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
         recoverable: !matches!(remote.status.as_str(), "success"),
         can_pause: remote.status == "running",
         can_resume: remote.status == "paused",
-        can_retry: terminal && remote.status != "success",
+        can_retry: terminal && remote.status != "success" && remote.status != "cancelled",
         can_cancel: !terminal,
         book_id: if author_id.is_empty() {
             None

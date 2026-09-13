@@ -65,6 +65,16 @@ pub enum TaskErrorCode {
     PublishRecoveryRequired,
     MigrationRequired,
     CancelledByUser,
+    // Podcast worker failure codes (fatal NDJSON `errorCode` / exit table).
+    TranscriptionFailed,
+    ModelLoadFailed,
+    EngineBusy,
+    InvalidTaskSpec,
+    PathOutsideManagedRoot,
+    PromptBudgetExceeded,
+    LocalIo,
+    LocalNetwork,
+    LocalTimeout,
     Unknown,
 }
 

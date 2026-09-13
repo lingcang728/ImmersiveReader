@@ -16,7 +16,9 @@ Set-StrictMode -Version Latest
 
 $CredentialTargets = @(
     'com.lingcang.immersivereading/deepseek-api-key',
-    'com.lingcang.immersivereading.dev/deepseek-api-key'
+    # QA channel target — must match secrets.rs QA_TARGET exactly; the app
+    # never reads a ".dev" target.
+    'com.lingcang.immersivereading.qa/deepseek-api-key'
 )
 $ExcludedProfileDirectories = @('Cache', 'Code Cache', 'GPUCache', 'GrShaderCache', 'ShaderCache')
 

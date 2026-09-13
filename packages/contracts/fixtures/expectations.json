@@ -2,6 +2,9 @@
   { "fixture": "manifest.valid.json", "contract": "manifest", "expect": "valid" },
   { "fixture": "manifest.valid.optional-omitted.json", "contract": "manifest", "expect": "valid" },
   { "fixture": "manifest.valid.schema-version-float.json", "contract": "manifest", "expect": "valid" },
+  { "fixture": "manifest.valid.integral-float-count.json", "contract": "manifest", "expect": "valid" },
+  { "fixture": "manifest.invalid.null-optional.json", "contract": "manifest", "expect": "invalid" },
+  { "fixture": "manifest.invalid.count-float.json", "contract": "manifest", "expect": "invalid" },
   { "fixture": "manifest.invalid.unknown.json", "contract": "manifest", "expect": "invalid" },
   { "fixture": "manifest.invalid.date.json", "contract": "manifest", "expect": "invalid" },
   { "fixture": "manifest.invalid.empty.json", "contract": "manifest", "expect": "invalid" },
@@ -22,5 +25,10 @@
   { "fixture": "reading.valid.json", "contract": "reading", "expect": "valid" },
   { "fixture": "reading.valid.schema-version-float.json", "contract": "reading", "expect": "valid" },
   { "fixture": "reading.invalid.duplicate.json", "contract": "reading", "expect": "invalid" },
-  { "fixture": "reading.invalid.unknown.json", "contract": "reading", "expect": "invalid" }
+  { "fixture": "reading.invalid.unknown.json", "contract": "reading", "expect": "invalid" },
+  { "fixture": "provenance.valid.json", "contract": "provenance", "schema": "provenance.schema.json", "expect": "valid" },
+  { "fixture": "provenance.invalid.schema-version.json", "contract": "provenance", "schema": "provenance.schema.json", "expect": "invalid" },
+  { "fixture": "publish-transaction.valid.json", "contract": "publish-transaction", "schema": "publish-transaction.schema.json", "expect": "valid" },
+  { "fixture": "publish-transaction.invalid.phase.json", "contract": "publish-transaction", "schema": "publish-transaction.schema.json", "expect": "invalid" },
+  { "fixture": "publish-transaction.invalid.schema-version.json", "contract": "publish-transaction", "schema": "publish-transaction.schema.json", "expect": "invalid" }
 ]

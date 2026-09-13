@@ -54,16 +54,18 @@
 		pendingTimers.clear();
 	});
 
+	const deletedFormatter = new Intl.DateTimeFormat('zh-CN', {
+		year: 'numeric',
+		month: 'short',
+		day: 'numeric',
+		hour: '2-digit',
+		minute: '2-digit'
+	});
+
 	function deletedLabel(value: string): string {
 		const date = new Date(value);
 		if (Number.isNaN(date.getTime())) return '删除时间未知';
-		return new Intl.DateTimeFormat('zh-CN', {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric',
-			hour: '2-digit',
-			minute: '2-digit'
-		}).format(date);
+		return deletedFormatter.format(date);
 	}
 </script>
 

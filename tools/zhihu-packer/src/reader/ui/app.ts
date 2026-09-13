@@ -881,7 +881,12 @@ export class ReaderApp {
     this.postToParent({ type: 'reading-activity' });
   }
 
-  private postToParent(payload: { type: 'reading-activity' } | { type: 'font-scale-change'; scale: number }) {
+  private postToParent(
+    payload:
+      | { type: 'reading-activity' }
+      | { type: 'font-scale-change'; scale: number }
+      | { type: 'key-down'; key: 'Escape' | 'F10' }
+  ) {
     if (window.parent === window) return;
     try {
       window.parent.postMessage(
@@ -1503,7 +1508,21 @@ export class ReaderApp {
           break;
 
         case 'Escape':
-          this.closeSidebar();
+          if (this.isSidebarActive) {
+            this.closeSidebar();
+          } else {
+            // Nothing inside the frame consumed Esc — forward it so the
+            // desktop shell can still close the flow reader / reveal chrome
+            // while the iframe holds keyboard focus.
+            this.postToParent({ type: 'key-down', key: 'Escape' });
+          }
+          break;
+
+        case 'F10':
+          // Shell-level "focus the window chrome" shortcut — meaningless inside
+          // the frame, always forward.
+          e.preventDefault();
+          this.postToParent({ type: 'key-down', key: 'F10' });
           break;
       }
     });

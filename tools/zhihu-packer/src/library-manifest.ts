@@ -32,7 +32,13 @@ function itemDate(createdTime: number): string | undefined {
   if (!Number.isFinite(createdTime) || createdTime <= 0) {
     return undefined;
   }
-  return new Date(createdTime * 1000).toISOString().slice(0, 10);
+  const date = new Date(createdTime * 1000);
+  // An out-of-range timestamp yields Invalid Date; toISOString() would throw
+  // and take the whole manifest build down with it — treat as "no date".
+  if (Number.isNaN(date.getTime())) {
+    return undefined;
+  }
+  return date.toISOString().slice(0, 10);
 }
 
 function chapterFromItem(item: ArchivedItem): Chapter {

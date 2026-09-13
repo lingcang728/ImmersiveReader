@@ -235,6 +235,16 @@ export type FlowFontScaleChangeMessage = {
 	scale: number;
 };
 
+/** iframe → parent: a key the reader did not consume — Escape with nothing
+ * open inside, or F10 — so the shell's global shortcuts keep working while
+ * the iframe holds keyboard focus. Only these keys are ever forwarded. */
+export type FlowKeyDownMessage = {
+	source: typeof FLOW_READING_MESSAGE_SOURCE;
+	version: typeof FLOW_READING_MESSAGE_VERSION;
+	type: 'key-down';
+	key: 'Escape' | 'F10';
+};
+
 /** Parent → iframe: wide layout when the shell is maximized/fullscreen. */
 export type FlowSetLayoutModeMessage = {
 	source: typeof FLOW_READING_MESSAGE_SOURCE;
@@ -248,7 +258,8 @@ export type FlowBridgeMessage =
 	| FlowReadingActivityMessage
 	| FlowSetFontScaleMessage
 	| FlowFontScaleChangeMessage
-	| FlowSetLayoutModeMessage;
+	| FlowSetLayoutModeMessage
+	| FlowKeyDownMessage;
 
 /** Wide column cap when the desktop window is maximized or fullscreen. */
 export const WIDE_LAYOUT_MAX_WIDTH_PX = 1120;
@@ -327,6 +338,12 @@ export function isFlowSetLayoutModeMessage(data: unknown): data is FlowSetLayout
 		typeof data.contentMaxWidth === 'number' &&
 		Number.isFinite(data.contentMaxWidth)
 	);
+}
+
+export function isFlowKeyDownMessage(data: unknown): data is FlowKeyDownMessage {
+	if (!isFlowEnvelope(data) || data.type !== 'key-down') return false;
+	// Whitelist — the iframe must not be able to inject arbitrary keys.
+	return data.key === 'Escape' || data.key === 'F10';
 }
 
 /** Accept only local reader origins for the flow iframe message bridge. */

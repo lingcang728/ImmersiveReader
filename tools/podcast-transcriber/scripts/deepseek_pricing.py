@@ -188,6 +188,37 @@ _RESERVATION_SEQ = itertools.count(1)
 # rid -> amount for reservations created by *this* process (under _BUDGET_LOCK).
 _PROCESS_RESERVATIONS: dict[str, float] = {}
 
+# Spend/reservations are bucketed per task run. The approved limit is a
+# *per-task* number (TaskSpec.options.budgetLimitCny), so a shared ledger
+# file must not let one task's historical spend consume the next task's
+# approval. Runs without an explicit id (direct CLI use) share one bucket.
+_UNSCOPED_RUN = "__unscoped__"
+
+
+def _current_run_key() -> str:
+    return os.environ.get("PODCAST_TRANSCRIBER_RUN_ID", "").strip() or _UNSCOPED_RUN
+
+
+def _run_spend(state: dict[str, Any], run_key: str) -> float:
+    by_run = state.get("spent_by_run")
+    if isinstance(by_run, dict):
+        try:
+            return float(by_run.get(run_key) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _run_reserved(live: dict[str, dict[str, Any]], run_key: str) -> float:
+    return round(
+        sum(
+            float(entry.get("amount") or 0.0)
+            for entry in live.values()
+            if entry.get("run") == run_key
+        ),
+        8,
+    )
+
 
 def _pid_alive(pid: Any) -> bool:
     """Best-effort liveness check; conservative (True) when undecidable."""
@@ -249,7 +280,12 @@ def _sweep_reservations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 continue
             if amount <= 0 or not _pid_alive(pid):
                 continue
-            live[str(rid)] = {"pid": pid, "amount": amount}
+            run = entry.get("run")
+            live[str(rid)] = {
+                "pid": pid,
+                "amount": amount,
+                "run": str(run) if isinstance(run, str) and run else _UNSCOPED_RUN,
+            }
     state["reservations"] = live
     state["reserved_cny"] = round(sum(entry["amount"] for entry in live.values()), 8)
     return live
@@ -283,20 +319,23 @@ def reserve_budget(prompt: str, config: dict[str, Any], retry_attempts: int = 4)
         return 0.0
     reservation = _request_cost_cny(prompt, config, retry_attempts)
     rid = f"{os.getpid()}-{next(_RESERVATION_SEQ)}"
+    run_key = _current_run_key()
     with _BUDGET_LOCK:
         state = _read_budget_state(path)
         live = _sweep_reservations(state)
-        spent = float(state.get("spent_cny") or 0.0)
-        reserved = float(state.get("reserved_cny") or 0.0)
+        spent = _run_spend(state, run_key)
+        reserved = _run_reserved(live, run_key)
         if spent + reserved + reservation > limit + 1e-9:
             _write_budget_state(path, state)  # persist the sweep reclaim
             raise PodcastBudgetExceededError(
                 f"Estimated Podcast API budget exceeds approval: spent={spent:.6f} CNY, "
                 f"reserved={reserved:.6f} CNY, next={reservation:.6f} CNY, limit={limit:.6f} CNY"
             )
-        live[rid] = {"pid": os.getpid(), "amount": reservation}
+        live[rid] = {"pid": os.getpid(), "amount": reservation, "run": run_key}
         state["reservations"] = live
-        state["reserved_cny"] = round(reserved + reservation, 8)
+        state["reserved_cny"] = round(
+            sum(entry["amount"] for entry in live.values()), 8
+        )
         _write_budget_state(path, state)
         _PROCESS_RESERVATIONS[rid] = reservation
     return reservation
@@ -352,6 +391,14 @@ def settle_budget(reservation: float, usage: dict[str, Any] | None, config: dict
             live = _sweep_reservations(state)
             _drop_reservation_entry(state, live, reservation)
             if usage is not None:
+                run_key = _current_run_key()
+                by_run = state.get("spent_by_run")
+                if not isinstance(by_run, dict):
+                    by_run = {}
+                by_run[run_key] = round(float(by_run.get(run_key) or 0.0) + actual, 8)
+                state["spent_by_run"] = by_run
+                # Global total kept for diagnostics only — the limit check
+                # always uses the per-run bucket.
                 state["spent_cny"] = round(float(state.get("spent_cny") or 0.0) + actual, 8)
                 state["requests"] = int(state.get("requests") or 0) + 1
             _write_budget_state(path, state)

@@ -116,6 +116,10 @@ if (-not (Test-Path -LiteralPath $typescript -PathType Leaf)) {
 }
 Assert-NoLegacyRuntimeReferences
 Assert-VersionConsistency
+# Remove the built dist before parity: on a node without TS type-stripping
+# the parity harness falls back to `dist/index.js`, and a stale build would
+# be tested silently instead of the current source.
+Remove-FreshGeneratedDirectory 'packages\contracts\dist'
 $parityScript = Join-Path $root 'scripts\verify_contract_parity.py'
 if ((Split-Path -Leaf $python) -ieq 'py.exe') {
     Invoke-Checked 'contract schema parity' { & $python -3 $parityScript }
@@ -125,7 +129,6 @@ if ((Split-Path -Leaf $python) -ieq 'py.exe') {
 
 Push-Location (Join-Path $root 'packages\contracts')
 try {
-    Remove-FreshGeneratedDirectory 'packages\contracts\dist'
     Invoke-Checked 'contracts tests' { node --test tests/*.test.ts }
     Invoke-Checked 'contracts build' { & $typescript -p tsconfig.json }
 } finally {

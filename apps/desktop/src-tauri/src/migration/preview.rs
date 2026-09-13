@@ -62,19 +62,35 @@ pub fn current_legacy_locations(library_root: PathBuf) -> Result<LegacyLocations
     })
 }
 
+/// Bound the preview size walk — junction loops / pathological trees must
+/// not recurse without limit.
+const MAX_PREVIEW_WALK_DEPTH: usize = 64;
+
 fn path_bytes(path: &Path) -> Result<u64, String> {
+    path_bytes_at(path, 0)
+}
+
+fn path_bytes_at(path: &Path, depth: usize) -> Result<u64, String> {
+    if depth > MAX_PREVIEW_WALK_DEPTH {
+        return Ok(0);
+    }
     if !path.exists() {
         return Ok(0);
     }
     let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if metadata.is_file() || metadata.file_type().is_symlink() {
+    // Junctions are reparse points, not symlinks — don't follow them into
+    // a tree outside the migration root.
+    if metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || crate::atomic_file::is_reparse_point(&metadata)
+    {
         return Ok(metadata.len());
     }
     fs::read_dir(path)
         .map_err(|error| error.to_string())?
         .map(|entry| entry.map_err(|error| error.to_string()))
         .try_fold(0_u64, |total, entry| {
-            let size = path_bytes(&entry?.path())?;
+            let size = path_bytes_at(&entry?.path(), depth + 1)?;
             Ok(total.saturating_add(size))
         })
 }

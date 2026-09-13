@@ -11,8 +11,8 @@ use crate::tasks::{
     LifecycleState, ProgressMode, RequiredAction, TaskEvent, TaskKind, TaskOutcome, TaskProgress,
     TaskSnapshot,
 };
+use sha2::{Digest, Sha256};
 use std::path::Path;
-use uuid::Uuid;
 
 const COMMAND_NAME: &str = "add_podcast_files";
 pub const TASK_EVENT_NAME: &str = "acquisition://task-event";
@@ -135,24 +135,47 @@ pub(crate) fn queued_event(
     }
 }
 
+/// Task ids are derived from the idempotency claim, not random: when the
+/// abandoned-claim window reclaims an interrupted `add_podcast_files` and the
+/// retried command re-executes, each file lands on the SAME task id, so the
+/// second run adopts the rows the first run already created instead of
+/// double-transcribing (double Whisper time + double API spend).
+fn deterministic_task_id(request_id: &str, index: usize, input_sha256: &str) -> String {
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(format!("{request_id}|{index}|{input_sha256}").as_bytes())
+    );
+    // 32 hex chars — same shape as `Uuid::simple()`, passes validate_task_id.
+    digest[..32].to_string()
+}
+
 fn create_tasks(
     stored: &StoredPreview,
     control: &mut ControlDb,
     locations: &StorageLocations,
+    request_id: &str,
     duplicate_policy: DuplicatePolicy,
     budget_approval: Option<&PodcastBudgetApproval>,
     broadcast: &mut impl FnMut(&TaskEvent),
 ) -> Result<PodcastAddResult, String> {
     let mut tasks = Vec::new();
     let mut existing_books = Vec::new();
-    for file in &stored.preview.files {
+    for (index, file) in stored.preview.files.iter().enumerate() {
         if duplicate_policy == DuplicatePolicy::ReuseExisting {
             if let Some(book_id) = &file.duplicate_book_id {
                 existing_books.push(book_id.clone());
                 continue;
             }
         }
-        let task_id = Uuid::new_v4().simple().to_string();
+        let task_id = deterministic_task_id(request_id, index, &file.input_sha256);
+        if let Some(existing) = control.task_snapshot(&task_id)? {
+            // Claim reclaim re-execution: the earlier run already created this
+            // task row (however far it got). Adopt it instead of creating a
+            // duplicate — a stuck one can still be cancelled/retried by the
+            // user, and re-persisting its events would conflict anyway.
+            tasks.push(existing);
+            continue;
+        }
         // Visible snapshot first so UI shows copy progress within 1s.
         let preparing = snapshot_for_file(FileSnapshotParams {
             task_id: task_id.clone(),
@@ -349,6 +372,7 @@ pub fn add_podcast_files_at(
             &stored,
             control,
             locations,
+            request.request_id,
             request.duplicate_policy,
             request.budget_approval,
             &mut broadcast,
@@ -368,10 +392,34 @@ pub fn add_podcast_files_at(
             Ok(value)
         }
         Err(error_code) => {
-            control.complete_command(request.request_id, "{}", Some(&error_code), None)?;
+            // Only deterministic request-shape errors are cached as the
+            // claim's terminal result — replaying them is correct because the
+            // same request would fail the same way. Transient/environment
+            // failures (disk full, IO, revision races, contract writes)
+            // release the claim instead, so an immediate retry re-executes:
+            // deterministic task ids make that re-execution safe.
+            if is_deterministic_create_error(&error_code) {
+                control.complete_command(request.request_id, "{}", Some(&error_code), None)?;
+            } else {
+                control.release_command(request.request_id)?;
+            }
             Err(error_code)
         }
     }
+}
+
+/// Errors that depend only on the request's shape, not on the environment —
+/// the only ones safe to cache for idempotent replay.
+fn is_deterministic_create_error(error: &str) -> bool {
+    matches!(
+        error,
+        "INVALID_ARGUMENT"
+            | "INVALID_REQUEST_ID"
+            | "PODCAST_PREVIEW_STALE"
+            | "BUDGET_CONFIRMATION_REQUIRED"
+            | "INPUT_CHANGED"
+            | "IDEMPOTENCY_KEY_REUSED"
+    )
 }
 
 #[cfg(test)]

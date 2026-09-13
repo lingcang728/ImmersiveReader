@@ -5,7 +5,7 @@ use std::collections::HashSet;
 /// any numeric 1 — including the float form `1.0` — while serde's `u32`
 /// rejects floats. Deserialize the same set here so all three implementations
 /// agree on `schemaVersion`.
-fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+pub(crate) fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -13,6 +13,89 @@ where
     match value.as_f64() {
         Some(1.0) => Ok(1),
         _ => Err(serde::de::Error::custom("unsupported schema version")),
+    }
+}
+
+/// Schema `integer` and TS `requireNonNegativeInteger` accept integral floats
+/// (`1e2`, `100.0`); serde's `u64` rejects float tokens. Deserialize the same
+/// set here so all three read paths agree.
+pub(crate) fn deserialize_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Number(number) => {
+            if let Some(value) = number.as_u64() {
+                return Ok(value);
+            }
+            match number.as_f64() {
+                Some(float)
+                    if float.fract() == 0.0
+                        && float >= 0.0
+                        && float < u64::MAX as f64 =>
+                {
+                    Ok(float as u64)
+                }
+                _ => Err(serde::de::Error::custom(
+                    "must be a non-negative integer",
+                )),
+            }
+        }
+        _ => Err(serde::de::Error::custom(
+            "must be a non-negative integer",
+        )),
+    }
+}
+
+/// `Option<u64>` variant of `deserialize_u64`: accepts integral floats,
+/// `null` and absent keys map to `None`.
+pub(crate) fn deserialize_optional_u64<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(number) => {
+            if let Some(value) = number.as_u64() {
+                return Ok(Some(value));
+            }
+            match number.as_f64() {
+                Some(float)
+                    if float.fract() == 0.0
+                        && float >= 0.0
+                        && float < u64::MAX as f64 =>
+                {
+                    Ok(Some(float as u64))
+                }
+                _ => Err(serde::de::Error::custom(
+                    "must be a non-negative integer",
+                )),
+            }
+        }
+        _ => Err(serde::de::Error::custom(
+            "must be a non-negative integer",
+        )),
+    }
+}
+
+/// Schema/TS reject an explicit `null` on optional string fields — the key
+/// must be omitted instead. `Option<String>` would silently accept `null` as
+/// `None`; reject it so the read paths agree.
+fn deserialize_optional_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => Err(serde::de::Error::custom(
+            "explicit null is not allowed; omit the field instead",
+        )),
+        other => String::deserialize(other)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
     }
 }
 
@@ -24,19 +107,29 @@ pub struct Chapter {
     pub path: String,
     pub title: String,
     // Schema/TS reject an explicit `null`; omit the key instead so the JSON we
-    // write always validates.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // write always validates, and reject it on read via deserialize_with.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_string",
+        default
+    )]
     pub date: Option<String>,
     // `voteCount`/`wordCount` are `required` in manifest.schema.json — do not
     // silently default what the other implementations treat as an error.
+    #[serde(deserialize_with = "deserialize_u64")]
     pub vote_count: u64,
     // Canonical counting (P3-29): non-whitespace Unicode scalar values —
     // `content.chars().filter(|c| !c.is_whitespace()).count()` in importer.rs
     // and podcast/publish.rs. zhihu-packer historically counted UTF-16 code
     // units, which differs for non-BMP characters; the Rust scalar count is
     // the canonical form (note for the contracts/TS side).
+    #[serde(deserialize_with = "deserialize_u64")]
     pub word_count: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_string",
+        default
+    )]
     pub metadata_status: Option<String>,
 }
 
@@ -49,7 +142,11 @@ pub struct Manifest {
     pub book_id: String,
     pub title: String,
     pub source: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_string",
+        default
+    )]
     pub source_id: Option<String>,
     pub generated_at: String,
     pub updated_at: String,
@@ -97,6 +194,17 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
     }
     if !matches!(manifest.source.as_str(), "zhihu" | "manual" | "podcast") {
         return Err(format!("Unsupported book source: {}", manifest.source));
+    }
+    // sourceId is optional, but a present value must be non-blank — the
+    // schema (`minLength: 1`) and TS `requireString` reject `""`; TS also
+    // rejects whitespace-only. Rust trims on `White_Space` (NEL yes, FEFF
+    // no) — matching trim-based behavior rather than JS `trim()`.
+    if manifest
+        .source_id
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err("Manifest sourceId must not be blank".to_string());
     }
     if manifest.chapters.is_empty() {
         return Err("Manifest must contain at least one chapter".to_string());
@@ -281,7 +389,7 @@ pub(crate) fn is_reserved_device_name(segment: &str) -> bool {
 /// refused before any path is resolved). Shared by `is_safe_relative_path`
 /// for chapter paths and publish/trash managed paths; identical rules live
 /// in TS `requireRelativePath`.
-fn is_safe_path_segment(segment: &str) -> bool {
+pub(crate) fn is_safe_path_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment != "."
         && segment != ".."
@@ -619,6 +727,16 @@ mod tests {
                 "reading" => serde_json::from_str::<ReadingProgress>(&text)
                     .map(|value| validate_reading(&value, &manifest).is_ok())
                     .unwrap_or(false),
+                // The Rust readers for these journals are intentionally more
+                // tolerant than the strict schemas (all-Option fields, no
+                // deny_unknown_fields) so old files still load — the table
+                // only lists fixtures where every leg's verdict agrees.
+                "provenance" => {
+                    serde_json::from_str::<crate::library::BookProvenance>(&text).is_ok()
+                }
+                "publish-transaction" => {
+                    serde_json::from_str::<crate::publish::PublishTransaction>(&text).is_ok()
+                }
                 other => panic!("{}: unknown contract {other}", entry.fixture),
             };
             assert_eq!(

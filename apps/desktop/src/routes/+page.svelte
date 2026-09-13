@@ -56,6 +56,7 @@
 	import ZhihuWorkflow from "$lib/components/ZhihuWorkflow.svelte";
 	import TrashPanel from "$lib/components/TrashPanel.svelte";
 	import WindowChrome from "$lib/components/WindowChrome.svelte";
+	import WorkflowDialogShell from "$lib/components/WorkflowDialogShell.svelte";
 	import WindowResizeHandles from "$lib/components/WindowResizeHandles.svelte";
 	import BackButton from "$lib/components/BackButton.svelte";
 	import type { TrashDeleteResult, TrashItem } from "$lib/trash/types";
@@ -79,6 +80,7 @@
 		deriveChromeSurface,
 		isAllowedFlowMessageOrigin,
 		isFlowFontScaleChangeMessage,
+		isFlowKeyDownMessage,
 		isFlowReadingActivityMessage,
 		isImmersiveSurface,
 		isOverlaySurface,
@@ -1474,14 +1476,17 @@
 		}
 	}
 
-	async function restartPodcastTask(taskId: string) {
+	async function restartPodcastTask(taskId: string, budgetLimitCny?: number) {
 		try {
 			showAppNotice("正在重试播客任务…");
 			const snapshot = await invoke<{
 				id: string;
 				outcome?: string;
 				lifecycleState?: string;
-			}>("restart_podcast_task", { taskId });
+			}>("restart_podcast_task", {
+				taskId,
+				budgetLimitCny: budgetLimitCny ?? null
+			});
 			if (snapshot.outcome === "success") {
 				showAppNotice("发布成功，文稿已保存到 书库/播客");
 			} else {
@@ -1595,8 +1600,7 @@
 		}
 	}
 
-	async function closeFlowReader() {
-		if ((await requestNavigationGuard("返回书架")) === "cancel") return;
+	async function closeFlowReaderSession() {
 		const session = flowReaderSession;
 		flowReaderSession = null;
 		if (!session) return;
@@ -1605,6 +1609,11 @@
 		} catch (error) {
 			showAppNotice(`无法关闭连读会话：${String(error)}`);
 		}
+	}
+
+	async function closeFlowReader() {
+		if ((await requestNavigationGuard("返回书架")) === "cancel") return;
+		await closeFlowReaderSession();
 	}
 
 	async function openBookDetails(bookId: string) {
@@ -2619,7 +2628,9 @@
 					await raceWithTimeout(finishEdit(), 1200, false);
 				}
 				await raceWithTimeout(flushSaveState(), 500, undefined);
-				await closeFlowReader();
+				// Exit path skips the nav-guard (already confirmed "退出应用")
+				// and bounds the close so a wedged session can't stall shutdown.
+				await raceWithTimeout(closeFlowReaderSession(), 1500, undefined);
 				if (mode === "preserve") {
 					await invoke("quit_app");
 				} else if (mode === "cancel_and_discard") {
@@ -2634,7 +2645,12 @@
 		const requestExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
 			if (isClosing) return;
 			if (mode !== "hide") {
-				if ((await requestNavigationGuard("退出应用")) === "cancel") return;
+				if ((await requestNavigationGuard("退出应用")) === "cancel") {
+					// The tray armed a hard-exit fallback before we could ask —
+					// disarm it or the app dies anyway seconds later.
+					await invoke("cancel_exit_fallback").catch(() => {});
+					return;
+				}
 			} else if (editingParagraph || $currentFilePath) {
 				// Soft hide: still flush edits, but do not treat as app exit.
 			}
@@ -2664,6 +2680,16 @@
 			}
 			if (isFlowFontScaleChangeMessage(event.data)) {
 				setFontScale(event.data.scale, { fromFlow: true });
+				return;
+			}
+			// Keys the iframe didn't consume (Esc with nothing open inside,
+			// F10) are forwarded here — same behavior as a real window keydown.
+			if (isFlowKeyDownMessage(event.data)) {
+				if (event.data.key === 'F10') {
+					void revealChromeForKeyboard();
+				} else if (event.data.key === 'Escape') {
+					void closeFlowReader();
+				}
 			}
 		};
 		window.addEventListener("message", handleFlowReaderMessage);
@@ -4961,43 +4987,42 @@
 	<SettingsPanel />
 
 	{#if navigationGuardOpen}
-		<div class="navigation-guard-backdrop" role="presentation">
-			<dialog
-				class="navigation-guard"
-				aria-labelledby="navigation-guard-title"
-				open
-			>
-				<h2 id="navigation-guard-title">尚有未保存的编辑</h2>
-				<p>继续{navigationGuardReason}前，选择如何处理当前段落。</p>
-				<div class="navigation-guard-actions">
-					<button type="button" class="primary" on:click={() => void chooseNavigationGuard("save")}>保存并继续</button>
-					<button type="button" on:click={() => void chooseNavigationGuard("discard")}>放弃并继续</button>
-					<button type="button" on:click={() => void chooseNavigationGuard("cancel")}>取消导航</button>
-				</div>
-			</dialog>
-		</div>
+		<!-- WorkflowDialogShell gives real modal semantics (showModal, Esc →
+		     cancel, focus restore) — a bare <dialog open> has none of those. -->
+		<WorkflowDialogShell
+			titleId="navigation-guard-title"
+			descriptionId="navigation-guard-desc"
+			title="尚有未保存的编辑"
+			description={`继续${navigationGuardReason}前，选择如何处理当前段落。`}
+			maxWidth="480px"
+			onClose={() => void chooseNavigationGuard("cancel")}
+		>
+			<div slot="footer" class="navigation-guard-actions">
+				<button type="button" class="wf-primary" on:click={() => void chooseNavigationGuard("save")}>保存并继续</button>
+				<button type="button" class="wf-secondary" on:click={() => void chooseNavigationGuard("discard")}>放弃并继续</button>
+				<button type="button" class="wf-quiet" on:click={() => void chooseNavigationGuard("cancel")}>取消导航</button>
+			</div>
+		</WorkflowDialogShell>
 	{/if}
 
 	{#if actionConfirm}
-		<div class="navigation-guard-backdrop" role="presentation">
-			<dialog
-				class="navigation-guard"
-				aria-labelledby="action-confirm-title"
-				open
-			>
-				<h2 id="action-confirm-title">确认操作</h2>
-				<p class="action-confirm-message">{actionConfirm.message}</p>
-				<div class="navigation-guard-actions">
-					<button
-						type="button"
-						class:primary={!actionConfirm.danger}
-						class:danger={actionConfirm.danger}
-						on:click={() => chooseActionConfirm(true)}
-					>{actionConfirm.confirmLabel}</button>
-					<button type="button" on:click={() => chooseActionConfirm(false)}>取消</button>
-				</div>
-			</dialog>
-		</div>
+		<WorkflowDialogShell
+			titleId="action-confirm-title"
+			descriptionId="action-confirm-desc"
+			title="确认操作"
+			description={actionConfirm.message}
+			maxWidth="480px"
+			onClose={() => chooseActionConfirm(false)}
+		>
+			<div slot="footer" class="navigation-guard-actions">
+				<button
+					type="button"
+					class={actionConfirm.danger ? "wf-primary wf-danger" : "wf-primary"}
+					on:click={() => chooseActionConfirm(true)}
+				>{actionConfirm.confirmLabel}</button>
+				<button type="button" class="wf-quiet" on:click={() => chooseActionConfirm(false)}>取消</button>
+			</div>
+		</WorkflowDialogShell>
 	{/if}
 
 	<!-- Main content -->
@@ -5094,6 +5119,7 @@
 				onStartZhihuTask={(taskId, revision) => void startZhihuTask(taskId, revision)}
 				onOpenTaskResult={(taskId) => void openPodcastTaskResult(taskId)}
 				onRestartTask={(taskId) => void restartPodcastTask(taskId)}
+				onApproveBudget={(taskId, limit) => void restartPodcastTask(taskId, limit)}
 				onControlTask={(taskId, action, revision) => void controlPodcastTask(taskId, action, revision)}
 				onControlZhihuTask={(taskId, action, revision) => void controlZhihuTask(taskId, action, revision)}
 				onChooseLibrary={() => void chooseLibraryRoot()}
@@ -6386,69 +6412,24 @@
 			transform: scale(1);
 		}
 	}
-	.navigation-guard-backdrop {
-		position: fixed;
-		inset: 0;
-		/* Below .chrome-stack (z-55): the custom window controls stay usable
-		   above the modal backdrop instead of being dimmed and unclickable. */
-		z-index: 45;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 20px;
-		background: rgba(0, 0, 0, 0.28);
-	}
-	.navigation-guard {
-		width: min(440px, 100%);
-		padding: 22px;
-		border: 1px solid var(--hr);
-		border-radius: 14px;
-		background: var(--bg);
-		box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
-	}
-	.navigation-guard h2 {
-		margin: 0;
-		color: var(--text);
-		font-size: 16px;
-	}
-	.navigation-guard p {
-		margin: 10px 0 18px;
-		color: var(--text-secondary);
-		font-size: 13px;
-		line-height: 1.6;
-	}
 	.navigation-guard-actions {
 		display: flex;
 		justify-content: flex-end;
 		gap: 8px;
 		flex-wrap: wrap;
 	}
-	.navigation-guard-actions button {
-		border: 1px solid var(--hr);
-		border-radius: 8px;
-		background: var(--bg);
-		color: var(--text-secondary);
-		padding: 8px 12px;
-		font-size: 12px;
-		min-height: 32px;
-		cursor: pointer;
-	}
-	.navigation-guard-actions button:hover {
-		border-color: var(--link);
-		color: var(--text);
-	}
-	.navigation-guard-actions button.primary {
-		border-color: var(--link);
-		background: var(--link);
-		color: var(--bg);
-	}
-	.navigation-guard-actions button.danger {
+	/* Danger variant of the shell's primary action (confirm-delete flows).
+	   #d4a099 is a light fill — white text would fail contrast, so the
+	   label uses a dark tone of the same red. */
+	:global(.wf-primary.wf-danger) {
 		border-color: #d4a099;
 		background: #d4a099;
-		color: var(--bg);
+		color: #33110b;
 	}
-	.action-confirm-message {
-		white-space: pre-line;
+	:global(.wf-primary.wf-danger:hover) {
+		border-color: #c48b84;
+		background: #c48b84;
+		color: #33110b;
 	}
 
 	/* Reduced motion: drop non-essential animation/transitions on UI chrome.
@@ -6467,9 +6448,7 @@
 		.status-line-pill,
 		.loading-dot,
 		.icon-btn,
-		.progress-line,
-		.navigation-guard,
-		.navigation-guard-actions button {
+		.progress-line {
 			animation: none;
 			transition: none;
 		}

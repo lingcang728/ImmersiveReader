@@ -30,7 +30,9 @@ function Remove-SecretProperties {
 
 $root = Get-RepoRoot
 $runtime = Join-Path $root 'runtime\podcast'
-$target = Join-Path $env:LOCALAPPDATA 'ImmersiveReader\podcast'
+# Matches storage.rs/worker.rs: the managed Podcast data root is Data\Podcast
+# (config.json at its root); the old top-level "podcast" dir was pre-v3.
+$target = Join-Path $env:LOCALAPPDATA 'ImmersiveReader\Data\Podcast'
 $sourceConfig = if ($PodcastSource) { Join-Path $PodcastSource 'config.json' } else { '' }
 $targetConfig = Join-Path $target 'config.json'
 
@@ -45,9 +47,8 @@ foreach ($required in @(
     }
 }
 
-foreach ($name in @('input', 'output', 'work')) {
-    New-Item -ItemType Directory -Path (Join-Path $target $name) -Force | Out-Null
-}
+# The worker owns input/output/work under its per-task CACHE root — nothing
+# reads them under the data root, so no directories are pre-created here.
 
 if ((Test-Path -LiteralPath $targetConfig) -and -not $Force) {
     Write-Output '[migration] managed Podcast config already exists; kept unchanged'
@@ -90,7 +91,10 @@ foreach ($name in @('input', 'output')) {
     if (-not $PodcastSource) { break }
     $source = Join-Path $PodcastSource $name
     if (Test-Path -LiteralPath $source) {
-        & robocopy $source (Join-Path $target $name) /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+        # Legacy queue/output dirs are preserved under LegacyOutput (same
+        # convention as migrate-v3-production-data.ps1) — the live worker reads
+        # only its per-task cache root, never a top-level input/output here.
+        & robocopy $source (Join-Path $target "LegacyOutput\$name") /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
         if ($LASTEXITCODE -gt 7) {
             throw "Podcast $name 数据迁移失败（robocopy $LASTEXITCODE）"
         }

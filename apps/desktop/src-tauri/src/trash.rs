@@ -18,6 +18,9 @@ const MAX_TRASH_WALK_DEPTH: usize = 64;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrashItem {
+    // Integral floats (`1.0`) satisfy the schema `const`; keep the read set
+    // identical to the other journals.
+    #[serde(deserialize_with = "crate::contracts::deserialize_schema_version")]
     pub schema_version: u32,
     pub trash_id: String,
     pub book_id: String,
@@ -25,6 +28,7 @@ pub struct TrashItem {
     pub original_relative_path: String,
     pub trash_relative_path: String,
     pub deleted_at: String,
+    #[serde(deserialize_with = "crate::contracts::deserialize_u64")]
     pub revision: u64,
 }
 
@@ -45,6 +49,7 @@ pub struct TrashDeleteResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TrashJournal {
+    #[serde(deserialize_with = "crate::contracts::deserialize_schema_version")]
     schema_version: u32,
     operation: String,
     trash_id: String,
@@ -437,8 +442,22 @@ pub fn restore(
     let parent = destination
         .parent()
         .ok_or_else(|| "PATH_OUTSIDE_MANAGED_ROOT".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
+    // Check containment on the deepest *existing* ancestor first: a junction
+    // inside the library (e.g. `播客` -> D:\x) would make `create_dir_all`
+    // create directories outside the root before the canonical check below
+    // ever ran — a cross-root side effect on a rejected restore.
+    let mut ancestor = parent;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| "PATH_OUTSIDE_MANAGED_ROOT".to_string())?;
+    }
+    let canonical_ancestor = ancestor.canonicalize().map_err(|error| error.to_string())?;
+    if !canonical_ancestor.starts_with(&canonical_root) {
+        return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
+    }
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let canonical_parent = parent.canonicalize().map_err(|error| error.to_string())?;
     if !canonical_parent.starts_with(&canonical_root) {
         return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
