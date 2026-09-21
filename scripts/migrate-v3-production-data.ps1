@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Apply,
     # Consume a run's rollback/actions.json and undo it in reverse order —
     # the journal is an executable record, not only documentation.

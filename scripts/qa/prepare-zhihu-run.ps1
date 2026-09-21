@@ -1,4 +1,4 @@
-# QA helper (manual): provisions an isolated ImmersiveReader-QA data/library
+﻿# QA helper (manual): provisions an isolated ImmersiveReader-QA data/library
 # root for a scripted Zhihu acquisition run. Not wired into scripts\verify.ps1.
 param(
     [string]$RunId = "zhihu-$(Get-Date -Format 'yyyyMMdd-HHmmss')",

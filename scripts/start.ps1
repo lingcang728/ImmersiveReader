@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet('desktop', 'verify')]
     [string]$Action = 'desktop',
     # Also hash-verify the managed runtime against runtime\manifest.json before

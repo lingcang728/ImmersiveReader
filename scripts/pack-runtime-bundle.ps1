@@ -1,4 +1,4 @@
-# pack-runtime-bundle.ps1 — produce the release runtime bundle end to end:
+﻿# pack-runtime-bundle.ps1 — produce the release runtime bundle end to end:
 #   runtime\ → verify-runtime → runtime-bundle.zip → split volumes →
 #   docs\release\<version>\runtime-parts.json
 # This is the missing producer half of the release flow: release.yml only

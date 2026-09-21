@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$DryRun,
     [Parameter(Mandatory)][string]$SourceRoot,
     [string]$LibraryRoot = (Join-Path $env:USERPROFILE 'Documents\沉浸阅读\Library'),

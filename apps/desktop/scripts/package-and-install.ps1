@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $desktopRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $loadedLocalSigningKey = $false
 

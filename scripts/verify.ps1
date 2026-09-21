@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     # Promote every report-only audit (fmt/audit/PSSA findings, missing optional
     # tools) into a hard failure — the mode CI/release machines should run.

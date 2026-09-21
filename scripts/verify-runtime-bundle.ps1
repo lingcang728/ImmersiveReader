@@ -1,4 +1,4 @@
-# verify-runtime-bundle.ps1 — the consumer half ADR-001 requires and the
+﻿# verify-runtime-bundle.ps1 — the consumer half ADR-001 requires and the
 # release flow was missing: prove that a set of runtime-bundle volumes really
 # is THIS tag's runtime, not a stale one re-uploaded onto a new draft.
 #

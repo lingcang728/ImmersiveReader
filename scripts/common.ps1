@@ -1,4 +1,4 @@
-# common.ps1 — shared helpers dot-sourced by the other scripts in this folder
+﻿# common.ps1 — shared helpers dot-sourced by the other scripts in this folder
 # (verify.ps1, start.ps1, prepare-runtime.ps1, verify-runtime.ps1, migrate-*).
 # It is not a standalone entry point; run scripts\verify.ps1 for the build gate.
 # scripts\qa\* are manual Playwright QA harnesses — they are intentionally NOT

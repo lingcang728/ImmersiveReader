@@ -1,4 +1,4 @@
-# verify-runtime.ps1 — re-hashes every critical file listed in
+﻿# verify-runtime.ps1 — re-hashes every critical file listed in
 # runtime\manifest.json against its recorded size/SHA-256.
 # LIMITATION: this is a self-proof — the unsigned manifest sits next to the
 # files it describes. It catches torn/corrupted provisioning and accidental
