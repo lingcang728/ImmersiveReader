@@ -2,8 +2,10 @@ use crate::contracts::{validate_manifest, Manifest, ReadingProgress};
 use crate::progress::load_progress;
 use crate::tasks::TaskSnapshot;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,21 +70,29 @@ pub struct BookDetail {
 /// P2-17: per-entry tolerance — a directory/entry that cannot be read is
 /// recorded in `issues` and skipped instead of failing the whole scan.
 /// P2-20: the depth cap keeps the recursion bounded.
+/// Returns how many regular files sit DIRECTLY in `dir` — the caller uses it
+/// to flag a directory that holds its own content but produced no manifest
+/// anywhere in its subtree (a half-deleted book whose manifest vanished is
+/// invisible on the shelf yet still occupies disk; report it instead of
+/// silently keeping the orphan). `inside_book` marks subtrees beneath a dir
+/// that already yielded a manifest — chapter/asset dirs inside a book are
+/// never books themselves and must not be flagged.
 fn collect_manifests(
     dir: &Path,
     depth: usize,
     manifests: &mut Vec<PathBuf>,
     issues: &mut Vec<LibraryIssue>,
-) {
+    inside_book: bool,
+) -> usize {
     if depth > 3 {
         issues.push(LibraryIssue {
             path: dir.to_string_lossy().into_owned(),
             message: "LIBRARY_DEPTH_LIMIT".to_string(),
         });
-        return;
+        return 0;
     }
     if !dir.exists() {
-        return;
+        return 0;
     }
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -91,9 +101,14 @@ fn collect_manifests(
                 path: dir.to_string_lossy().into_owned(),
                 message: format!("目录无法读取：{error}"),
             });
-            return;
+            return 0;
         }
     };
+    // This dir IS a book when it carries its own manifest — subdirectory
+    // content is then book payload, never a candidate book or orphan. A
+    // root-level manifest is rejected below as phantom, so it does not count.
+    let self_is_book = inside_book || (depth > 0 && dir.join("manifest.json").is_file());
+    let mut own_files = 0_usize;
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -133,27 +148,39 @@ fn collect_manifests(
                 continue;
             }
         }
-        if file_type.is_file() && entry.file_name() == "manifest.json" {
-            // A manifest directly at the library root would make the root
-            // itself a phantom book: visible and readable (including .trash
-            // contents via chapter paths) but impossible to remove.
-            if entry.path().parent() == Some(dir) && depth == 0 {
-                issues.push(LibraryIssue {
-                    path: entry.path().to_string_lossy().into_owned(),
-                    message: "manifest.json 必须位于书籍子目录，书库根的清单已忽略".to_string(),
-                });
-                continue;
+        if file_type.is_file() {
+            own_files += 1;
+            if entry.file_name() == "manifest.json" {
+                // A manifest directly at the library root would make the root
+                // itself a phantom book: visible and readable (including
+                // .trash contents via chapter paths) but impossible to remove.
+                if entry.path().parent() == Some(dir) && depth == 0 {
+                    issues.push(LibraryIssue {
+                        path: entry.path().to_string_lossy().into_owned(),
+                        message: "manifest.json 必须位于书籍子目录，书库根的清单已忽略".to_string(),
+                    });
+                    continue;
+                }
+                manifests.push(entry.path());
             }
-            manifests.push(entry.path());
         } else if file_type.is_dir() {
             let name = entry.file_name();
             // Skip recycle bin and hidden control dirs so removed books stay off the shelf.
             if name == ".trash" || name.to_string_lossy().starts_with('.') {
                 continue;
             }
-            collect_manifests(&entry.path(), depth + 1, manifests, issues);
+            let before = manifests.len();
+            let child_files =
+                collect_manifests(&entry.path(), depth + 1, manifests, issues, self_is_book);
+            if !self_is_book && manifests.len() == before && child_files > 0 {
+                issues.push(LibraryIssue {
+                    path: entry.path().to_string_lossy().into_owned(),
+                    message: "目录内有文件但缺少 manifest.json——可能是不完整删除的残留".to_string(),
+                });
+            }
         }
     }
+    own_files
 }
 
 fn ensure_book_inside_library(library_root: &Path, book_root: &Path) -> Result<(), String> {
@@ -176,6 +203,13 @@ fn ensure_book_inside_library(library_root: &Path, book_root: &Path) -> Result<(
 
 pub fn remove_book(root: &Path, book_id: &str) -> Result<String, String> {
     let root = &crate::atomic_file::long_path(root);
+    // 与 PUT /progress 互斥（F18）：在途写入若在 rename 后才落盘，会把已删
+    // 书目录重建为只剩 `.reading.json` 的幽灵目录。拿到锁再删，排队的 PUT
+    // 随后会因 manifest 不存在而拒绝写入。
+    let lock = book_progress_lock(book_id)?;
+    let _guard = lock
+        .lock()
+        .map_err(|_| "Progress lock is poisoned".to_string())?;
     let (book_root, manifest, _) = find_book(root, book_id)?;
     ensure_book_inside_library(root, &book_root)?;
     crate::trash::move_book(root, &book_root, &manifest)?;
@@ -183,13 +217,24 @@ pub fn remove_book(root: &Path, book_id: &str) -> Result<String, String> {
 }
 
 /// Permanently delete a book directory from disk. Irreversible.
+/// P-10-F3: route the delete through the trash pipeline so it is journaled
+/// end to end — a bare `remove_dir_all` can die mid-walk and leave a
+/// manifest-less orphan dir that the shelf silently hides. `move_book`
+/// journals the rename into `.trash/<id>`; `permanently_delete` then journals
+/// the final removal, and either phase is finished by the next reconcile.
 pub fn delete_book(root: &Path, book_id: &str) -> Result<String, String> {
     let root = &crate::atomic_file::long_path(root);
+    // 同 remove_book：持 progress 锁再动目录，挡住在途 PUT（F18）。
+    let lock = book_progress_lock(book_id)?;
+    let _guard = lock
+        .lock()
+        .map_err(|_| "Progress lock is poisoned".to_string())?;
     let (book_root, manifest, _) = find_book(root, book_id)?;
     ensure_book_inside_library(root, &book_root)?;
     let chapter_count = manifest.chapters.len();
-    fs::remove_dir_all(crate::atomic_file::long_path(&book_root))
-        .map_err(|error| error.to_string())?;
+    let entry = crate::trash::move_book(root, &book_root, &manifest)?;
+    crate::trash::permanently_delete(root, &entry.trash_id, entry.revision)
+        .map_err(|error| format!("书籍已移入回收站但最终删除失败：{error}"))?;
     Ok(format!(
         "已永久删除《{}》（{} 篇）",
         manifest.title, chapter_count
@@ -211,7 +256,7 @@ fn read_json_file_capped(path: &Path) -> Result<String, String> {
     fs::read_to_string(&normalized).map_err(|error| error.to_string())
 }
 
-fn read_manifest(path: &Path) -> Result<Manifest, String> {
+pub(crate) fn read_manifest(path: &Path) -> Result<Manifest, String> {
     let raw = read_json_file_capped(path)?;
     match serde_json::from_str::<Manifest>(&raw) {
         Ok(manifest) => {
@@ -247,9 +292,7 @@ fn repair_legacy_null_manifest(
 
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|_| original.to_string())?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| original.to_string())?;
+    let object = value.as_object_mut().ok_or_else(|| original.to_string())?;
     let mut changed = strip_nulls(object);
     if let Some(chapters) = object.get_mut("chapters").and_then(|c| c.as_array_mut()) {
         for chapter in chapters.iter_mut().filter_map(|c| c.as_object_mut()) {
@@ -259,8 +302,7 @@ fn repair_legacy_null_manifest(
     if !changed {
         return Err(original.to_string());
     }
-    let manifest: Manifest =
-        serde_json::from_value(value).map_err(|_| original.to_string())?;
+    let manifest: Manifest = serde_json::from_value(value).map_err(|_| original.to_string())?;
     validate_manifest(&manifest)?;
     let canonical = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     crate::atomic_file::write(path, canonical.as_bytes())?;
@@ -338,7 +380,7 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
     }
     let mut paths = Vec::new();
     let mut issues = Vec::new();
-    collect_manifests(root, 0, &mut paths, &mut issues);
+    collect_manifests(root, 0, &mut paths, &mut issues, false);
     paths.sort();
     let mut books = Vec::new();
     for path in paths {
@@ -389,6 +431,7 @@ fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingPr
         0,
         &mut paths,
         &mut Vec::new(),
+        false,
     );
     // P3-17: when two shelf dirs carry the same book_id, resolve
     // deterministically — the first match in sorted (lexicographic) manifest
@@ -438,6 +481,7 @@ pub fn find_book_by_source_id(root: &Path, source_id: &str) -> Result<Option<Man
         0,
         &mut paths,
         &mut Vec::new(),
+        false,
     );
     // P3-17: same deterministic ordering as find_book — first match in
     // sorted manifest path order wins.
@@ -521,11 +565,34 @@ pub(crate) fn merge_progress(
     merged
 }
 
+static PROGRESS_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+
+/// P-10-F9: shared per-book mutex for the `.reading.json`
+/// load→merge→write section. `merge_progress` alone is not enough: two
+/// writers can interleave read-then-write and the later write still drops
+/// the earlier one's `read` marks. `pub(crate)` so the 连读 reader's
+/// PUT /progress (reader_http) serializes against this surface's
+/// `save_book_progress` — both must hold the same lock to be effective.
+pub(crate) fn book_progress_lock(book_id: &str) -> Result<Arc<Mutex<()>>, String> {
+    let locks = PROGRESS_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .map_err(|_| "Progress lock registry is poisoned".to_string())?;
+    Ok(locks
+        .entry(book_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
+
 pub fn save_book_progress(
     root: &Path,
     book_id: &str,
     progress: &ReadingProgress,
 ) -> Result<(), String> {
+    let lock = book_progress_lock(book_id)?;
+    let _guard = lock
+        .lock()
+        .map_err(|_| "Progress lock is poisoned".to_string())?;
     let (book_root, manifest, existing) = find_book(root, book_id)?;
     crate::progress::save_progress(&book_root, &manifest, &merge_progress(&existing, progress))
 }
@@ -650,8 +717,11 @@ mod tests {
             .expect("chapter")
             .insert("date".to_string(), serde_json::Value::Null);
         let manifest_path = book.join("manifest.json");
-        fs::write(&manifest_path, serde_json::to_vec_pretty(&value).expect("json"))
-            .expect("write manifest");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&value).expect("json"),
+        )
+        .expect("write manifest");
 
         let scan = scan_library(&root).expect("scan");
         assert_eq!(scan.books.len(), 1);

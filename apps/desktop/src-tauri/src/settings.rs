@@ -20,7 +20,9 @@ where
     let value = serde_json::Value::deserialize(deserializer)?;
     match value.as_f64() {
         Some(3.0) => Ok(3),
-        _ => Err(serde::de::Error::custom("unsupported settings schema version")),
+        _ => Err(serde::de::Error::custom(
+            "unsupported settings schema version",
+        )),
     }
 }
 
@@ -100,11 +102,15 @@ pub(crate) fn load_compatible_from(path: &Path) -> Result<AppSettings, String> {
     // them as the same number; a bare as_u64 would misread them as "missing".
     let version = value
         .get("schemaVersion")
-        .and_then(|raw| raw.as_u64().or_else(|| {
-            raw.as_f64()
-                .filter(|float| float.fract() == 0.0 && *float >= 0.0 && *float <= u64::MAX as f64)
-                .map(|float| float as u64)
-        }))
+        .and_then(|raw| {
+            raw.as_u64().or_else(|| {
+                raw.as_f64()
+                    .filter(|float| {
+                        float.fract() == 0.0 && *float >= 0.0 && *float <= u64::MAX as f64
+                    })
+                    .map(|float| float as u64)
+            })
+        })
         .ok_or_else(|| "Settings schema version is missing".to_string())?;
     let settings = match version {
         1 | 2 => {
@@ -186,10 +192,7 @@ pub fn load_settings() -> Result<AppSettings, String> {
             // on load too — a bad root enters Recovery instead of taking
             // effect.
             let locations = crate::storage::StorageLocations::current()?;
-            crate::storage::validate_library_root(
-                Path::new(&settings.library_root),
-                &locations,
-            )?;
+            crate::storage::validate_library_root(Path::new(&settings.library_root), &locations)?;
             // Always keep production library at Documents/沉浸阅读/Library.
             // Repair any legacy project-path override silently.
             Ok(normalize_production_library_root(settings)?)
@@ -214,9 +217,14 @@ fn normalize_production_library_root(mut settings: AppSettings) -> Result<AppSet
         return Ok(settings);
     }
     // Rewrite stale/custom roots (e.g. project-local Library) to the Documents default.
+    // P-10-F18: the pin is intentional fail-closed design, but the rewrite
+    // still goes through the mtime CAS — a concurrent external edit landing
+    // after our load must not be silently clobbered.
     settings.library_root = locations.library_root.to_string_lossy().into_owned();
     let path = locations.settings_path.clone();
-    let _ = save_compatible_to(&path, &settings);
+    if check_file_stamp(&path).is_ok() {
+        let _ = save_compatible_to(&path, &settings);
+    }
     Ok(settings)
 }
 
@@ -279,8 +287,8 @@ mod tests {
 
     #[test]
     fn qa_channel_rejects_unsafe_run_ids() {
-        let error =
-            AppChannel::detect(Some(r"..\production")).expect_err("unsafe QA run id must be rejected");
+        let error = AppChannel::detect(Some(r"..\production"))
+            .expect_err("unsafe QA run id must be rejected");
 
         assert!(error.contains("QA run id"));
     }
@@ -427,10 +435,8 @@ mod tests {
     fn v3_settings_reject_unknown_fields() {
         // P2-29: mirrors `additionalProperties: false` in settings.schema.json —
         // an unrecognized key must fail instead of being silently dropped.
-        let root = std::env::temp_dir().join(format!(
-            "immersive-settings-unknown-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("immersive-settings-unknown-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("temp directory must be created");
         let path = root.join("settings.json");
@@ -511,7 +517,7 @@ mod tests {
         let absent = Some((path.clone(), None));
         assert!(stamp_unchanged(&absent, &path, None));
         assert!(!stamp_unchanged(&absent, &path, Some(t1))); // appeared since load
-        // Never observed in this process: create is fine, clobber is not.
+                                                             // Never observed in this process: create is fine, clobber is not.
         assert!(stamp_unchanged(&None, &path, None));
         assert!(!stamp_unchanged(&None, &path, Some(t1)));
     }

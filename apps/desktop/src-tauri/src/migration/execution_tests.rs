@@ -130,13 +130,9 @@ fn settings_migration_replays_idempotently_on_a_migrated_install() {
     );
     assert!(fresh.conflict_count > 0);
 
-    let second = execute_settings_migration(
-        &legacy,
-        &target,
-        &fresh.preview_id,
-        "settings-request-b",
-    )
-    .expect("re-run on an already-migrated install must succeed");
+    let second =
+        execute_settings_migration(&legacy, &target, &fresh.preview_id, "settings-request-b")
+            .expect("re-run on an already-migrated install must succeed");
     assert_eq!(second.status, "success");
     let migrated: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(&target.settings_path).expect("target settings must exist"),

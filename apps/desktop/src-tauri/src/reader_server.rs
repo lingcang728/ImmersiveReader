@@ -15,9 +15,7 @@ use uuid::Uuid;
 /// candidate list. CSP has no wildcard port ranges, so every port here is
 /// named individually in `tauri.conf.json` `frame-src` — keep the two lists
 /// in sync. A port that is already taken falls through to the next entry.
-pub(crate) const READER_PORTS: &[u16] = &[
-    21743, 21744, 21745, 21746, 21747, 21748, 21749, 21750,
-];
+pub(crate) const READER_PORTS: &[u16] = &[21743, 21744, 21745, 21746, 21747, 21748, 21749, 21750];
 
 /// Accept-loop poll interval when the nonblocking listener reports
 /// `WouldBlock`; also bounds how quickly `stop` is observed on drop.
@@ -568,7 +566,7 @@ pub fn start_session(
         .ok_or_else(|| "Reader service failed to start".to_string())?
         .add_session(ReaderSession {
             book_root,
-            manifest,
+            manifest: Arc::new(manifest),
         })
 }
 
@@ -583,6 +581,21 @@ pub fn close_session(state: &ReaderServiceState, session_id: &str) -> Result<boo
         .close_session(session_id)
 }
 
+impl ReaderServiceState {
+    /// True while `session_id` is still a live session; false once it has
+    /// been closed or idle-expired (or the service itself is down — every
+    /// tracked id is dead then). lib.rs uses this to keep its
+    /// book→session tracking map from accumulating dead ids.
+    pub fn session_alive(&self, session_id: &str) -> bool {
+        let Ok(service) = self.inner.lock() else {
+            return false;
+        };
+        service
+            .as_ref()
+            .is_some_and(|service| crate::reader_http::session_alive(&service.sessions, session_id))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ReaderService;
@@ -591,6 +604,7 @@ mod tests {
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpStream;
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn request(origin: &str, path: &str, headers: &str, body: &str) -> String {
@@ -714,7 +728,7 @@ mod tests {
         let descriptor = service
             .add_session(ReaderSession {
                 book_root: root.clone(),
-                manifest: fixture_manifest(),
+                manifest: Arc::new(fixture_manifest()),
             })
             .expect("session must start");
         let token = descriptor.session_id;
@@ -734,7 +748,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("book root must be created");
-        let manifest = fixture_manifest();
+        let manifest = Arc::new(fixture_manifest());
         let service =
             ReaderService::start("<html></html>".to_string()).expect("reader service must start");
         for _ in 0..crate::reader_http::MAX_READER_SESSIONS {
@@ -764,23 +778,27 @@ mod tests {
         fs::create_dir_all(&root).expect("book root must be created");
         fs::write(root.join("001.md"), "chapter").expect("chapter must be written");
         let manifest = fixture_manifest();
+        // save_progress refuses to write into a directory with no manifest
+        // (deleted-book guard) — the fixture book must actually look like one.
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_string(&manifest).expect("manifest must serialize"),
+        )
+        .expect("manifest must be written");
         let service =
             ReaderService::start("<html></html>".to_string()).expect("reader service must start");
         let descriptor = service
             .add_session(ReaderSession {
                 book_root: root.clone(),
-                manifest,
+                manifest: Arc::new(manifest),
             })
             .expect("session must start");
         let token = descriptor.session_id;
         assert!(request(&service.origin, "/s/invalid/manifest", "", "").starts_with("HTTP/1.1 403"));
-        assert!(request(
-            &service.origin,
-            &format!("/s/{token}/heartbeat"),
-            "",
-            ""
-        )
-        .starts_with("HTTP/1.1 204"));
+        assert!(
+            request(&service.origin, &format!("/s/{token}/heartbeat"), "", "")
+                .starts_with("HTTP/1.1 204")
+        );
         assert!(request(
             &service.origin,
             &format!("/s/{token}/content/%2e%2e/settings.json"),

@@ -60,12 +60,8 @@ fn receive_ready(
         let line = match receiver.recv_timeout(remaining) {
             Ok(Ok(line)) => line,
             Ok(Err(_)) => return Err("ENGINE_READY_STDOUT".to_string()),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                return Err("ENGINE_READY_TIMEOUT".to_string())
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("ENGINE_READY_EOF".to_string())
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err("ENGINE_READY_TIMEOUT".to_string()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("ENGINE_READY_EOF".to_string()),
         };
         match parse_ready_line(&line, expected_engine, expected_pid) {
             Ok(ready) => return Ok(ready),
@@ -245,8 +241,7 @@ mod tests {
             .expect("noise line must send");
         sender
             .send(Ok(
-                r#"{"engine":"podcast","protocolVersion":1,"pid":4242,"port":43210}"#
-                    .to_string(),
+                r#"{"engine":"podcast","protocolVersion":1,"pid":4242,"port":43210}"#.to_string(),
             ))
             .expect("READY line must send");
         let ready = receive_ready(&receiver, "podcast", 4242, Duration::from_secs(1))

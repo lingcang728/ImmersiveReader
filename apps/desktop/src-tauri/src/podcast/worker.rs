@@ -118,7 +118,19 @@ fn podcast_worker_command(
         .join(task_id);
     for path in [&executable, &script, &task_spec, &data_root, &cache_root] {
         if !path.exists() {
-            return Err(format!("WORKER_RUNTIME_MISSING: {}", path.display()));
+            // 06-F-06: the error string can reach the UI — report the last two
+            // path components, never the absolute user path.
+            let short = {
+                let mut parts = path
+                    .components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect::<Vec<_>>();
+                if parts.len() > 2 {
+                    parts = parts.split_off(parts.len() - 2);
+                }
+                parts.join("\\")
+            };
+            return Err(format!("WORKER_RUNTIME_MISSING: {short}"));
         }
     }
     // First run: seed <data_root>\config.json from the bundled example. With
@@ -140,6 +152,10 @@ fn podcast_worker_command(
         path_parts.extend(std::env::split_paths(&existing));
     }
     let mut command = Command::new(executable);
+    // 06-F-04: do not hand the host's whole environment to the worker — only
+    // the OS/tooling whitelist; the explicit .env() calls below add the rest
+    // (PATH override includes the vendored ffmpeg dir).
+    crate::tools::inherit_child_env(&mut command);
     command
         .arg(script)
         .arg("--task-spec")
@@ -175,6 +191,13 @@ fn podcast_worker_command(
         crate::secrets::deepseek_api_key(&crate::settings::AppChannel::current())?
     {
         command.env("DEEPSEEK_API_KEY", api_key);
+    } else if let Ok(api_key) = std::env::var("DEEPSEEK_API_KEY") {
+        // Explicit opt-in fallback: DEEPSEEK_API_KEY deliberately set in the
+        // user/system env still works (env_clear drops it from blind
+        // inheritance), but Credential Manager wins when both exist.
+        if !api_key.trim().is_empty() {
+            command.env("DEEPSEEK_API_KEY", api_key);
+        }
     }
     Ok(command)
 }
@@ -213,6 +236,11 @@ fn duplicate_process_handle(child: &Child) -> Result<OwnedHandle, String> {
         .map_err(|error| format!("DuplicateHandle failed: {error}"))
 }
 
+/// 17-F6: cap a single worker output line — a pathological worker emitting a
+/// newline-free flood (or one multi-MB line) used to grow `read_until`'s Vec
+/// without bound and exhaust host memory.
+const WORKER_LINE_MAX_BYTES: usize = 64 * 1024;
+
 fn read_stream<R: std::io::Read + Send + 'static>(
     stream: R,
     name: &'static str,
@@ -220,33 +248,67 @@ fn read_stream<R: std::io::Read + Send + 'static>(
 ) {
     thread::spawn(move || {
         let mut reader = BufReader::new(stream);
-        let mut buffer = Vec::new();
+        let mut buffer: Vec<u8> = Vec::new();
         loop {
             buffer.clear();
-            match reader.read_until(b'\n', &mut buffer) {
-                Ok(0) => break,
-                Ok(_) => {
-                    // Keep the BufRead::lines() framing contract: strip one
-                    // trailing LF/CRLF so each send carries one complete
-                    // NDJSON/log line.
-                    if buffer.last() == Some(&b'\n') {
-                        buffer.pop();
-                        if buffer.last() == Some(&b'\r') {
-                            buffer.pop();
-                        }
+            let mut truncated = false;
+            // Bounded line read over BufReader::fill_buf — bytes past the cap
+            // are consumed-and-dropped instead of accumulated.
+            loop {
+                let available = match reader.fill_buf() {
+                    Ok([]) => break,
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let _ =
+                            sender.send((name.to_string(), format!("stream read failed: {error}")));
+                        return;
                     }
-                    // Lossy decode: stray non-UTF-8 bytes (e.g. cp936 output
-                    // from a worker that ignored PYTHONUTF8) become U+FFFD
-                    // instead of killing the pump and deadlocking the child
-                    // on a full pipe.
-                    let line = String::from_utf8_lossy(&buffer).into_owned();
-                    let _ = sender.send((name.to_string(), line));
-                }
-                Err(error) => {
-                    let _ = sender.send((name.to_string(), format!("stream read failed: {error}")));
-                    break;
+                };
+                let newline_at = available.iter().position(|byte| *byte == b'\n');
+                let remaining = WORKER_LINE_MAX_BYTES.saturating_sub(buffer.len());
+                match newline_at {
+                    Some(pos) => {
+                        if pos <= remaining {
+                            buffer.extend_from_slice(&available[..=pos]);
+                        } else {
+                            truncated = true;
+                        }
+                        reader.consume(pos + 1);
+                        break;
+                    }
+                    None if remaining > 0 => {
+                        let take = remaining.min(available.len());
+                        buffer.extend_from_slice(&available[..take]);
+                        reader.consume(take);
+                    }
+                    None => {
+                        truncated = true;
+                        let len = available.len();
+                        reader.consume(len);
+                    }
                 }
             }
+            if buffer.is_empty() && !truncated {
+                break;
+            }
+            // Keep the BufRead::lines() framing contract: strip one
+            // trailing LF/CRLF so each send carries one complete
+            // NDJSON/log line.
+            if buffer.last() == Some(&b'\n') {
+                buffer.pop();
+                if buffer.last() == Some(&b'\r') {
+                    buffer.pop();
+                }
+            }
+            // Lossy decode: stray non-UTF-8 bytes (e.g. cp936 output
+            // from a worker that ignored PYTHONUTF8) become U+FFFD
+            // instead of killing the pump and deadlocking the child
+            // on a full pipe.
+            let mut line = String::from_utf8_lossy(&buffer).into_owned();
+            if truncated {
+                line.push_str("…[worker line truncated]");
+            }
+            let _ = sender.send((name.to_string(), line));
         }
     });
 }
@@ -304,11 +366,11 @@ fn finish_task_logged(
     held: &mut Option<ControlDb>,
     task_id: &str,
     app: &AppHandle,
-    success: bool,
+    outcome: crate::tasks::TaskOutcome,
     message: Option<&str>,
 ) {
     match worker_db_call(task_id, held, |control| {
-        control.finish_worker_task(task_id, success, message)
+        control.finish_worker_task_with_outcome(task_id, outcome.clone(), message)
     }) {
         Ok(Some(event)) => emit_task(app, &event),
         Ok(None) => {}
@@ -452,7 +514,7 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
     // P1-28: the structured fatal NDJSON line is the real failure reason; only
     // fall back to the stderr tail when no fatal record was seen.
     let resolved_error = fatal_error.or(stderr_tail);
-    let (success, status_message) = match status {
+    let (outcome, status_message) = match status {
         Ok(value) if value.success() => {
             // Must honor settings.libraryRoot — bare StorageLocations::current() points at the
             // default Documents library and leaves books invisible to open_task_result.
@@ -461,15 +523,23 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
                 let transaction =
                     super::publish_task_result_at(&mut control, &locations, &task_id)?;
                 // Refuse "success" unless the shelf book is actually findable.
-                crate::library::open_book(&locations.library_root, &transaction.book_id)
-                    .map_err(|error| {
-                        format!("PUBLISH_FAILED: published book is not readable ({error})")
-                    })?;
-                Ok(())
+                crate::library::open_book(&locations.library_root, &transaction.book_id).map_err(
+                    |error| format!("PUBLISH_FAILED: published book is not readable ({error})"),
+                )?;
+                // 05-F6: a clean exit code is not the whole truth — if the
+                // polish stage disabled itself after consecutive errors the
+                // output shipped unpolished; mark the task partial so the UI
+                // does not claim a fully-polished result.
+                let degraded = polish_disabled_after_errors(&locations, &task_id);
+                Ok(degraded)
             }) {
-                Ok(()) => (true, resolved_error),
+                Ok(true) => (
+                    crate::tasks::TaskOutcome::PartialSuccess,
+                    Some("已完成转写，但润色因连续错误被跳过，文稿未润色。".to_string()),
+                ),
+                Ok(false) => (crate::tasks::TaskOutcome::Success, resolved_error),
                 Err(error) => (
-                    false,
+                    crate::tasks::TaskOutcome::Failed,
                     Some(
                         serde_json::json!({
                             "type": "fatal",
@@ -481,14 +551,21 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
                 ),
             }
         }
-        Ok(value) => (value.success(), resolved_error),
-        Err(error) => (false, Some(error.to_string())),
+        Ok(value) => (
+            if value.success() {
+                crate::tasks::TaskOutcome::Success
+            } else {
+                crate::tasks::TaskOutcome::Failed
+            },
+            resolved_error,
+        ),
+        Err(error) => (crate::tasks::TaskOutcome::Failed, Some(error.to_string())),
     };
     finish_task_logged(
         &mut control_db,
         &task_id,
         &app,
-        success,
+        outcome,
         status_message.as_deref(),
     );
     drop(job);
@@ -496,6 +573,33 @@ fn run_worker(task_id: String, app: AppHandle, child_handle: ChildHandle, job: O
     // P1-5: the concurrency slot is free — promote the next queued podcast
     // task so a batch drains one worker at a time.
     start_next_queued_worker(&app);
+}
+
+/// 05-F6: the Python side persists `polish_summary.disabled_after_errors` in
+/// the task state file when the LLM polish stage gave up after consecutive
+/// failures and shipped the unpolished text — read it so the host can mark
+/// the outcome partial instead of a misleading clean success.
+fn polish_disabled_after_errors(locations: &StorageLocations, task_id: &str) -> bool {
+    let state_path = locations
+        .cache_root
+        .join("Podcast")
+        .join("Tasks")
+        .join(task_id)
+        .join("work")
+        .join("state")
+        .join(format!("{task_id}.json"));
+    let Ok(text) = std::fs::read_to_string(crate::atomic_file::long_path(&state_path)) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|state| {
+            state
+                .get("polish_summary")
+                .and_then(|summary| summary.get("disabled_after_errors"))
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(false)
 }
 
 fn release_worker_entry(task_id: &str) {
@@ -579,7 +683,13 @@ pub fn start_task(task_id: String, app: AppHandle) -> Result<(), String> {
             // P2-11: persist the terminal failure with retry + logging — a
             // lost event here strands the task in Starting forever.
             let mut db = None;
-            finish_task_logged(&mut db, &task_id, &app, false, Some(&error));
+            finish_task_logged(
+                &mut db,
+                &task_id,
+                &app,
+                crate::tasks::TaskOutcome::Failed,
+                Some(&error),
+            );
             return Err(error);
         }
     };
@@ -591,7 +701,13 @@ pub fn start_task(task_id: String, app: AppHandle) -> Result<(), String> {
             let _ = child.kill();
             let _ = child.wait();
             let mut db = None;
-            finish_task_logged(&mut db, &task_id, &app, false, Some(&error));
+            finish_task_logged(
+                &mut db,
+                &task_id,
+                &app,
+                crate::tasks::TaskOutcome::Failed,
+                Some(&error),
+            );
             return Err(error);
         }
     };
@@ -724,10 +840,7 @@ pub fn resume_task(task_id: &str) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        crate::job_object::resume_process_tree(
-            entry.process.as_raw_handle() as HANDLE,
-            entry.pid,
-        )?;
+        crate::job_object::resume_process_tree(entry.process.as_raw_handle() as HANDLE, entry.pid)?;
         entry.suspended = false;
         Ok(())
     }
@@ -753,8 +866,7 @@ mod tests {
     fn read_stream_survives_non_utf8_lines_and_keeps_line_framing() {
         // cp936 bytes for 「中文」 followed by a valid UTF-8 NDJSON line and a
         // final line without a trailing newline.
-        let bytes = b"\xd6\xd0\xce\xc4 log\r\n{\"type\":\"progress\",\"percent\":1}\ntail"
-            .to_vec();
+        let bytes = b"\xd6\xd0\xce\xc4 log\r\n{\"type\":\"progress\",\"percent\":1}\ntail".to_vec();
         let (sender, receiver) = mpsc::channel();
         read_stream(Cursor::new(bytes), "stdout", sender);
 

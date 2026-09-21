@@ -75,6 +75,81 @@ pub fn load_transaction(root: &Path, transaction_id: &str) -> Result<PublishTran
     Ok(transaction)
 }
 
+/// A journal that fails to load wedges the book permanently: the commit path
+/// keeps refusing to write a fresh one while the unreadable file sits in
+/// `.transactions`, and the recovery UI cannot even show it. Move it aside to
+/// `<id>.json.corrupt-<epoch>` instead — evidence is preserved, the name no
+/// longer collides with a fresh journal, and `list_transactions`/`exists()`
+/// stop seeing it. Returns Ok(false) when the journal was already gone.
+fn quarantine_unreadable_journal(root: &Path, transaction_id: &str) -> Result<bool, String> {
+    let journal = journal_path(root, transaction_id)?;
+    if !journal.exists() {
+        return Ok(false);
+    }
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    for attempt in 0..10_u32 {
+        let suffix = if attempt == 0 {
+            format!("corrupt-{epoch}")
+        } else {
+            format!("corrupt-{epoch}-{attempt}")
+        };
+        let quarantined = journal.with_file_name(format!("{transaction_id}.json.{suffix}"));
+        match fs::rename(&journal, &quarantined) {
+            Ok(()) => {
+                crate::storage::app_log(
+                    "publish",
+                    &format!(
+                        "unreadable publish journal quarantined: {}",
+                        quarantined.display()
+                    ),
+                );
+                return Ok(true);
+            }
+            // A previous quarantine may hold the same epoch name.
+            Err(_) if quarantined.exists() => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to quarantine unreadable publish journal {}: {error}",
+                    journal.display()
+                ))
+            }
+        }
+    }
+    Err(format!(
+        "failed to quarantine unreadable publish journal {}",
+        journal.display()
+    ))
+}
+
+/// Phase the journal file at `.transactions/<name>.json` reports — `None`
+/// means no protective journal exists: file absent, unparseable (quarantined
+/// on sight so the next sweep frees the staging dir), or already terminal.
+fn non_terminal_journal(root: &Path, name: &str) -> Option<PublishTransaction> {
+    let journal = root.join(".transactions").join(format!("{name}.json"));
+    if !journal.exists() {
+        return None;
+    }
+    match load_transaction(root, name) {
+        Ok(transaction)
+            if !matches!(
+                transaction.phase,
+                PublishPhase::Committed | PublishPhase::RolledBack
+            ) =>
+        {
+            Some(transaction)
+        }
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("unreadable publish journal {name}: {error}; quarantining");
+            let _ = quarantine_unreadable_journal(root, name);
+            None
+        }
+    }
+}
+
 pub fn list_transactions(root: &Path) -> Result<Vec<PublishTransaction>, String> {
     let journals = root.join(".transactions");
     if !journals.exists() {
@@ -85,41 +160,40 @@ pub fn list_transactions(root: &Path) -> Result<Vec<PublishTransaction>, String>
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
-    let transactions = entries
-        .into_iter()
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|value| value == "json")
-        })
-        // P3-18: per-entry tolerance (same skip-and-log pattern as
-        // `trash::reconcile` / `LibraryIssue`) — one corrupt journal must not
-        // hide every other transaction.
-        .filter_map(|entry| {
-            let id = entry
-                .path()
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .map(str::to_string);
-            match id {
-                Some(id) => match load_transaction(root, &id) {
-                    Ok(transaction) => Some(transaction),
-                    Err(error) => {
-                        eprintln!("list_transactions: skipping unreadable journal {id}: {error}");
-                        None
-                    }
-                },
-                None => {
-                    eprintln!(
-                        "list_transactions: skipping journal with invalid file name {}",
-                        entry.path().display()
-                    );
-                    None
+    let mut transactions = Vec::new();
+    for entry in entries {
+        if !entry
+            .path()
+            .extension()
+            .is_some_and(|value| value == "json")
+        {
+            continue;
+        }
+        let Some(id) = entry
+            .path()
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::to_string)
+        else {
+            eprintln!(
+                "list_transactions: skipping journal with invalid file name {}",
+                entry.path().display()
+            );
+            continue;
+        };
+        match load_transaction(root, &id) {
+            Ok(transaction) => transactions.push(transaction),
+            Err(error) => {
+                // One corrupt journal must neither hide the rest nor wedge
+                // its book's re-publish forever — quarantine it so the file
+                // stops colliding with a fresh journal (kept as evidence).
+                eprintln!("list_transactions: unreadable journal {id}: {error}");
+                if let Err(quarantine_error) = quarantine_unreadable_journal(root, &id) {
+                    eprintln!("list_transactions: could not quarantine {id}: {quarantine_error}");
                 }
             }
-        })
-        .collect();
+        }
+    }
     Ok(transactions)
 }
 
@@ -141,22 +215,18 @@ fn ensure_single_book_transaction(
     Ok(())
 }
 
-fn ensure_final_path_identity(
-    root: &Path,
-    transaction: &PublishTransaction,
-) -> Result<(), String> {
+fn ensure_final_path_identity(root: &Path, transaction: &PublishTransaction) -> Result<(), String> {
     let final_path = managed_relative(root, &transaction.final_relative_path)?;
     if !final_path.exists() {
         return Ok(());
     }
 
     let manifest_path = final_path.join("manifest.json");
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &fs::read(&manifest_path).map_err(|error| {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).map_err(|error| {
             format!("Final publish path exists but its manifest cannot be read: {error}")
-        })?,
-    )
-    .map_err(|error| format!("Final publish path has invalid metadata: {error}"))?;
+        })?)
+        .map_err(|error| format!("Final publish path has invalid metadata: {error}"))?;
     let existing_book_id = manifest
         .get("bookId")
         .and_then(serde_json::Value::as_str)
@@ -217,6 +287,8 @@ fn inject_crash(crash: Option<CrashPoint>, point: CrashPoint) -> Result<(), Stri
 
 /// Move unvalidated content at the final path into `.incoming/failed-<tx>` so
 /// rollback never destroys data — the quarantined copy stays recoverable.
+/// An occupied `failed-<tx>` slot (a previous crashed attempt already left a
+/// copy) gets a `-N` suffix instead of deadlocking recovery forever.
 fn quarantine_final(
     root: &Path,
     transaction: &PublishTransaction,
@@ -225,9 +297,14 @@ fn quarantine_final(
     if !final_path.exists() {
         return Ok(());
     }
-    let failed = root
-        .join(".incoming")
-        .join(format!("failed-{}", transaction.transaction_id));
+    let incoming = root.join(".incoming");
+    let mut failed = incoming.join(format!("failed-{}", transaction.transaction_id));
+    for attempt in 1..32_u32 {
+        if !failed.exists() {
+            break;
+        }
+        failed = incoming.join(format!("failed-{}-{attempt}", transaction.transaction_id));
+    }
     if failed.exists() {
         return Err("Failed publication quarantine already exists".to_string());
     }
@@ -259,6 +336,19 @@ fn restore_rollback(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     fs::rename(rollback_path, final_path).map_err(|error| error.to_string())
+}
+
+/// Find a free sibling of the recorded rollback path (`…-recover<N>`). The
+/// recorded slot can hold a genuine archive from a previous crashed attempt —
+/// relocating beats either overwriting it or wedging on "slot exists".
+fn free_rollback_slot(root: &Path, recorded_relative: &str) -> Result<String, String> {
+    for attempt in 1..=32_u32 {
+        let candidate = format!("{recorded_relative}-recover{attempt}");
+        if !managed_relative(root, &candidate)?.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("Publish rollback path already exists".to_string())
 }
 
 fn rollback(root: &Path, transaction: &mut PublishTransaction) -> Result<(), String> {
@@ -299,10 +389,21 @@ fn advance(
                     return Ok(());
                 }
                 let final_path = managed_relative(root, &transaction.final_relative_path)?;
-                let rollback_path = managed_relative(root, &transaction.rollback_relative_path)?;
+                let mut rollback_path =
+                    managed_relative(root, &transaction.rollback_relative_path)?;
                 if final_path.exists() {
                     if rollback_path.exists() {
-                        return Err("Publish rollback path already exists".to_string());
+                        // A previous attempt already archived into the recorded
+                        // slot (its OldMoved journal write was lost). That copy
+                        // may be the genuine pre-publish version — never
+                        // overwrite it. Allocate a fresh `-recover<N>` slot and
+                        // repoint the journal BEFORE the rename so a crash in
+                        // between still converges on the next pass.
+                        transaction.rollback_relative_path =
+                            free_rollback_slot(root, &transaction.rollback_relative_path)?;
+                        save_transaction(root, transaction)?;
+                        rollback_path =
+                            managed_relative(root, &transaction.rollback_relative_path)?;
                     }
                     if let Some(parent) = rollback_path.parent() {
                         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -359,26 +460,46 @@ pub fn commit_transaction(
     root: &Path,
     transaction: &PublishTransaction,
 ) -> Result<PublishTransaction, String> {
+    // F-03: the per-book lock must cover the WHOLE transaction lifecycle —
+    // journal read, claim checks, and every advance() rename. The old code
+    // only guarded the claim/create window, so a concurrent commit and a
+    // recovery pass could race the same final/rollback paths.
+    let lock = book_claim_lock(root, &transaction.book_id)?;
+    let _claim_guard = lock
+        .lock()
+        .map_err(|_| "Publish claim lock is poisoned".to_string())?;
     let journal = journal_path(root, &transaction.transaction_id)?;
     let mut current;
     if journal.exists() {
-        current = load_transaction(root, &transaction.transaction_id)?;
+        current = match load_transaction(root, &transaction.transaction_id) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // F-01: a journal we cannot parse wedges this book forever —
+                // every retry hits `load` → Err before a fresh journal can be
+                // written. Quarantine it (evidence preserved) and let this
+                // commit start clean; `.revisions` residue stays archived.
+                eprintln!(
+                    "commit_transaction: unreadable journal {}: {error}; quarantining",
+                    transaction.transaction_id
+                );
+                quarantine_unreadable_journal(root, &transaction.transaction_id)?;
+                if transaction.phase != PublishPhase::Prepared {
+                    return Err("New publish transaction must be prepared".to_string());
+                }
+                ensure_single_book_transaction(root, transaction)?;
+                ensure_final_path_identity(root, transaction)?;
+                save_transaction(root, transaction)?;
+                transaction.clone()
+            }
+        };
     } else {
         if transaction.phase != PublishPhase::Prepared {
             return Err("New publish transaction must be prepared".to_string());
         }
-        let lock = book_claim_lock(root, &transaction.book_id)?;
-        let _claim_guard = lock
-            .lock()
-            .map_err(|_| "Publish claim lock is poisoned".to_string())?;
-        if journal.exists() {
-            current = load_transaction(root, &transaction.transaction_id)?;
-        } else {
-            ensure_single_book_transaction(root, transaction)?;
-            ensure_final_path_identity(root, transaction)?;
-            save_transaction(root, transaction)?;
-            current = transaction.clone();
-        }
+        ensure_single_book_transaction(root, transaction)?;
+        ensure_final_path_identity(root, transaction)?;
+        save_transaction(root, transaction)?;
+        current = transaction.clone();
     }
     advance(root, &mut current, None)?;
     Ok(current)
@@ -401,6 +522,15 @@ pub fn recover_transaction(
     root: &Path,
     transaction_id: &str,
 ) -> Result<PublishTransaction, String> {
+    // F-03: recovery runs the same advance() renames as commit — take the
+    // same per-book lock so it cannot interleave with an in-flight publish.
+    // The journal is re-read under the lock so a just-committed transaction
+    // observed stale cannot be driven twice.
+    let peeked = load_transaction(root, transaction_id)?;
+    let lock = book_claim_lock(root, &peeked.book_id)?;
+    let _claim_guard = lock
+        .lock()
+        .map_err(|_| "Publish claim lock is poisoned".to_string())?;
     let mut transaction = load_transaction(root, transaction_id)?;
     advance(root, &mut transaction, None)?;
     Ok(transaction)
@@ -410,11 +540,22 @@ pub fn recover_transaction(
 /// republish archives another copy forever.
 const MAX_REVISION_SLOTS_PER_SOURCE: usize = 8;
 
+/// P-11-F05: `failed-*` quarantine copies are the only salvage of rejected
+/// content — they survive long enough to rescue (a month), then the sweep
+/// reclaims them. The window is deliberately generous; anything newer is
+/// never auto-deleted.
+const FAILED_QUARANTINE_KEEP: std::time::Duration =
+    std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
 /// Startup GC for publish residue no journal can ever reclaim:
-/// - `.incoming/<tx>` staging dirs whose `.transactions/<tx>.json` journal is
-///   gone (a retry deletes the journal before re-running; a crash in that gap
-///   strands the staging dir permanently). `failed-*` quarantine copies are
-///   the only salvage of rejected content — never auto-deleted.
+/// - `.incoming/<tx>` staging dirs that no *in-flight* journal protects —
+///   journal missing, terminal (committed/rolled_back: the transaction is
+///   over and any leftover staging is dead weight), or unreadable (quarantined
+///   on sight so the next launch's sweep frees the dir). `failed-*`
+///   quarantine copies are exempt until `FAILED_QUARANTINE_KEEP` old.
+/// - `.transactions/*.json` journals in the terminal `rolled_back` state —
+///   the rollback already ran, so the file is a dead record. `committed`
+///   journals stay: both publishers use them for idempotent re-publish.
 /// - `.revisions/<source>` slots beyond the newest few per source.
 ///
 /// Runs inside `setup`, before any publish can be in flight — anything left
@@ -426,6 +567,27 @@ pub fn sweep_publish_residue(root: &Path) {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with("failed-") {
+                // Salvage dirs outlive every other residue — only age them
+                // out after the retention window.
+                let stale = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .map(|modified| {
+                        modified
+                            .elapsed()
+                            .map(|age| age > FAILED_QUARANTINE_KEEP)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if !stale {
+                    continue;
+                }
+                if let Err(error) = fs::remove_dir_all(&path) {
+                    eprintln!(
+                        "publish residue sweep could not remove stale quarantine {}: {error}",
+                        path.display()
+                    );
+                }
                 continue;
             }
             // A reparse point gets unlinked, never traversed.
@@ -440,8 +602,9 @@ pub fn sweep_publish_residue(root: &Path) {
             if !path.is_dir() {
                 continue;
             }
-            let journal = root.join(".transactions").join(format!("{name}.json"));
-            if journal.exists() {
+            // Staging dirs survive only while a non-terminal journal protects
+            // them; terminal or missing journals make the staging dead weight.
+            if non_terminal_journal(root, &name).is_some() {
                 continue;
             }
             if let Err(error) = fs::remove_dir_all(&path) {
@@ -449,6 +612,36 @@ pub fn sweep_publish_residue(root: &Path) {
                     "publish residue sweep could not remove orphaned staging {}: {error}",
                     path.display()
                 );
+            }
+        }
+    }
+    // Dead journals: a rolled_back entry has nothing left to recover — its
+    // rollback already ran. Removing it also frees the `.incoming` staging
+    // check above on the next pass (same name). Unreadable `.json` files were
+    // already quarantined to `*.corrupt-*` by list_transactions / the check.
+    let transactions_dir = root.join(".transactions");
+    if let Ok(entries) = fs::read_dir(&transactions_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.extension().is_some_and(|value| value == "json") {
+                continue;
+            }
+            let Some(stem) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            match load_transaction(root, &stem) {
+                Ok(transaction) if transaction.phase == PublishPhase::RolledBack => {
+                    let _ = fs::remove_file(&path);
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    let _ = quarantine_unreadable_journal(root, &stem);
+                }
             }
         }
     }

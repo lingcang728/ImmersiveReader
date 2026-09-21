@@ -124,9 +124,20 @@ pub(super) fn write_task_contract(
             polish: request.options.polish,
             duplicate_policy: request.duplicate_policy,
             max_api_cost_cny: request.options.max_api_cost_cny,
+            // The sanctioned ceiling is the higher of the user's typed cap and
+            // the approved estimate: approval is only required when the
+            // estimate exceeded the cap, so max() yields "user cap when it
+            // covers the estimate, else the approved estimate" — never a bare
+            // echo of the preview (which used to make the runtime ceiling
+            // exactly the optimistic estimate, so any overrun stopped the
+            // task mid-flight; 05-F2).
             budget_limit_cny: request
                 .budget_approval
-                .map(|approval| approval.estimated_api_cost_upper_cny)
+                .map(|approval| {
+                    approval
+                        .estimated_api_cost_upper_cny
+                        .max(request.options.max_api_cost_cny)
+                })
                 .unwrap_or(request.options.max_api_cost_cny),
         },
         budget: request.budget,

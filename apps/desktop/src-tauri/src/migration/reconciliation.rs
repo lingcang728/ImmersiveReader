@@ -1,8 +1,9 @@
-use serde::{Deserialize, Serialize};
+use rusqlite::Connection;
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,53 +29,72 @@ pub struct ReconciliationReport {
     pub issues: Vec<ReconciliationIssue>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 struct SuccessRow {
     item_id: String,
     url: String,
     output_path: Option<String>,
 }
 
-fn success_rows(executable: &Path, database: &Path) -> Result<Vec<SuccessRow>, String> {
-    // P3-26: sqlite3 invocations go through the bounded runner — a hung
-    // child can no longer block reconciliation forever.
-    let mut archive_check_command = Command::new(executable);
-    archive_check_command
-        .arg("-batch")
-        .arg("-noheader")
-        .arg(database)
-        .arg("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='archive_revisions';");
-    let archive_check = super::sqlite::run_bounded(&mut archive_check_command)?;
-    if !archive_check.status.success() {
-        return Err(format!(
-            "SQLite catalog check failed: {}",
-            String::from_utf8_lossy(&archive_check.stderr).trim()
-        ));
-    }
-    let has_archive = String::from_utf8_lossy(&archive_check.stdout).trim() == "1";
-    let sql = if has_archive {
-        "SELECT ai.item_id, ai.source_url AS url, ar.output_path FROM archive_items ai JOIN archive_revisions ar ON ar.item_id = ai.item_id AND ar.revision = ai.current_revision ORDER BY ai.item_id;"
+/// P-11-F18: bound the success-row slurp — a hostile/huge archive database
+/// must not grow the report Vec without limit. Beyond the cap the report
+/// would be unusable anyway, so the reconcile errors out instead of
+/// silently truncating.
+const MAX_RECONCILE_ROWS: usize = 200_000;
+/// Markdown probe cap — a giant/hostile file must not pull unbounded bytes
+/// into memory just to answer "does this parse as UTF-8".
+const MAX_MARKDOWN_PROBE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn success_rows(database: &Path) -> Result<Vec<SuccessRow>, String> {
+    // P-11-F04: bundled rusqlite replaces the sqlite3 CLI — no PATH lookup,
+    // no child process to hang, and query values come back typed instead of
+    // through a JSON pipe.
+    let connection = Connection::open(database).map_err(|error| error.to_string())?;
+    connection
+        .busy_timeout(Duration::from_secs(30))
+        .map_err(|error| error.to_string())?;
+    let has_archive: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='archive_revisions'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let sql = if has_archive == 1 {
+        "SELECT ai.item_id, ai.source_url AS url, ar.output_path FROM archive_items ai JOIN archive_revisions ar ON ar.item_id = ai.item_id AND ar.revision = ai.current_revision ORDER BY ai.item_id"
     } else {
-        "SELECT ti.item_id, i.url, ti.output_path FROM task_items ti JOIN items i ON i.id = ti.item_id WHERE ti.status = 'success' ORDER BY ti.item_id, ti.updated_at;"
+        "SELECT ti.item_id, i.url, ti.output_path FROM task_items ti JOIN items i ON i.id = ti.item_id WHERE ti.status = 'success' ORDER BY ti.item_id, ti.updated_at"
     };
-    let mut query_command = Command::new(executable);
-    query_command
-        .arg("-batch")
-        .arg("-json")
-        .arg(database)
-        .arg(sql);
-    let result = super::sqlite::run_bounded(&mut query_command)?;
-    if !result.status.success() {
-        return Err(format!(
-            "SQLite reconciliation query failed: {}",
-            String::from_utf8_lossy(&result.stderr).trim()
-        ));
+    let mut statement = connection
+        .prepare(&format!("{sql} LIMIT {}", MAX_RECONCILE_ROWS + 1))
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(SuccessRow {
+                item_id: row.get(0)?,
+                url: row.get(1)?,
+                output_path: row.get(2)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if rows.len() > MAX_RECONCILE_ROWS {
+        return Err("RECONCILE_TOO_MANY_ROWS".to_string());
     }
-    let raw = String::from_utf8(result.stdout).map_err(|error| error.to_string())?;
-    if raw.trim().is_empty() {
-        return Ok(Vec::new());
+    Ok(rows)
+}
+
+/// Capped "does this markdown parse as UTF-8" probe — oversized files are
+/// flagged as needing attention rather than slurped.
+fn markdown_parseable(file: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(file) else {
+        return false;
+    };
+    if metadata.len() > MAX_MARKDOWN_PROBE_BYTES {
+        return false;
     }
-    serde_json::from_str(&raw).map_err(|error| error.to_string())
+    fs::read_to_string(file).is_ok()
 }
 
 /// P3-22: bound the archive walk the same way importer.rs's
@@ -168,11 +188,10 @@ fn issue(
 }
 
 pub fn reconcile_zhihu_archive(
-    executable: &Path,
     database: &Path,
     output_root: &Path,
 ) -> Result<ReconciliationReport, String> {
-    let rows = success_rows(executable, database)?;
+    let rows = success_rows(database)?;
     let mut files = Vec::new();
     markdown_files(output_root, &mut files, 0)?;
     files.sort();
@@ -249,7 +268,7 @@ pub fn reconcile_zhihu_archive(
                 "retain the file and request source matching",
             ));
         }
-        if fs::read_to_string(file).is_err() {
+        if !markdown_parseable(file) {
             issues.push(issue(
                 "unparseable-markdown",
                 None,

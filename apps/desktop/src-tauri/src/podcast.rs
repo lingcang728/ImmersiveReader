@@ -30,7 +30,7 @@ pub use worker::{
     stop_all as stop_workers,
 };
 
-const ESTIMATE_VERSION: &str = "podcast-budget-v1-deepseek-v4-2026-07-12";
+const ESTIMATE_VERSION: &str = "podcast-budget-v2-deepseek-v4-2026-07-12";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +64,9 @@ pub struct PodcastFilePreview {
 pub struct PodcastBudgetPreview {
     pub estimated_disk_bytes: u64,
     pub estimated_translation_tokens: u64,
+    /// Separate polish estimate — translation and polish are independent LLM
+    /// passes and both draw from the same budget limit at runtime.
+    pub estimated_polish_tokens: u64,
     pub estimated_api_cost_upper_cny: f64,
     pub available_disk_bytes: u64,
     pub estimate_version: String,
@@ -207,6 +210,7 @@ fn available_space(_path: &Path) -> Result<u64, String> {
 fn estimate_budget(
     files: &[PodcastFilePreview],
     translate: bool,
+    polish: bool,
     max_api_cost_cny: f64,
     available_disk_bytes: u64,
 ) -> PodcastBudgetPreview {
@@ -221,14 +225,22 @@ fn estimate_budget(
     } else {
         0
     };
-    let estimated_api_cost_upper_cny = if translate {
-        estimated_translation_tokens as f64 * 6.0 / 1_000_000.0
+    // Polish issues one LLM pass over every rendered turn regardless of
+    // language, so its cost is on the same order as a translation pass —
+    // counting it here matters most for translate=false + polish=true runs,
+    // which used to estimate ¥0, skip confirmation, and then die mid-task on
+    // the first polish budget reservation (05-F2).
+    let estimated_polish_tokens = if polish {
+        (duration * 12.0).ceil() as u64
     } else {
-        0.0
+        0
     };
+    let estimated_api_cost_upper_cny =
+        (estimated_translation_tokens + estimated_polish_tokens) as f64 * 6.0 / 1_000_000.0;
     PodcastBudgetPreview {
         estimated_disk_bytes,
         estimated_translation_tokens,
+        estimated_polish_tokens,
         estimated_api_cost_upper_cny,
         available_disk_bytes,
         estimate_version: ESTIMATE_VERSION.to_string(),
@@ -237,17 +249,30 @@ fn estimate_budget(
     }
 }
 
+/// 12-F10: every path costs a full SHA-256 plus an ffprobe spawn — an
+/// unbounded IPC list is a process-flood primitive. Preview is a
+/// human-scale batch; beyond the cap the caller must split the selection.
+const MAX_PODCAST_PREVIEW_FILES: usize = 64;
+
 pub fn preview_podcast_files_at(
     paths: &[String],
     options: &PodcastPreviewOptions,
     locations: &StorageLocations,
 ) -> Result<PodcastFilesPreview, String> {
-    if paths.is_empty() || !options.max_api_cost_cny.is_finite() || options.max_api_cost_cny < 0.0 {
+    if paths.is_empty()
+        || paths.len() > MAX_PODCAST_PREVIEW_FILES
+        || !options.max_api_cost_cny.is_finite()
+        || options.max_api_cost_cny < 0.0
+    {
         return Err("INVALID_ARGUMENT".to_string());
     }
     let ffprobe =
         crate::atomic_file::long_path(&locations.runtime_root.join(r"podcast\ffmpeg\ffprobe.exe"));
     let mut files = Vec::new();
+    // A file dragged in twice (or reached via a second spelling) hashes to the
+    // same input — admitting both would queue two tasks publishing to the same
+    // book_id and overwrite each other at publish time (05-F12). First wins.
+    let mut seen_inputs = std::collections::HashSet::new();
     for raw in paths {
         // P2-20: normalize before metadata/hash/ffprobe — a source past
         // MAX_PATH must still preview; `raw` stays untouched for display and
@@ -266,6 +291,9 @@ pub fn preview_podcast_files_at(
             return Err("INVALID_ARGUMENT".to_string());
         }
         let input_sha256 = crate::publish::hash_file(&path)?;
+        if !seen_inputs.insert(input_sha256.clone()) {
+            continue;
+        }
         let book_id = format!("podcast:{input_sha256}");
         let duplicate_book_id =
             crate::library::find_book_by_source_id(&locations.library_root, &input_sha256)?
@@ -287,6 +315,7 @@ pub fn preview_podcast_files_at(
     let budget = estimate_budget(
         &files,
         options.translate,
+        options.polish,
         options.max_api_cost_cny,
         available_space(&locations.cache_root)?,
     );
@@ -412,6 +441,27 @@ pub fn copy_verified_input_with_progress(
             return Err("INPUT_CHANGED".to_string());
         }
         fs::rename(&partial, &final_path).map_err(|error| error.to_string())?;
+        // 05-F13: the worker honors a same-stem sidecar subtitle (.srt/.ass/
+        // .ssa/.vtt) next to the input and skips ASR entirely — but only the
+        // audio was ever copied into the managed input/, so the documented
+        // shortcut could never fire for app-added files. Mirror the sidecar
+        // alongside the audio; a missing or uncopyable sidecar is not an
+        // error (normal transcription proceeds).
+        if let Some(stem) = final_path.file_stem().and_then(|stem| stem.to_str()) {
+            for ext in ["srt", "ass", "ssa", "vtt"] {
+                let sidecar_source = source.with_extension(ext);
+                if !sidecar_source.is_file() {
+                    continue;
+                }
+                let sidecar_target = input_root.join(format!("{stem}.{ext}"));
+                if let Err(error) = fs::copy(&sidecar_source, &sidecar_target) {
+                    eprintln!(
+                        "sidecar subtitle copy failed ({}): {error}",
+                        sidecar_source.display()
+                    );
+                }
+            }
+        }
         if let Some(callback) = on_progress.as_mut() {
             callback(copied_bytes, expected_bytes);
         }
@@ -479,7 +529,8 @@ pub fn retry_task_at(
     let budget_approved = matches!(
         snapshot.required_action,
         crate::tasks::RequiredAction::ApproveBudget
-    ) && budget_limit_cny.is_some_and(|limit| limit.is_finite() && limit > 0.0);
+    ) && budget_limit_cny
+        .is_some_and(|limit| limit.is_finite() && limit > 0.0);
     if !matches!(
         snapshot.lifecycle_state,
         crate::tasks::LifecycleState::Terminal
@@ -533,15 +584,95 @@ pub fn retry_task_at(
         }
     }
 
-    let restarted =
-        restart_incompatible_task_at(control, locations, task_id, budget_limit_cny)?;
+    // 17-F4: in-place resume — same task id and cache root, so the worker's
+    // checkpoint (`work/state/<id>.json`, normalized WAV, chunk/translation
+    // caches) actually continues instead of being cloned into a fresh id that
+    // voids all progress. Still clone when resume is unsafe or impossible:
+    // incompatible pipeline/model/config (checkpoint bytes are meaningless)
+    // or the cached input is gone.
+    let incompatible = matches!(
+        snapshot.error_code,
+        Some(crate::tasks::TaskErrorCode::PipelineIncompatible)
+            | Some(crate::tasks::TaskErrorCode::ModelIncompatible)
+            | Some(crate::tasks::TaskErrorCode::ConfigIncompatible)
+    );
+    if !incompatible {
+        if let Some(resumed) = resume_task_in_place(control, locations, task_id, budget_limit_cny)?
+        {
+            return Ok((resumed, RetryKind::Resumed));
+        }
+    }
+    let restarted = restart_incompatible_task_at(control, locations, task_id, budget_limit_cny)?;
     Ok((restarted, RetryKind::Restarted))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetryKind {
     Republished,
+    Resumed,
     Restarted,
+}
+
+/// Try to requeue a terminal task in place for a real checkpoint resume.
+/// Returns `None` when the spec or cached input is missing — the caller then
+/// falls back to the clone path which reports the concrete reason.
+fn resume_task_in_place(
+    control: &mut crate::control::ControlDb,
+    locations: &StorageLocations,
+    task_id: &str,
+    budget_limit_cny: Option<f64>,
+) -> Result<Option<TaskSnapshot>, String> {
+    let task_root = crate::atomic_file::long_path(
+        &locations
+            .data_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(task_id),
+    );
+    let spec_path = task_root.join("task.json");
+    if !spec_path.is_file() {
+        return Ok(None);
+    }
+    let spec_text = fs::read_to_string(&spec_path).map_err(|error| error.to_string())?;
+    let mut spec: Value = serde_json::from_str(&spec_text).map_err(|error| error.to_string())?;
+    let relative_path = spec
+        .get("input")
+        .and_then(|input| input.get("relativePath"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "INVALID_TASK_SPEC".to_string())?;
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
+    }
+    let cache_root = crate::atomic_file::long_path(
+        &locations
+            .cache_root
+            .join("Podcast")
+            .join("Tasks")
+            .join(task_id),
+    );
+    if !cache_root.join(relative).is_file() {
+        return Ok(None);
+    }
+    if let Some(limit) = budget_limit_cny {
+        if let Some(options_obj) = spec.get_mut("options") {
+            options_obj["budgetLimitCny"] = json!(limit);
+            let data = serde_json::to_vec_pretty(&spec).map_err(|error| error.to_string())?;
+            crate::atomic_file::write(&spec_path, &data)?;
+        }
+    }
+    // Option contract: a non-retryable terminal task (cancelled-remote, lease
+    // gone) yields None instead of an error so the caller falls back to the
+    // clone-restart path.
+    let event = control.requeue_terminal_task(task_id)?;
+    Ok(event.map(|event| event.snapshot))
 }
 
 pub fn restart_incompatible_task_at(
@@ -557,7 +688,8 @@ pub fn restart_incompatible_task_at(
     let budget_approved = matches!(
         snapshot.required_action,
         crate::tasks::RequiredAction::ApproveBudget
-    ) && budget_limit_cny.is_some_and(|limit| limit.is_finite() && limit > 0.0);
+    ) && budget_limit_cny
+        .is_some_and(|limit| limit.is_finite() && limit > 0.0);
     if !matches!(
         snapshot.lifecycle_state,
         crate::tasks::LifecycleState::Terminal
@@ -574,9 +706,7 @@ pub fn restart_incompatible_task_at(
     );
     let old_spec_path = old_task_root.join("task.json");
     if !old_spec_path.is_file() {
-        return Err(
-            "TASK_CONTRACT_MISSING: 任务合同已丢失，请重新添加原音频文件。".to_string(),
-        );
+        return Err("TASK_CONTRACT_MISSING: 任务合同已丢失，请重新添加原音频文件。".to_string());
     }
     let spec: Value = serde_json::from_str(
         &fs::read_to_string(&old_spec_path).map_err(|error| error.to_string())?,
@@ -619,9 +749,7 @@ pub fn restart_incompatible_task_at(
     }
     let old_input = old_cache_root.join(relative);
     if !old_input.is_file() {
-        return Err(
-            "INPUT_MISSING: 缓存中的原音频已不存在，请重新选择文件添加。".to_string(),
-        );
+        return Err("INPUT_MISSING: 缓存中的原音频已不存在，请重新选择文件添加。".to_string());
     }
     let new_task_id = uuid::Uuid::new_v4().simple().to_string();
     let publish = spec
@@ -671,8 +799,7 @@ pub fn restart_incompatible_task_at(
         }
         if let Some(publish_obj) = new_spec.get_mut("publish") {
             publish_obj["revision"] = json!(revision);
-            publish_obj["incomingRelativePath"] =
-                Value::String(format!(".incoming/{new_task_id}"));
+            publish_obj["incomingRelativePath"] = Value::String(format!(".incoming/{new_task_id}"));
         }
         if let Some(limit) = budget_limit_cny {
             if let Some(options_obj) = new_spec.get_mut("options") {
@@ -993,6 +1120,113 @@ mod tests {
     }
 
     #[test]
+    fn retry_resumes_same_task_id_when_cache_is_compatible() {
+        let (root, locations) = fixture("resume");
+        let task_root = locations
+            .data_root
+            .join("Podcast")
+            .join("Tasks")
+            .join("task-resume");
+        let cache_root = locations
+            .cache_root
+            .join("Podcast")
+            .join("Tasks")
+            .join("task-resume");
+        fs::create_dir_all(&task_root).expect("task root must exist");
+        fs::create_dir_all(cache_root.join("input")).expect("input root must exist");
+        // A leftover chunk proves the cache is reused instead of cloned away.
+        fs::create_dir_all(cache_root.join("chunks")).expect("chunks root must exist");
+        fs::write(cache_root.join("chunks").join("c0.bin"), b"partial chunk")
+            .expect("chunk must write");
+        let input = b"resume-audio";
+        fs::write(cache_root.join("input").join("sample.mp3"), input).expect("input must write");
+        let input_sha256 = format!("{:x}", Sha256::digest(input));
+        fs::write(
+            task_root.join("task.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "taskId": "task-resume",
+                "input": {"relativePath": "input/sample.mp3", "inputSha256": input_sha256, "bytes": input.len(), "durationSeconds": 2.0},
+                "compatibility": {"pipelineVersion": "pipeline-1", "engineVersion": "engine-1", "configHash": "config-1", "modelHash": "model-1"},
+                "publish": {"bookId": "podcast:book", "sourceId": "source", "revision": 1, "incomingRelativePath": ".incoming/task-resume"}
+            }))
+            .expect("task spec must serialize"),
+        )
+        .expect("task spec must write");
+        let now = chrono::Utc::now().to_rfc3339();
+        let snapshot = TaskSnapshot {
+            id: "task-resume".to_string(),
+            kind: TaskKind::Podcast,
+            revision: 1,
+            last_sequence: 1,
+            lifecycle_state: LifecycleState::Terminal,
+            outcome: TaskOutcome::Interrupted,
+            required_action: RequiredAction::None,
+            progress: TaskProgress {
+                mode: ProgressMode::Determinate,
+                percent: Some(40.0),
+                completed_units: None,
+                total_units: None,
+                label: None,
+                unit: None,
+                source_total_units: None,
+                skipped_units: None,
+            },
+            error_code: Some(TaskErrorCode::EngineCrashed),
+            error_message: Some("interrupted".to_string()),
+            retry_after_seconds: None,
+            engine_stage: "transcribing".to_string(),
+            engine_status: "exited".to_string(),
+            recoverable: true,
+            can_pause: false,
+            can_resume: false,
+            can_retry: true,
+            can_cancel: false,
+            book_id: Some("podcast:book".to_string()),
+            source_id: Some("source".to_string()),
+            display_name: None,
+            cache_lease_bytes: input.len() as u64,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            last_heartbeat_at: None,
+            checkpoint_at: None,
+        };
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: snapshot.id.clone(),
+            sequence: 1,
+            revision: 1,
+            event_type: "worker_lost".to_string(),
+            snapshot,
+            created_at: now,
+        };
+        let mut control =
+            ControlDb::open(&root.join("control.db")).expect("control database must open");
+        control
+            .persist_task_event(&event)
+            .expect("interrupted task must persist");
+
+        let (resumed, kind) = retry_task_at(&mut control, &locations, "task-resume", None)
+            .expect("retry must resume in place");
+        assert_eq!(kind, RetryKind::Resumed);
+        assert_eq!(resumed.id, "task-resume");
+        assert_eq!(resumed.lifecycle_state, LifecycleState::Queued);
+        assert_eq!(resumed.outcome, TaskOutcome::None);
+        assert!(resumed.can_cancel);
+        assert!(!resumed.can_retry);
+        // Same cache root — the partial chunk must still be there.
+        assert!(cache_root.join("chunks").join("c0.bin").is_file());
+        // And no cloned task root appeared.
+        let tasks_dir = locations.data_root.join("Podcast").join("Tasks");
+        let entries: Vec<_> = fs::read_dir(&tasks_dir)
+            .expect("tasks dir must read")
+            .collect();
+        assert_eq!(entries.len(), 1);
+        drop(control);
+        fs::remove_dir_all(root).expect("fixture must be removed");
+    }
+
+    #[test]
     fn retry_publish_failed_republishes_without_new_task() {
         let (root, locations) = fixture("retry-republish");
         let task_id = "task-retry";
@@ -1097,9 +1331,11 @@ mod tests {
             snapshot,
             created_at: now,
         };
-        let mut control = ControlDb::open(&locations.data_root.join("App").join("control.db"))
-            .expect("control");
-        control.persist_task_event(&event).expect("persist failed task");
+        let mut control =
+            ControlDb::open(&locations.data_root.join("App").join("control.db")).expect("control");
+        control
+            .persist_task_event(&event)
+            .expect("persist failed task");
 
         let (result, kind) =
             retry_task_at(&mut control, &locations, task_id, None).expect("retry must republish");

@@ -29,29 +29,19 @@ where
                 return Ok(value);
             }
             match number.as_f64() {
-                Some(float)
-                    if float.fract() == 0.0
-                        && float >= 0.0
-                        && float < u64::MAX as f64 =>
-                {
+                Some(float) if float.fract() == 0.0 && float >= 0.0 && float < u64::MAX as f64 => {
                     Ok(float as u64)
                 }
-                _ => Err(serde::de::Error::custom(
-                    "must be a non-negative integer",
-                )),
+                _ => Err(serde::de::Error::custom("must be a non-negative integer")),
             }
         }
-        _ => Err(serde::de::Error::custom(
-            "must be a non-negative integer",
-        )),
+        _ => Err(serde::de::Error::custom("must be a non-negative integer")),
     }
 }
 
 /// `Option<u64>` variant of `deserialize_u64`: accepts integral floats,
 /// `null` and absent keys map to `None`.
-pub(crate) fn deserialize_optional_u64<'de, D>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error>
+pub(crate) fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -62,30 +52,20 @@ where
                 return Ok(Some(value));
             }
             match number.as_f64() {
-                Some(float)
-                    if float.fract() == 0.0
-                        && float >= 0.0
-                        && float < u64::MAX as f64 =>
-                {
+                Some(float) if float.fract() == 0.0 && float >= 0.0 && float < u64::MAX as f64 => {
                     Ok(Some(float as u64))
                 }
-                _ => Err(serde::de::Error::custom(
-                    "must be a non-negative integer",
-                )),
+                _ => Err(serde::de::Error::custom("must be a non-negative integer")),
             }
         }
-        _ => Err(serde::de::Error::custom(
-            "must be a non-negative integer",
-        )),
+        _ => Err(serde::de::Error::custom("must be a non-negative integer")),
     }
 }
 
 /// Schema/TS reject an explicit `null` on optional string fields — the key
 /// must be omitted instead. `Option<String>` would silently accept `null` as
 /// `None`; reject it so the read paths agree.
-fn deserialize_optional_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error>
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -401,6 +381,43 @@ pub(crate) fn is_safe_path_segment(segment: &str) -> bool {
         && !is_reserved_device_name(segment)
 }
 
+/// P-11-F11: one shared shelf-name sanitizer — every pipeline that derives
+/// a Library folder from user/sidecar text (podcast publish, manual import)
+/// must apply the same mapping so no path produces a Win32-invalid segment.
+/// Illegal characters (`< > : " / \ | ? *` and control chars) become spaces,
+/// runs collapse, the result is trimmed of spaces/dots and capped at 80
+/// chars; an empty remainder falls back to `fallback`. Reserved device names
+/// are NOT handled here — the caller decides how to mangle them (importer
+/// appends `_`).
+pub(crate) fn sanitize_shelf_name(raw: &str, fallback: &str) -> String {
+    let mut name = raw
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => ' ',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect::<String>();
+    while name.contains("  ") {
+        name = name.replace("  ", " ");
+    }
+    let name = name.trim().trim_matches('.').to_string();
+    let mut name = if name.is_empty() {
+        fallback.to_string()
+    } else {
+        name
+    };
+    if name.chars().count() > 80 {
+        name = name.chars().take(80).collect::<String>();
+        name = name.trim().trim_matches('.').to_string();
+    }
+    if name.is_empty() {
+        fallback.to_string()
+    } else {
+        name
+    }
+}
+
 /// Mirrors `requireRelativePath` in packages/contracts/src/index.ts and the
 /// `path` pattern in manifest.schema.json: forward-slash relative paths only —
 /// non-blank (not empty or whitespace-only), no leading `/`, no drive prefix,
@@ -645,15 +662,15 @@ mod tests {
         assert!(validate_manifest(&manifest).is_err());
 
         for bad in [
-            "2026-07-10",               // date only
-            "2026-07-10 00:00:00Z",     // space separator
-            "2026-07-10t00:00:00Z",     // lowercase t
-            "2026-07-10T00:00:00z",     // lowercase z
-            "2026-07-10T23:59:60Z",     // leap second
-            "2026-07-10T24:00:00Z",     // hour 24
-            "2026-07-10T00:00:00",      // missing offset
+            "2026-07-10",                // date only
+            "2026-07-10 00:00:00Z",      // space separator
+            "2026-07-10t00:00:00Z",      // lowercase t
+            "2026-07-10T00:00:00z",      // lowercase z
+            "2026-07-10T23:59:60Z",      // leap second
+            "2026-07-10T24:00:00Z",      // hour 24
+            "2026-07-10T00:00:00",       // missing offset
             "2026-07-10T00:00:00+24:00", // out-of-range offset
-            "2026-07-10T00:00:00.Z",    // empty fraction
+            "2026-07-10T00:00:00.Z",     // empty fraction
         ] {
             let mut manifest = fixture_manifest();
             manifest.generated_at = bad.to_string();
@@ -737,6 +754,34 @@ mod tests {
                 "publish-transaction" => {
                     serde_json::from_str::<crate::publish::PublishTransaction>(&text).is_ok()
                 }
+                // 01-F5: the acquisition wire contract — full struct
+                // deserialize, exactly what the emitted TaskEvent is.
+                "task-event" => serde_json::from_str::<crate::tasks::TaskEvent>(&text).is_ok(),
+                // 01-F5: the worker's fatal NDJSON record. The host reads
+                // fields piecemeal, so the leg mirrors that: type=="fatal",
+                // errorCode inside the TaskErrorCode domain, message a
+                // string, and requiredAction — when present — inside the
+                // RequiredAction domain.
+                "worker-fatal" => serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .is_some_and(|value| {
+                        value.get("type").and_then(|item| item.as_str()) == Some("fatal")
+                            && value
+                                .get("errorCode")
+                                .cloned()
+                                .and_then(|item| {
+                                    serde_json::from_value::<crate::tasks::TaskErrorCode>(item).ok()
+                                })
+                                .is_some()
+                            && value
+                                .get("message")
+                                .and_then(|item| item.as_str())
+                                .is_some()
+                            && value.get("requiredAction").is_none_or(|item| {
+                                serde_json::from_value::<crate::tasks::RequiredAction>(item.clone())
+                                    .is_ok()
+                            })
+                    }),
                 other => panic!("{}: unknown contract {other}", entry.fixture),
             };
             assert_eq!(

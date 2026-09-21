@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod path_guard;
+pub(crate) use path_guard::path_within;
 pub use path_guard::validate_library_root;
 
 /// User-facing acquisition hint for the managed runtime bundle. The NSIS
@@ -126,8 +127,6 @@ impl StorageLocations {
 /// swallowed: logging must never break the operation it describes.
 const APP_LOG_LIMIT: u64 = 512 * 1024;
 
-// Wired by design — call sites land in lib.rs (setup/eprintln bridge).
-#[allow(dead_code)]
 pub(crate) fn app_log(component: &str, message: &str) {
     let Ok(locations) = StorageLocations::current() else {
         return;
@@ -135,7 +134,6 @@ pub(crate) fn app_log(component: &str, message: &str) {
     app_log_at(&locations.logs_root, component, message);
 }
 
-#[allow(dead_code)]
 fn app_log_at(logs_root: &Path, component: &str, message: &str) {
     use std::io::Write;
 

@@ -215,7 +215,8 @@ fn create_tasks(
                 };
                 let next_revision = last_revision.checked_add(1);
                 let next_sequence = last_sequence.checked_add(1);
-                let (Some(next_revision), Some(next_sequence)) = (next_revision, next_sequence) else {
+                let (Some(next_revision), Some(next_sequence)) = (next_revision, next_sequence)
+                else {
                     return;
                 };
                 let label = format!("复制输入 {copied} / {total} 字节");
@@ -367,6 +368,14 @@ pub fn add_podcast_files_at(
     }
     let result = (|| {
         let stored = store.get(request.preview_id)?;
+        // The preview's free-space reading may be minutes old by the time the
+        // user confirms — re-check against the live disk so a since-filled
+        // cache drive cannot admit a task that dies at input_copy (05-F8).
+        if let Ok(available_now) = super::available_space(&locations.cache_root) {
+            if stored.preview.budget.estimated_disk_bytes > available_now {
+                return Err("INSUFFICIENT_DISK".to_string());
+            }
+        }
         validate_budget(&stored, request.budget_approval)?;
         create_tasks(
             &stored,
@@ -410,12 +419,18 @@ pub fn add_podcast_files_at(
 
 /// Errors that depend only on the request's shape, not on the environment —
 /// the only ones safe to cache for idempotent replay.
+///
+/// `PODCAST_PREVIEW_STALE` is deliberately absent: the preview store is
+/// process-local memory, so a stale error says "this app instance lost the
+/// preview", not "the request can never succeed". The user re-previews the
+/// same files, gets the same content-addressed preview_id and request_id, and
+/// a cached stale error would replay forever — the claim must release so the
+/// retry re-executes against the fresh preview.
 fn is_deterministic_create_error(error: &str) -> bool {
     matches!(
         error,
         "INVALID_ARGUMENT"
             | "INVALID_REQUEST_ID"
-            | "PODCAST_PREVIEW_STALE"
             | "BUDGET_CONFIRMATION_REQUIRED"
             | "INPUT_CHANGED"
             | "IDEMPOTENCY_KEY_REUSED"

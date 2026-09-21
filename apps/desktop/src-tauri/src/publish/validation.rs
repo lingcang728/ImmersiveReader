@@ -47,19 +47,22 @@ pub fn validate_book(
     let book_root = managed_relative(root, relative)?;
     let manifest_path = book_root.join("manifest.json");
     let provenance_path = book_root.join("provenance.json");
-    let manifest_hash = hash_file(&manifest_path)?;
-    let provenance_hash = hash_file(&provenance_path)?;
+    // Hash and parse the SAME bytes — a `hash_file` + `fs::read` pair reads
+    // the file twice, so a mid-check rewrite could satisfy the journal hash
+    // while the parsed JSON differs (or vice versa).
+    let manifest_bytes = fs::read(&manifest_path).map_err(|error| error.to_string())?;
+    let provenance_bytes = fs::read(&provenance_path).map_err(|error| error.to_string())?;
+    let manifest_hash = format!("{:x}", Sha256::digest(&manifest_bytes));
+    let provenance_hash = format!("{:x}", Sha256::digest(&provenance_bytes));
     if manifest_hash != transaction.manifest_sha256
         || provenance_hash != transaction.provenance_sha256
     {
         return Err("Published metadata hash mismatch".to_string());
     }
     let manifest: Value =
-        serde_json::from_slice(&fs::read(&manifest_path).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
+        serde_json::from_slice(&manifest_bytes).map_err(|error| error.to_string())?;
     let provenance: Value =
-        serde_json::from_slice(&fs::read(&provenance_path).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
+        serde_json::from_slice(&provenance_bytes).map_err(|error| error.to_string())?;
     if required_string(&manifest, "bookId")? != transaction.book_id
         || required_string(&provenance, "bookId")? != transaction.book_id
     {
@@ -73,6 +76,29 @@ pub fn validate_book(
     }
     if required_string(&provenance, "manifestSha256")? != transaction.manifest_sha256 {
         return Err("Provenance manifest hash does not match the manifest".to_string());
+    }
+    // Chapter payload check: the hash pair above only pins manifest.json and
+    // provenance.json — a crash during staging could leave a truncated or
+    // zero-length chapter file that every later phase would still call
+    // "valid". Require every manifest chapter to resolve inside the book
+    // and exist as a non-empty file. An absent/empty chapters array is
+    // already pinned by the manifest hash — nothing extra to verify.
+    if let Some(chapters) = manifest.get("chapters").and_then(Value::as_array) {
+        for chapter in chapters {
+            let relative = chapter
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Published chapter is missing its path".to_string())?;
+            if !crate::contracts::is_safe_relative_path(relative) {
+                return Err(format!("Published chapter path is unsafe: {relative}"));
+            }
+            let chapter_path = book_root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let metadata = fs::metadata(&chapter_path)
+                .map_err(|error| format!("Published chapter {relative} is missing: {error}"))?;
+            if !metadata.is_file() || metadata.len() == 0 {
+                return Err(format!("Published chapter {relative} is empty"));
+            }
+        }
     }
     Ok(())
 }

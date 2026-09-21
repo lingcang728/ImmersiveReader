@@ -30,6 +30,14 @@ pub enum TaskOutcome {
     Interrupted,
 }
 
+/// Wire contract for `TaskSnapshot.requiredAction` (snake_case on the wire,
+/// e.g. `configure_secret`). Producers today: the podcast worker's fatal
+/// NDJSON `requiredAction` field and the error-code fallback, both resolved
+/// in `control.rs::worker_required_action`. The Zhihu sidecar reports
+/// login/captcha state through its own login-status channel instead, so
+/// `Login` / `Captcha` / `FreeDiskSpace` are reserved variants — TaskRow
+/// already renders labels for them and the fatal-line parser will surface
+/// them the moment a producer emits the string.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequiredAction {

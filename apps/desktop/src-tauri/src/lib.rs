@@ -148,14 +148,33 @@ fn legacy_state_dir() -> PathBuf {
         .join("mmbook")
 }
 
+/// State file names need a hash whose output is stable across Rust versions —
+/// `DefaultHasher` explicitly does not guarantee that (F17). FNV-1a 64-bit is
+/// fixed forever by our own implementation. New files use the `v2-` prefix so
+/// they can never collide with legacy SipHash-named files, which are still
+/// read and migrated below.
+fn stable_state_hash(file_path: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in file_path.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 fn state_path_for(file_path: &str) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    file_path.hash(&mut hasher);
-    let hash = hasher.finish();
-    state_dir().join(format!("{:x}.json", hash))
+    state_dir().join(format!("v2-{:x}.json", stable_state_hash(file_path)))
 }
 
 fn state_path_for_in_dir(dir: &Path, file_path: &str) -> PathBuf {
+    dir.join(format!("v2-{:x}.json", stable_state_hash(file_path)))
+}
+
+/// Pre-F17 name: SipHash via `DefaultHasher`, `{:x}.json`. Only used to find
+/// state files written before the switch — never written anymore.
+fn legacy_hash_state_path_in_dir(dir: &Path, file_path: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     file_path.hash(&mut hasher);
     let hash = hasher.finish();
@@ -235,6 +254,17 @@ fn is_markdown_path(path: &str) -> bool {
 /// P2-18: never slurp an unbounded file into the WebView — metadata pre-check.
 const MAX_MARKDOWN_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Stale-worker watchdog threshold. Must sit clearly above the longest
+/// bounded silent stretch a healthy worker can have — ffmpeg invocations run
+/// with timeouts up to 600s during which the Python side cannot refresh its
+/// heartbeat file — while still converging a truly wedged worker to
+/// Interrupted in minutes, not hours (17-F3).
+const PODCAST_WORKER_STALE_AFTER: Duration = Duration::from_secs(900);
+/// How often the background sweep runs — the snapshot-path reap alone meant
+/// a wedged worker survived indefinitely whenever the user never touched the
+/// task list.
+const PODCAST_WORKER_REAP_INTERVAL: Duration = Duration::from_secs(120);
+
 /// P1-18 whitelist state: Markdown paths this process has actually served to
 /// the UI (successful reads, OS open-file hand-offs, recent-files entries).
 /// `save_markdown_file` may only write inside managed roots or to a path in
@@ -258,19 +288,6 @@ fn register_opened_markdown(path: &Path) {
     set.insert(path.to_string_lossy().to_lowercase());
     if let Ok(canonical) = path.canonicalize() {
         set.insert(canonical.to_string_lossy().to_lowercase());
-    }
-}
-
-fn register_recent_markdown_paths(json: &str) {
-    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
-        return;
-    };
-    for item in items {
-        if let Some(path) = item.get("path").and_then(|value| value.as_str()) {
-            if is_markdown_path(path) {
-                register_opened_markdown(Path::new(path));
-            }
-        }
     }
 }
 
@@ -321,7 +338,17 @@ fn markdown_write_permitted(path: &Path) -> Result<(), String> {
                 &locations.cache_root,
             ] {
                 if let Ok(root) = root.canonicalize() {
-                    if canonical.starts_with(root) {
+                    if let Ok(relative) = canonical.strip_prefix(&root) {
+                        // P-11-F17: "inside a managed root" is not enough —
+                        // `.trash/<id>/x.md`, `.incoming/<tx>/x.md`,
+                        // `.revisions/…`, `.transactions/…` are control areas
+                        // a renderer must not write. Every control dir the
+                        // app creates is dot-prefixed, so the rule is simple.
+                        if relative.components().any(|component| {
+                            component.as_os_str().to_string_lossy().starts_with('.')
+                        }) {
+                            return Err("MARKDOWN_PATH_NOT_ALLOWED".to_string());
+                        }
                         return Ok(());
                     }
                 }
@@ -421,14 +448,15 @@ fn backup_sqlite_verified(source: &Path, target: &Path) -> Result<(), String> {
     }
     drop(db);
     let verified = (|| -> Result<(), String> {
-        let copy =
-            Connection::open_with_flags(&temporary, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|error| error.to_string())?;
+        let copy = Connection::open_with_flags(&temporary, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| error.to_string())?;
         let copy_integrity: String = copy
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
         if copy_integrity != "ok" {
-            return Err(format!("backup copy failed integrity check: {copy_integrity}"));
+            return Err(format!(
+                "backup copy failed integrity check: {copy_integrity}"
+            ));
         }
         let copy_version: u32 = copy
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -494,10 +522,7 @@ async fn get_file_mtime(path: String) -> Result<u64, String> {
 }
 
 #[tauri::command]
-async fn read_markdown_file(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<ReadResult, String> {
+async fn read_markdown_file(app: tauri::AppHandle, path: String) -> Result<ReadResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ReadResult, String> {
         let path = markdown_read_target(&path)?;
         // P2-18: the metadata check above can be raced — cap the read itself
@@ -526,12 +551,33 @@ fn atomic_write_file(path: &std::path::Path, data: &[u8]) -> Result<(), String> 
     atomic_file::write(path, data)
 }
 
+/// 12-F3: `markdown_write_permitted` canonicalizes once, but between that
+/// check and the atomic rename a parent directory can be swapped for a
+/// junction — the write would then land outside the approved root. Right
+/// before writing, walk every existing ancestor and refuse reparse points,
+/// then repeat the permission decision on the freshly-resolved path.
+fn markdown_write_recheck(path: &Path) -> Result<(), String> {
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        match fs::symlink_metadata(dir) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink()
+                    || atomic_file::is_reparse_point(&metadata) =>
+            {
+                return Err("MARKDOWN_PATH_NOT_ALLOWED".to_string());
+            }
+            Ok(_) => {}
+            // A missing ancestor is normal (create_dir_all will make it);
+            // deeper ancestors above it still get checked.
+            Err(_) => {}
+        }
+        ancestor = dir.parent();
+    }
+    markdown_write_permitted(path)
+}
+
 #[tauri::command]
-async fn save_markdown_file(
-    path: String,
-    content: String,
-    encoding: String,
-) -> Result<(), String> {
+async fn save_markdown_file(path: String, content: String, encoding: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let path = markdown_path_allowed(&path)?;
         markdown_write_permitted(&path)?;
@@ -539,6 +585,7 @@ async fn save_markdown_file(
         if bytes.len() as u64 > MAX_MARKDOWN_FILE_BYTES {
             return Err("MARKDOWN_FILE_TOO_LARGE".to_string());
         }
+        markdown_write_recheck(&path)?;
         atomic_write_file(&path, &bytes)
     })
     .await
@@ -564,14 +611,23 @@ async fn load_reading_state(path: String) -> Result<ReadingState, String> {
             let data = read_state_json_capped(&sp)?;
             serde_json::from_str(&data).map_err(|e| e.to_string())
         } else {
-            let legacy = state_path_for_in_dir(&legacy_state_dir(), &path);
-            if !legacy.exists() {
+            // Fallback chain: legacy SipHash name in the current dir, then the
+            // pre-move mmbook dir (also SipHash-named). Either hit migrates to
+            // the stable v2 name and drops the stale file.
+            let old_named = legacy_hash_state_path_in_dir(&state_dir(), &path);
+            let legacy = legacy_hash_state_path_in_dir(&legacy_state_dir(), &path);
+            let source = if old_named.exists() {
+                old_named
+            } else if legacy.exists() {
+                legacy
+            } else {
                 return Ok(ReadingState::default());
-            }
-            let data = read_state_json_capped(&legacy)?;
+            };
+            let data = read_state_json_capped(&source)?;
             let state: ReadingState = serde_json::from_str(&data).map_err(|e| e.to_string())?;
             let migrated = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
             atomic_write_file(&sp, &migrated)?;
+            let _ = fs::remove_file(&source);
             Ok(state)
         }
     })
@@ -584,7 +640,10 @@ async fn save_reading_state(path: String, state: ReadingState) -> Result<(), Str
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let sp = state_path_for(&path);
         let data = serde_json::to_string(&state).map_err(|e| e.to_string())?;
-        atomic_write_file(&sp, data.as_bytes())
+        atomic_write_file(&sp, data.as_bytes())?;
+        // Drop a lingering SipHash-named file for this path, if any survived.
+        let _ = fs::remove_file(legacy_hash_state_path_in_dir(&state_dir(), &path));
+        Ok(())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -613,6 +672,7 @@ fn cleanup_recent_files_json(json: &str, state_base_dir: &Path) -> (String, bool
             kept.push(item);
         } else {
             let _ = fs::remove_file(state_path_for_in_dir(state_base_dir, path));
+            let _ = fs::remove_file(legacy_hash_state_path_in_dir(state_base_dir, path));
             changed = true;
         }
     }
@@ -634,6 +694,9 @@ fn cleanup_recent_files_json(json: &str, state_base_dir: &Path) -> (String, bool
 #[tauri::command]
 async fn load_recent_files() -> Result<RecentFilesLoad, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<RecentFilesLoad, String> {
+        // The recent-files list is pure UI data — it must NOT feed the
+        // markdown write whitelist. Registering it here let `save_recent_files`
+        // mint write permission for any existing .md on disk without a read.
         let dir = state_dir();
         let path = dir.join("recent-files.json");
         if path.exists() {
@@ -642,7 +705,6 @@ async fn load_recent_files() -> Result<RecentFilesLoad, String> {
             if changed {
                 atomic_write_file(&path, json.as_bytes())?;
             }
-            register_recent_markdown_paths(&json);
             Ok(RecentFilesLoad {
                 json,
                 store_exists: true,
@@ -653,7 +715,6 @@ async fn load_recent_files() -> Result<RecentFilesLoad, String> {
                 let raw = read_state_json_capped(&legacy_path)?;
                 let (json, _) = cleanup_recent_files_json(&raw, &dir);
                 atomic_write_file(&path, json.as_bytes())?;
-                register_recent_markdown_paths(&json);
                 return Ok(RecentFilesLoad {
                     json,
                     store_exists: true,
@@ -676,7 +737,6 @@ async fn save_recent_files(json: String) -> Result<String, String> {
         let path = dir.join("recent-files.json");
         let (cleaned, _) = cleanup_recent_files_json(&json, &dir);
         atomic_write_file(&path, cleaned.as_bytes())?;
-        register_recent_markdown_paths(&cleaned);
         Ok(cleaned)
     })
     .await
@@ -772,10 +832,15 @@ async fn create_state_backup() -> Result<StateBackupResult, String> {
             skipped.push("control_db".to_string());
         }
         skipped.sort();
+        // P-10-F7: the manifest carries the version triple — a restore (or a
+        // human diffing snapshots) can tell which build/schema produced the
+        // backup instead of trusting "state-<uuid>" blindly.
         let manifest = serde_json::json!({
             "schemaVersion": 1,
             "createdAt": chrono::Utc::now().to_rfc3339(),
             "channel": locations.channel,
+            "appVersion": env!("CARGO_PKG_VERSION"),
+            "controlDbSchemaVersion": control::CONTROL_SCHEMA_VERSION,
             "included": included,
             "skipped": skipped,
             "sensitiveData": "excluded",
@@ -784,15 +849,28 @@ async fn create_state_backup() -> Result<StateBackupResult, String> {
             &backup_root.join("backup-manifest.json"),
             &serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
         )?;
+        // P-11-F13: bound the snapshot pile — one directory per backup would
+        // otherwise accumulate a full control.db copy forever.
+        prune_backup_dirs(&locations.backups_root, "state-", STATE_BACKUPS_KEPT);
         let included = manifest
             .get("included")
             .and_then(serde_json::Value::as_array)
-            .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         let skipped = manifest
             .get("skipped")
             .and_then(serde_json::Value::as_array)
-            .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(StateBackupResult {
             backup_path: backup_root.to_string_lossy().into_owned(),
@@ -802,6 +880,338 @@ async fn create_state_backup() -> Result<StateBackupResult, String> {
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// P-11-F13: keep only the newest `keep` `<prefix>-*` snapshot dirs under
+/// `backups_root`. Ordering uses the manifest `createdAt` (directory mtime as
+/// fallback); best-effort — a directory that cannot be removed is skipped.
+fn prune_backup_dirs(backups_root: &Path, prefix: &str, keep: usize) {
+    let entries = match fs::read_dir(backups_root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    let mut snapshots: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(prefix) {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let stamp = fs::read_to_string(path.join("backup-manifest.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|manifest| {
+                manifest
+                    .get("createdAt")
+                    .and_then(|value| value.as_str().map(str::to_string))
+            })
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(&text).ok())
+            .map(|stamp| std::time::SystemTime::from(stamp.with_timezone(&chrono::Utc)))
+            .or_else(|| {
+                entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+            })
+            .unwrap_or(std::time::UNIX_EPOCH);
+        snapshots.push((path, stamp));
+    }
+    snapshots.sort_by_key(|(_, stamp)| *stamp);
+    while snapshots.len() > keep {
+        if let Some((path, _)) = snapshots.first().cloned() {
+            let _ = fs::remove_dir_all(path);
+            snapshots.remove(0);
+        } else {
+            break;
+        }
+    }
+}
+
+/// P-10-F7 / P-11-F13: snapshot retention — `state-*` backups keep the newest
+/// few; `pre-restore-*` auto snapshots get a tighter cap.
+const STATE_BACKUPS_KEPT: usize = 8;
+const PRE_RESTORE_SNAPSHOTS_KEPT: usize = 4;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StateBackupInfo {
+    path: String,
+    created_at: Option<String>,
+    app_version: Option<String>,
+    channel: Option<String>,
+    included: Vec<String>,
+}
+
+fn scan_state_backups(backups_root: &Path) -> Vec<StateBackupInfo> {
+    let mut backups = Vec::new();
+    let entries = match fs::read_dir(backups_root) {
+        Ok(entries) => entries,
+        Err(_) => return backups,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("state-") {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest = fs::read_to_string(path.join("backup-manifest.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        // A dir without a readable manifest is a half-written backup — not
+        // restorable, not listed.
+        let Some(manifest) = manifest else { continue };
+        if manifest.get("schemaVersion").and_then(|v| v.as_u64()) != Some(1) {
+            continue;
+        }
+        let text = |key: &str| {
+            manifest
+                .get(key)
+                .and_then(|value| value.as_str().map(str::to_string))
+        };
+        backups.push(StateBackupInfo {
+            path: path.to_string_lossy().into_owned(),
+            created_at: text("createdAt"),
+            app_version: text("appVersion"),
+            channel: text("channel"),
+            included: manifest
+                .get("included")
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
+    }
+    backups.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    backups
+}
+
+#[tauri::command]
+async fn list_state_backups() -> Result<Vec<StateBackupInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let locations = storage::StorageLocations::current()?;
+        Ok(scan_state_backups(&locations.backups_root))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StateRestoreResult {
+    restored: Vec<String>,
+    pre_restore_path: String,
+}
+
+/// Database filename sidecars (`db-wal`, `db-shm`, …) — appends the suffix
+/// to the full file name, mirroring `control.rs::database_sidecar_path`.
+fn db_sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// P-10-F7: restore a `create_state_backup` snapshot (settings.json +
+/// control.db). Safety rails:
+/// - the backup must be a `state-*` dir directly under the managed
+///   `Backups\` root with a readable schema-1 manifest;
+/// - the incoming control.db is staged, integrity-checked and schema-gated
+///   (a snapshot from a NEWER app is refused — the same "too new" rule as
+///   `ControlDb::open`);
+/// - the current state is snapshotted to `Backups\pre-restore-<uuid>` first,
+///   and the live db set is moved aside rather than deleted;
+/// - a crash between "live set moved" and "staged rename" is converged by
+///   the `control.db.restore-*` pickup in `ControlDb::open_inner`.
+fn restore_state_backup_at(
+    locations: &storage::StorageLocations,
+    backup_dir: &Path,
+) -> Result<StateRestoreResult, String> {
+    let backups_root = locations
+        .backups_root
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let backup_dir = backup_dir
+        .canonicalize()
+        .map_err(|_| "BACKUP_NOT_FOUND".to_string())?;
+    let is_backup_dir = backup_dir.parent() == Some(backups_root.as_path())
+        && backup_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("state-"));
+    if !is_backup_dir {
+        return Err("BACKUP_OUTSIDE_MANAGED_ROOT".to_string());
+    }
+    let manifest_raw = fs::read_to_string(backup_dir.join("backup-manifest.json"))
+        .map_err(|_| "BACKUP_MANIFEST_MISSING".to_string())?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_raw).map_err(|error| error.to_string())?;
+    if manifest.get("schemaVersion").and_then(|v| v.as_u64()) != Some(1) {
+        return Err("BACKUP_MANIFEST_UNSUPPORTED".to_string());
+    }
+    let included: std::collections::BTreeSet<String> = manifest
+        .get("included")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let live_db = locations.data_root.join(r"App\control.db");
+    // Stage + verify the incoming database BEFORE touching live state — the
+    // risky I/O runs while rollback is still trivial.
+    let staged_db = if included.contains("control_db") {
+        let incoming = backup_dir.join("control.db");
+        if !incoming.is_file() {
+            return Err(
+                "BACKUP_INCOMPLETE: manifest lists control_db but the file is missing".to_string(),
+            );
+        }
+        let staged = live_db.with_file_name(format!("control.db.restore-{}", uuid::Uuid::new_v4()));
+        crate::atomic_file::copy_file_synced(&incoming, &staged)?;
+        let staged_check = (|| -> Result<(), String> {
+            use rusqlite::{Connection, OpenFlags};
+            let check = Connection::open_with_flags(&staged, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| error.to_string())?;
+            check
+                .busy_timeout(Duration::from_secs(5))
+                .map_err(|error| error.to_string())?;
+            let integrity: String = check
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            if integrity != "ok" {
+                return Err(format!("backup control.db failed integrity: {integrity}"));
+            }
+            let version: i64 = check
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            if version > control::CONTROL_SCHEMA_VERSION {
+                return Err(format!(
+                    "BACKUP_SCHEMA_TOO_NEW: backup is control schema {version}, newer than this build's {} — update the app instead of restoring",
+                    control::CONTROL_SCHEMA_VERSION
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = staged_check {
+            let _ = fs::remove_file(&staged);
+            return Err(error);
+        }
+        Some(staged)
+    } else {
+        None
+    };
+
+    // Pre-restore snapshot: the current settings + a verified control.db
+    // copy land under Backups\pre-restore-<uuid> before any live file moves.
+    let pre_root = locations
+        .backups_root
+        .join(format!("pre-restore-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&pre_root).map_err(|error| error.to_string())?;
+    if locations.settings_path.is_file() {
+        let _ = crate::atomic_file::copy_file_synced(
+            &locations.settings_path,
+            &pre_root.join("settings.json"),
+        );
+    }
+    if live_db.is_file() {
+        backup_sqlite_verified(&live_db, &pre_root.join("control.db"))?;
+    }
+    let _ = atomic_file::write(
+        &pre_root.join("backup-manifest.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "pre-restore",
+            "createdAt": chrono::Utc::now().to_rfc3339(),
+            "appVersion": env!("CARGO_PKG_VERSION"),
+            "restoredFrom": backup_dir.to_string_lossy(),
+        }))
+        .map_err(|error| error.to_string())?
+        .as_bytes(),
+    );
+
+    let mut restored = Vec::new();
+    if let Some(staged) = staged_db {
+        // Fold the live WAL so no committed transaction hides in a sidecar
+        // we are about to move. Best-effort: a checkpoint failure still
+        // leaves a consistent (un-checkpointed) db to preserve.
+        if live_db.is_file() {
+            if let Ok(db) = rusqlite::Connection::open(&live_db) {
+                let _ = db.busy_timeout(Duration::from_secs(5));
+                let _ = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+            }
+        }
+        let previous_dir = pre_root.join("previous-live");
+        fs::create_dir_all(&previous_dir).map_err(|error| error.to_string())?;
+        for suffix in ["-wal", "-shm", "-journal", ""] {
+            let from = db_sidecar(&live_db, suffix);
+            if from.exists() {
+                let name = format!("control.db{suffix}");
+                fs::rename(&from, previous_dir.join(name))
+                    .map_err(|error| format!("control.db is in use; restore aborted: {error}"))?;
+            }
+        }
+        // Live set is parked; the staged copy takes over. A crash here is
+        // converged by the `.restore-*` pickup at next open.
+        fs::rename(&staged, &live_db).map_err(|error| error.to_string())?;
+        restored.push("control_db".to_string());
+    }
+    if included.contains("settings") {
+        let incoming = backup_dir.join("settings.json");
+        if incoming.is_file() {
+            // Parse through the migration-aware reader so a v1/v2 backup
+            // restores as current-shape settings rather than legacy JSON.
+            let mut parsed = settings::load_compatible_from(&incoming)
+                .map_err(|error| format!("BACKUP_SETTINGS_UNREADABLE: {error}"))?;
+            // Same production pin as save_settings — a restored root must not
+            // smuggle a custom library path into the production channel.
+            if locations.channel == "production" {
+                parsed.library_root = locations.library_root.to_string_lossy().into_owned();
+            }
+            settings::save_compatible_to(&locations.settings_path, &parsed)
+                .map_err(|error| error.to_string())?;
+            restored.push("settings".to_string());
+        }
+    }
+    prune_backup_dirs(
+        &locations.backups_root,
+        "pre-restore-",
+        PRE_RESTORE_SNAPSHOTS_KEPT,
+    );
+    prune_backup_dirs(&locations.backups_root, "state-", STATE_BACKUPS_KEPT);
+    Ok(StateRestoreResult {
+        restored,
+        pre_restore_path: pre_root.to_string_lossy().into_owned(),
+    })
+}
+
+#[tauri::command]
+async fn restore_state_backup(backup_path: String) -> Result<StateRestoreResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let locations = storage::StorageLocations::current()?;
+        restore_state_backup_at(&locations, Path::new(&backup_path))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// P-10-F6: one-shot "control.db was rebuilt empty" notice — the flag is set
+/// the moment a corrupt database is quarantined and consumed by the UI's
+/// startup poll, so an empty task list is explained instead of silent.
+#[tauri::command]
+async fn take_control_db_recovery_notice() -> Result<bool, String> {
+    Ok(control::take_recovery_pending())
 }
 
 #[tauri::command]
@@ -832,9 +1242,14 @@ async fn update_app_settings(value: settings::AppSettings) -> Result<(), String>
         // silently discarding the user's choice after a "已更新" notice.
         let locations = storage::StorageLocations::current()?;
         if locations.channel == "production" {
-            let canonical = locations.library_root.to_string_lossy().replace('/', "\\");
-            let requested = value.library_root.replace('/', "\\");
-            if !requested.eq_ignore_ascii_case(&canonical) {
+            // Canonical compare — a raw string match would let `..\`
+            // segments or 8.3 spellings slip a divergent root past the pin.
+            let pinned = &locations.library_root;
+            let requested = Path::new(&value.library_root);
+            let same =
+                storage::path_within(pinned, requested) && storage::path_within(requested, pinned);
+            if !same {
+                let canonical = pinned.to_string_lossy().replace('/', "\\");
                 return Err(format!("正式版书库位置固定为 {canonical}，不支持自定义"));
             }
         }
@@ -922,16 +1337,26 @@ async fn recover_publish_transactions(
                     .filter(|transaction| {
                         !matches!(
                             transaction.phase,
-                            publish::PublishPhase::Committed
-                                | publish::PublishPhase::RolledBack
+                            publish::PublishPhase::Committed | publish::PublishPhase::RolledBack
                         )
                     })
                     .map(|transaction| transaction.transaction_id)
                     .collect(),
             };
-            ids.into_iter()
-                .map(|id| publish::recover_transaction(library_root, &id))
-                .collect()
+            // P-11-F02: batch tolerance — one wedged journal must not abort
+            // recovery for every transaction after it. Collect what
+            // converged; failures stay logged and their journals remain for
+            // the next pass (or manual salvage).
+            let mut recovered = Vec::new();
+            for id in ids {
+                match publish::recover_transaction(library_root, &id) {
+                    Ok(transaction) => recovered.push(transaction),
+                    Err(error) => {
+                        eprintln!("publish recovery: transaction {id} failed: {error}")
+                    }
+                }
+            }
+            Ok(recovered)
         },
     )
     .await
@@ -955,11 +1380,9 @@ async fn preview_legacy_migration(
 
 #[tauri::command]
 async fn get_migration_runs() -> Result<Vec<control::MigrationRunRecord>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        control::ControlDb::open_current()?.migration_runs()
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(|| control::ControlDb::open_current()?.migration_runs())
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 // P2-14 registration half: the three migration executors existed but were
@@ -984,13 +1407,93 @@ async fn execute_settings_migration(
     .map_err(|error| error.to_string())?
 }
 
+/// P-11-F04 / P-10-F17: a renderer-supplied path is only writable when it
+/// resolves under a managed root. The target may not exist yet (the whole
+/// point of a migration target), so canonicalize the deepest ancestor that
+/// does and compare that.
+fn managed_write_target(path: &Path, locations: &storage::StorageLocations) -> Result<(), String> {
+    // Canonicalize through the deepest ancestor that exists, then re-attach
+    // the not-yet-existing tail — the target (or even a managed root) may be
+    // absent on a fresh install, but its resolved location still compares.
+    fn canonical_through_existing(path: &Path) -> Option<PathBuf> {
+        let mut probe = path;
+        loop {
+            match probe.canonicalize() {
+                Ok(value) => {
+                    let tail = path.strip_prefix(probe).ok()?;
+                    return Some(value.join(tail));
+                }
+                Err(_) => probe = probe.parent()?,
+            }
+        }
+    }
+    if !path.is_absolute() {
+        return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
+    }
+    let canonical = canonical_through_existing(path).ok_or("PATH_OUTSIDE_MANAGED_ROOT")?;
+    for root in [
+        &locations.data_root,
+        &locations.backups_root,
+        &locations.library_root,
+        &locations.cache_root,
+    ] {
+        if let Some(canonical_root) = canonical_through_existing(root) {
+            if canonical.starts_with(&canonical_root) {
+                return Ok(());
+            }
+        }
+    }
+    Err("PATH_OUTSIDE_MANAGED_ROOT".to_string())
+}
+
+/// Read-side counterpart of `managed_write_target` for the migration escape
+/// hatches: the file must exist and resolve under a managed root or one of
+/// the legacy state dirs these commands exist to migrate. Bounding the read
+/// matters because the source is byte-copied into managed dirs (rollback /
+/// work set) and its row counts + SHA-256 land in the receipt the caller
+/// sees — unconstrained, it is an arbitrary-file exfiltration primitive.
+fn migration_read_target(path: &Path, locations: &storage::StorageLocations) -> Result<(), String> {
+    if !path.is_absolute() || !path.is_file() {
+        return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
+    }
+    let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+    let mut roots = vec![
+        locations.data_root.clone(),
+        locations.cache_root.clone(),
+        locations.backups_root.clone(),
+        locations.library_root.clone(),
+    ];
+    if let Ok(legacy) = migration::current_legacy_locations(locations.library_root.clone()) {
+        roots.extend([
+            legacy.immersive_state,
+            legacy.mmbook_state,
+            legacy.podcast_root,
+            legacy.zhihu_root,
+        ]);
+    }
+    for root in roots {
+        if let Ok(root) = root.canonicalize() {
+            if canonical.starts_with(&root) {
+                return Ok(());
+            }
+        }
+    }
+    Err("PATH_OUTSIDE_MANAGED_ROOT".to_string())
+}
+
 #[tauri::command]
 async fn migrate_sqlite_verified(
     source: String,
     target: String,
 ) -> Result<migration::MigrationReceipt, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let locations = storage::StorageLocations::current()?;
+        let locations = storage::StorageLocations::current_with_library_settings()?;
+        // P-11-F04: the target is an arbitrary-file-create primitive (its
+        // content is a copy of the source DB) — it must land under a managed
+        // root. The source is bounded too: it is byte-copied into managed
+        // dirs and its hash/row counts reach the caller via the receipt.
+        managed_write_target(Path::new(&target), &locations)?;
+        migration_read_target(Path::new(&source), &locations)?;
         // Rollback + receipt stay under the managed Data root — the caller
         // picks source/target only, never where safety copies land.
         let run_root = locations
@@ -1000,7 +1503,6 @@ async fn migrate_sqlite_verified(
         let rollback = run_root.join("rollback");
         let receipt_path = run_root.join("receipt.json");
         migration::migrate_sqlite_verified(
-            Path::new("sqlite3"),
             Path::new(&source),
             Path::new(&target),
             &rollback,
@@ -1018,11 +1520,32 @@ async fn reconcile_zhihu_archive(
     output_root: String,
 ) -> Result<migration::ReconciliationReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        migration::reconcile_zhihu_archive(
-            Path::new("sqlite3"),
-            Path::new(&database),
-            Path::new(&output_root),
-        )
+        let locations = storage::StorageLocations::current_with_library_settings()?;
+        let database = PathBuf::from(&database);
+        let output_root = PathBuf::from(&output_root);
+        migration_read_target(&database, &locations)?;
+        // The output tree is only scanned, never written — but the scan is
+        // still a filesystem read primitive, so it is bounded to the
+        // Library plus the legacy content roots it exists to reconcile.
+        let output_allowed = output_root.is_absolute()
+            && output_root.is_dir()
+            && ([
+                locations.library_root.as_path(),
+                locations.data_root.as_path(),
+            ]
+            .iter()
+            .any(|&root| storage::path_within(root, &output_root))
+                || migration::current_legacy_locations(locations.library_root.clone())
+                    .map(|legacy| {
+                        [legacy.zhihu_root.as_path(), legacy.podcast_root.as_path()]
+                            .iter()
+                            .any(|&root| storage::path_within(root, &output_root))
+                    })
+                    .unwrap_or(false));
+        if !output_allowed {
+            return Err("PATH_OUTSIDE_MANAGED_ROOT".to_string());
+        }
+        migration::reconcile_zhihu_archive(&database, &output_root)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1039,62 +1562,64 @@ async fn get_acquisition_snapshot(
     if matches!(kind, None | Some(tasks::TaskKind::Zhihu)) {
         crate::tools::request_engine_warmup(crate::tools::ToolKind::Zhihu);
     }
-    tauri::async_runtime::spawn_blocking(
-        move || -> Result<tasks::AcquisitionSnapshot, String> {
-            tools::recover_stale_engine_instances()?;
-            // Reconcile sidecar truth over stale desktop mirrors (including
-            // false interrupted/crashed terminals) — but only when the engine
-            // is already running: zhihu_* HTTP calls would otherwise launch it
-            // inline and block this path on spawn + readiness waits.
-            if matches!(kind, None | Some(tasks::TaskKind::Zhihu))
-                && tools::status("zhihu")
-                    .map(|status| status.state == "running")
-                    .unwrap_or(false)
-            {
-                let settings = settings::load_settings()?;
-                let _ = zhihu::reconcile_active_tasks(&settings, Some(&app));
-            }
-            control::repair_orphaned_podcast_tasks()?;
-            let mut control = control::ControlDb::open_current()?;
-            let locations = storage::StorageLocations::current_with_library_settings()?;
-            // P1-15 watchdog: the Python worker refreshes work/state/*.json
-            // heartbeats every ~15s; when that file goes silent the worker is
-            // wedged/killed/suspended and its task must not stay "Running"
-            // forever — mark it Interrupted so checkpoint resume can take over.
-            // work_root = Cache\Podcast\Tasks (each <task_id>\work\state lives
-            // underneath, per transcribe_task.py/common.py).
-            if matches!(kind, None | Some(tasks::TaskKind::Podcast)) {
-                let work_root = locations.cache_root.join("Podcast").join("Tasks");
-                if let Err(error) =
-                    control.reap_stale_workers(&work_root, Duration::from_secs(600))
-                {
-                    eprintln!("stale podcast worker reap failed: {error}");
+    tauri::async_runtime::spawn_blocking(move || -> Result<tasks::AcquisitionSnapshot, String> {
+        tools::recover_stale_engine_instances()?;
+        // Reconcile sidecar truth over stale desktop mirrors (including
+        // false interrupted/crashed terminals) — but only when the engine
+        // is already running: zhihu_* HTTP calls would otherwise launch it
+        // inline and block this path on spawn + readiness waits.
+        if matches!(kind, None | Some(tasks::TaskKind::Zhihu))
+            && tools::status("zhihu")
+                .map(|status| status.state == "running")
+                .unwrap_or(false)
+        {
+            let settings = settings::load_settings()?;
+            let _ = zhihu::reconcile_active_tasks(&settings, Some(&app));
+        }
+        control::repair_orphaned_podcast_tasks()?;
+        let control = control::ControlDb::open_current()?;
+        let locations = storage::StorageLocations::current_with_library_settings()?;
+        // P1-15 watchdog: the Python worker refreshes work/state/*.json
+        // heartbeats every ~15s; when that file goes silent the worker is
+        // wedged/killed/suspended and its task must not stay "Running"
+        // forever — mark it Interrupted so checkpoint resume can take over.
+        // work_root = Cache\Podcast\Tasks (each <task_id>\work\state lives
+        // underneath, per transcribe_task.py/common.py).
+        if matches!(kind, None | Some(tasks::TaskKind::Podcast)) {
+            let work_root = locations.cache_root.join("Podcast").join("Tasks");
+            match control.reap_stale_workers(&work_root, PODCAST_WORKER_STALE_AFTER) {
+                Ok(events) => {
+                    for event in events {
+                        let _ = app.emit(podcast::TASK_EVENT_NAME, event);
+                    }
                 }
+                Err(error) => eprintln!("stale podcast worker reap failed: {error}"),
             }
-            reconcile_cancel_and_discard(&locations, &control)?;
-            // Keep the queue lean: drop terminal history older than a week.
-            let _ = control.prune_terminal_tasks_older_than(7);
-            let mut tasks = control.task_snapshots(kind)?;
-            // Backfill titles for older snapshots that predate displayName.
-            if let Ok(locations) = storage::StorageLocations::current_with_library_settings() {
-                enrich_task_display_names(&locations, &mut tasks);
-            }
-            Ok(tasks::AcquisitionSnapshot {
-                recoverable_cache_bytes: tasks
-                    .iter()
-                    .filter(|task| task.recoverable)
-                    .map(|task| task.cache_lease_bytes)
-                    .sum(),
-                tasks,
-                generated_at: chrono::Utc::now().to_rfc3339(),
-            })
-        },
-    )
+        }
+        reconcile_cancel_and_discard(&locations, &control)?;
+        // Keep the queue lean: drop terminal history older than a week.
+        let _ = control.prune_terminal_tasks_older_than(7);
+        let mut tasks = control.task_snapshots(kind)?;
+        // Backfill titles for older snapshots that predate displayName.
+        if let Ok(locations) = storage::StorageLocations::current_with_library_settings() {
+            enrich_task_display_names(&control, &locations, &mut tasks);
+        }
+        Ok(tasks::AcquisitionSnapshot {
+            recoverable_cache_bytes: tasks
+                .iter()
+                .filter(|task| task.recoverable)
+                .map(|task| task.cache_lease_bytes)
+                .sum(),
+            tasks,
+            generated_at: chrono::Utc::now().to_rfc3339(),
+        })
+    })
     .await
     .map_err(|error| error.to_string())?
 }
 
 fn enrich_task_display_names(
+    control: &control::ControlDb,
     locations: &storage::StorageLocations,
     tasks: &mut [tasks::TaskSnapshot],
 ) {
@@ -1129,6 +1654,15 @@ fn enrich_task_display_names(
             .filter(|value| !value.is_empty());
         if let Some(stem) = stem {
             task.display_name = Some(stem.to_string());
+            // 16-F6: write the backfill back once — otherwise legacy rows
+            // re-read task.json on every focus/refresh snapshot forever.
+            // Best effort: a failed write just re-enriches next time.
+            if let Err(error) = control.set_task_display_name(&task.id, stem) {
+                eprintln!(
+                    "displayName backfill persist failed for {}: {error}",
+                    task.id
+                );
+            }
         }
     }
 }
@@ -1151,7 +1685,7 @@ fn discard_intent_path(locations: &storage::StorageLocations, task_id: &str) -> 
         .join(format!("{task_id}{DISCARD_INTENT_SUFFIX}"))
 }
 
-fn reconcile_discard_markers(locations: &storage::StorageLocations) {
+fn reconcile_discard_markers(locations: &storage::StorageLocations, control: &control::ControlDb) {
     let tasks_dir = atomic_file::long_path(&locations.cache_root.join("Podcast").join("Tasks"));
     let Ok(entries) = fs::read_dir(&tasks_dir) else {
         return;
@@ -1167,6 +1701,17 @@ fn reconcile_discard_markers(locations: &storage::StorageLocations) {
         if task_id.is_empty() {
             continue;
         }
+        // 02-F8: the marker is a durable intent, but only for a task whose
+        // discard actually committed (or whose row is gone). A marker
+        // stranded by a crash between write and the failed-control rollback
+        // may belong to a still-live task — deleting its cache mid-run is
+        // worse than retrying later, so skip the delete and keep the marker.
+        match control.task_snapshot(task_id) {
+            Ok(None) => {}
+            Ok(Some(snapshot))
+                if matches!(snapshot.lifecycle_state, tasks::LifecycleState::Terminal) => {}
+            _ => continue,
+        }
         // Best effort per marker: a task whose cache is already gone reports
         // Ok, a genuinely stuck discard keeps its marker for the next sweep.
         if cache::discard_podcast_task_at(locations, task_id).is_ok() {
@@ -1179,7 +1724,7 @@ fn reconcile_cancel_and_discard(
     locations: &storage::StorageLocations,
     control: &control::ControlDb,
 ) -> Result<(), String> {
-    reconcile_discard_markers(locations);
+    reconcile_discard_markers(locations, control);
     let pending = control.pending_cancel_discard()?;
     if pending.is_empty() {
         return Ok(());
@@ -1268,11 +1813,7 @@ async fn add_podcast_files(
 
     // Input prep finished: auto-start transcription without a second "开始" click.
     // Worker spawn + DB writes stay off the async runtime's worker threads.
-    let task_ids: Vec<String> = result
-        .tasks
-        .iter()
-        .map(|task| task.id.clone())
-        .collect();
+    let task_ids: Vec<String> = result.tasks.iter().map(|task| task.id.clone()).collect();
     tauri::async_runtime::spawn_blocking(move || {
         for task_id in task_ids {
             if let Err(error) = podcast::start_task(task_id.clone(), app.clone()) {
@@ -1355,6 +1896,9 @@ async fn remove_book(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let value = settings::load_settings()?;
+        // 12-F4: session sweep + book removal are one critical section, so a
+        // racing start_reader_session cannot register past the sweep.
+        let _lifecycle = reader_book_lifecycle_lock().lock().ok();
         close_reader_sessions_for_book(&state, &book_id);
         library::remove_book(Path::new(&value.library_root), &book_id)
     })
@@ -1370,6 +1914,7 @@ async fn delete_book(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let value = settings::load_settings()?;
+        let _lifecycle = reader_book_lifecycle_lock().lock().ok();
         close_reader_sessions_for_book(&state, &book_id);
         library::delete_book(Path::new(&value.library_root), &book_id)
     })
@@ -1457,11 +2002,29 @@ fn reader_sessions_by_book() -> &'static Mutex<BTreeMap<String, Vec<String>>> {
     MAP.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-fn track_reader_session(book_id: &str, session_id: &str) {
+/// Serializes "open a reader session for a book" against "delete that book".
+/// `remove_book`/`delete_book` sweep tracked sessions *before* the directory
+/// removal — without a shared critical section a session could be created in
+/// between and never closed, letting PUT /progress recreate `.reading.json`
+/// inside the removed tree (12-F4). Held only across the bookkeeping; the
+/// session/book IO under it is rare and bounded.
+fn reader_book_lifecycle_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn track_reader_session(
+    state: &reader_server::ReaderServiceState,
+    book_id: &str,
+    session_id: &str,
+) {
     if let Ok(mut map) = reader_sessions_by_book().lock() {
-        map.entry(book_id.to_string())
-            .or_default()
-            .push(session_id.to_string());
+        let ids = map.entry(book_id.to_string()).or_default();
+        // Sweep ids the server already retired (TTL expiry or a service
+        // restart) — otherwise a long-lived app accumulates dead ids per
+        // book and delete_book wastes close attempts on ghosts.
+        ids.retain(|id| state.session_alive(id));
+        ids.push(session_id.to_string());
     }
 }
 
@@ -1497,8 +2060,12 @@ async fn start_reader_session(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let value = settings::load_settings()?;
+        // 12-F4: track atomically against remove_book/delete_book — a session
+        // created during their sweep gap would escape closure and keep
+        // writing into the removed book directory.
+        let _lifecycle = reader_book_lifecycle_lock().lock().ok();
         let descriptor = reader_server::start_session(&state, &value, &book_id)?;
-        track_reader_session(&book_id, &descriptor.session_id);
+        track_reader_session(&state, &book_id, &descriptor.session_id);
         Ok(descriptor)
     })
     .await
@@ -1570,10 +2137,20 @@ async fn cancel_and_discard(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn start_podcast_task(task_id: String, app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || podcast::start_task(task_id, app))
-        .await
-        .map_err(|error| error.to_string())?
+async fn start_podcast_task(task_id: String, app: tauri::AppHandle) -> Result<bool, String> {
+    // Returns whether a worker actually spawned: when the single concurrency
+    // slot is taken, `start_task` deliberately leaves the task Queued and the
+    // UI must say "已排队" rather than "已启动" (05-F19).
+    tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
+        podcast::start_task(task_id.clone(), app)?;
+        let still_queued = control::ControlDb::open_current()?
+            .task_snapshot(&task_id)?
+            .map(|snapshot| snapshot.lifecycle_state == tasks::LifecycleState::Queued)
+            .unwrap_or(false);
+        Ok(!still_queued)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1581,54 +2158,82 @@ async fn create_zhihu_task(
     request: zhihu::CreateZhihuTaskRequest,
     app: tauri::AppHandle,
 ) -> Result<tasks::TaskSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(
-        move || -> Result<tasks::TaskSnapshot, String> {
-            // P3-26: this command had no idempotency claim — a retried click
-            // or relaunch could ask the sidecar for a second archive task.
-            // No request_id reaches us from the frontend, so the claim key is
-            // derived from the request itself: an identical retry replays the
-            // stored snapshot instead of creating a duplicate task.
-            let input_hash = format!(
-                "{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&request).map_err(|error| error.to_string())?
-                )
-            );
-            let request_id = format!("create-zhihu-task-{input_hash}");
-            let control = control::ControlDb::open_current()?;
-            match control.claim_command(&request_id, "create_zhihu_task", &input_hash)? {
-                control::CommandClaim::Existing(record) => {
-                    if let Some(error) = record.error_code {
-                        return Err(error);
-                    }
-                    let replayed: Result<tasks::TaskSnapshot, String> = serde_json::from_str(
-                        record
-                            .result_json
-                            .as_deref()
-                            .ok_or_else(|| "COMMAND_RESULT_MISSING".to_string())?,
-                    )
-                    .map_err(|error| error.to_string());
-                    match replayed {
-                        // A terminal stored snapshot is not a duplicate —
-                        // re-adding the same person after the old task
-                        // finished must create a fresh task, not replay the
-                        // dead one forever.
+    tauri::async_runtime::spawn_blocking(move || -> Result<tasks::TaskSnapshot, String> {
+        // P3-26: this command had no idempotency claim — a retried click
+        // or relaunch could ask the sidecar for a second archive task.
+        // No request_id reaches us from the frontend, so the claim key is
+        // derived from the request itself: an identical retry replays the
+        // stored snapshot instead of creating a duplicate task.
+        let input_hash = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&request).map_err(|error| error.to_string())?)
+        );
+        let request_id = format!("create-zhihu-task-{input_hash}");
+        let control = control::ControlDb::open_current()?;
+        match control.claim_command(&request_id, "create_zhihu_task", &input_hash)? {
+            control::CommandClaim::Existing(record) => {
+                match replay_task_snapshot(&record) {
+                    Ok(snapshot) if snapshot.lifecycle_state != tasks::LifecycleState::Terminal => {
                         Ok(snapshot)
-                            if snapshot.lifecycle_state
-                                != tasks::LifecycleState::Terminal =>
-                        {
-                            Ok(snapshot)
-                        }
-                        Ok(_) => run_new_zhihu_task(control, request, app, request_id),
-                        Err(error) => Err(error),
                     }
+                    // A terminal stored snapshot is not a duplicate —
+                    // re-adding the same person after the old task
+                    // finished must create a fresh task, not replay the
+                    // dead one forever. Reopen the completed claim first:
+                    // `complete_command` is first-wins on `completed_at`,
+                    // so without the CAS the re-run could never settle.
+                    Ok(_) => {
+                        if control.reopen_completed_command(&request_id)? {
+                            run_new_zhihu_task(control, request, app, request_id)
+                        } else {
+                            // Lost the reopen race — replay whatever the
+                            // winning caller produces/stored.
+                            match control.claim_command(
+                                &request_id,
+                                "create_zhihu_task",
+                                &input_hash,
+                            )? {
+                                control::CommandClaim::Existing(record) => {
+                                    replay_task_snapshot(&record)
+                                }
+                                control::CommandClaim::New => {
+                                    run_new_zhihu_task(control, request, app, request_id)
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
                 }
-                control::CommandClaim::New => run_new_zhihu_task(control, request, app, request_id),
             }
-        },
-    )
+            control::CommandClaim::New => run_new_zhihu_task(control, request, app, request_id),
+        }
+    })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// Decode a stored `command_results` row back into a task snapshot. An
+/// in-progress row (claimed but not settled) reports `COMMAND_IN_PROGRESS`
+/// instead of the old opaque `COMMAND_RESULT_MISSING`.
+fn replay_task_snapshot(record: &control::CommandRecord) -> Result<tasks::TaskSnapshot, String> {
+    if let Some(error) = &record.error_code {
+        return Err(error.clone());
+    }
+    serde_json::from_str(
+        record
+            .result_json
+            .as_deref()
+            .ok_or_else(|| "COMMAND_IN_PROGRESS".to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Request-shape errors a Zhihu create can fail with forever — the only ones
+/// safe to cache as the claim's terminal result. Everything else (sidecar
+/// HTTP/timeout, opaque `response.error` strings, settings/DB/emit failures)
+/// is environmental and must release the claim so a retry re-executes.
+fn is_deterministic_zhihu_create_error(error: &str) -> bool {
+    matches!(error, "INVALID_ZHIHU_PEOPLE_ID" | "INVALID_ZHIHU_TOP_N")
 }
 
 fn run_new_zhihu_task(
@@ -1637,16 +2242,25 @@ fn run_new_zhihu_task(
     app: tauri::AppHandle,
     request_id: String,
 ) -> Result<tasks::TaskSnapshot, String> {
+    // Tracks the moment the task actually exists (sidecar row + local event):
+    // a failure after that point (emit/DB readback) must still settle the
+    // claim with the created snapshot — caching the error would replay it
+    // forever, and releasing would make a retry create a duplicate task.
+    let mut created: Option<tasks::TaskSnapshot> = None;
     let result = (|| -> Result<tasks::TaskSnapshot, String> {
         let settings = settings::load_settings()?;
         let snapshot = zhihu::create_task(&settings, &request)?;
+        created = Some(snapshot.clone());
         let event = control
             .task_events(&snapshot.id, 0, 1)?
             .into_iter()
             .next()
             .ok_or_else(|| "TASK_EVENT_MISSING".to_string())?;
-        app.emit("acquisition://task-event", event)
-            .map_err(|error| error.to_string())?;
+        // Best-effort: the task row already committed — a broadcast failure
+        // must not become the command result (the UI poll converges anyway).
+        if let Err(error) = app.emit("acquisition://task-event", event) {
+            eprintln!("Task event broadcast failed after persistence: {error}");
+        }
         Ok(snapshot)
     })();
     match result {
@@ -1661,14 +2275,18 @@ fn run_new_zhihu_task(
             Ok(snapshot)
         }
         Err(error) => {
-            // Mirror zhihu::control_task: transient persist conflicts are
-            // races, not terminal results — release the claim so an immediate
-            // retry re-executes cleanly instead of replaying a cached failure
-            // or waiting out the abandoned-claim window.
-            if zhihu::is_transient_persist_conflict(&error) {
-                control.release_command(&request_id)?;
-            } else {
+            if let Some(snapshot) = created {
+                let json = serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
+                control.complete_command(
+                    &request_id,
+                    &json,
+                    None,
+                    i64::try_from(snapshot.revision).ok(),
+                )?;
+            } else if is_deterministic_zhihu_create_error(&error) {
                 control.complete_command(&request_id, "{}", Some(&error), None)?;
+            } else {
+                control.release_command(&request_id)?;
             }
             Err(error)
         }
@@ -1690,6 +2308,16 @@ async fn start_zhihu_login() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {
         let settings = settings::load_settings()?;
         zhihu::start_login(&settings)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn clear_zhihu_login() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let settings = settings::load_settings()?;
+        zhihu::clear_login(&settings)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1739,20 +2367,159 @@ async fn restart_podcast_task(
     app: tauri::AppHandle,
 ) -> Result<tasks::TaskSnapshot, String> {
     // Heavy copy / publish must not block the UI thread (was causing hard freezes / perceived crashes).
-    let app_for_work = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let mut locations = storage::StorageLocations::current()?;
-        locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
-        let mut control = control::ControlDb::open_current()?;
-        podcast::retry_task_at(&mut control, &locations, &task_id, budget_limit_cny)
-    })
+    // No request_id reaches us from the frontend, so the idempotency key is
+    // derived from the inputs: a retried click on the same source task
+    // replays the stored result instead of cloning a second task (02-F2).
+    cache::validate_task_id(&task_id)?;
+    let input_hash = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&serde_json::json!({
+                "taskId": task_id,
+                "budgetLimitCny": budget_limit_cny,
+            }))
+            .map_err(|error| error.to_string())?
+        )
+    );
+    let request_id = format!("restart-podcast-task-{input_hash}");
+    let (snapshot, kind, superseded_event) = tauri::async_runtime::spawn_blocking(
+        move || -> Result<
+            (
+                tasks::TaskSnapshot,
+                Option<podcast::RetryKind>,
+                Option<tasks::TaskEvent>,
+            ),
+            String,
+        > {
+            let mut locations = storage::StorageLocations::current()?;
+            locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+            let mut control = control::ControlDb::open_current()?;
+            // Claimed execution path: run the retry, settle the claim at the
+            // commit boundary, and report the superseded-source event so the
+            // caller can emit it after the claim is recorded.
+            let execute = |
+                control: &mut control::ControlDb,
+                locations: &storage::StorageLocations,
+            | -> Result<
+                (
+                    tasks::TaskSnapshot,
+                    Option<podcast::RetryKind>,
+                    Option<tasks::TaskEvent>,
+                ),
+                String,
+            > {
+                match podcast::retry_task_at(control, locations, &task_id, budget_limit_cny) {
+                    Ok((snapshot, kind)) => {
+                        // A full restart minted a successor for the same
+                        // input — flip the old row's retry affordance off
+                        // so repeated clicks cannot spawn parallel re-runs
+                        // publishing to the same book id (05-F3).
+                        let superseded_event =
+                            if matches!(kind, podcast::RetryKind::Restarted) {
+                                control.mark_task_superseded(&task_id, &snapshot.id)?
+                            } else {
+                                None
+                            };
+                        // Settle at the commit boundary: emit/auto-start
+                        // failures after this point must neither wedge the
+                        // claim nor make a retry clone a second task.
+                        let json =
+                            serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
+                        control.complete_command(
+                            &request_id,
+                            &json,
+                            None,
+                            i64::try_from(snapshot.revision).ok(),
+                        )?;
+                        Ok((snapshot, Some(kind), superseded_event))
+                    }
+                    Err(error) => {
+                        // TASK_NOT_FOUND is request-stable (task ids are
+                        // never recreated). Everything else describes the
+                        // *current* state (TASK_NOT_RETRYABLE can clear
+                        // once the task goes terminal) or the environment
+                        // (copy/publish IO) — release so a retry executes.
+                        if error == "TASK_NOT_FOUND" {
+                            control.complete_command(
+                                &request_id,
+                                "{}",
+                                Some(&error),
+                                None,
+                            )?;
+                        } else {
+                            control.release_command(&request_id)?;
+                        }
+                        Err(error)
+                    }
+                }
+            };
+            match control.claim_command(&request_id, "restart_podcast_task", &input_hash)? {
+                control::CommandClaim::Existing(record) => {
+                    match replay_task_snapshot(&record) {
+                        Ok(snapshot) => {
+                            // A Resumed retry keeps the same task id, so a
+                            // later failure puts the source row back into a
+                            // retryable terminal state under the SAME derived
+                            // request id — replaying the stored Queued
+                            // snapshot then would swallow the new retry
+                            // without running anything. Reopen the settled
+                            // claim and re-execute (the create_zhihu_task
+                            // pattern); while the revived task is still live
+                            // or was superseded by a successor, the stored
+                            // result is the honest replay.
+                            let retryable_again = control
+                                .task_snapshot(&task_id)?
+                                .map(|current| {
+                                    current.lifecycle_state
+                                        == tasks::LifecycleState::Terminal
+                                        && current.can_retry
+                                })
+                                .unwrap_or(false);
+                            if !retryable_again {
+                                Ok((snapshot, None, None))
+                            } else if control.reopen_completed_command(&request_id)? {
+                                execute(&mut control, &locations)
+                            } else {
+                                // Lost the reopen race — replay whatever the
+                                // winning caller is producing/stored.
+                                match control.claim_command(
+                                    &request_id,
+                                    "restart_podcast_task",
+                                    &input_hash,
+                                )? {
+                                    control::CommandClaim::Existing(record) => {
+                                        replay_task_snapshot(&record)
+                                            .map(|snapshot| (snapshot, None, None))
+                                    }
+                                    control::CommandClaim::New => {
+                                        execute(&mut control, &locations)
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                control::CommandClaim::New => execute(&mut control, &locations),
+            }
+        },
+    )
     .await
     .map_err(|error| format!("RETRY_JOIN_FAILED: {error}"))??;
 
-    let (snapshot, kind) = result;
+    let Some(kind) = kind else {
+        // Claim replay — the original run already emitted and auto-started.
+        return Ok(snapshot);
+    };
+    // The superseded source row changed too — push its event so the task list
+    // drops the stale "重试" affordance without waiting for the next refresh.
+    if let Some(event) = superseded_event {
+        let _ = app.emit(podcast::TASK_EVENT_NAME, event);
+    }
     // Emit the latest event for the returned snapshot (republish or new queued
     // task), then auto-start — DB reads and worker spawn stay on a blocking
     // worker, not the async runtime's IPC-facing threads.
+    let app_for_work = app.clone();
     let snapshot_for_work = snapshot.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         if let Ok(control) = control::ControlDb::open_current() {
@@ -1763,14 +2530,18 @@ async fn restart_podcast_task(
                 }
             }
         }
-        // Full restart creates a queued task — auto-start transcription immediately.
-        if matches!(kind, podcast::RetryKind::Restarted) {
+        // Restart/requeue leaves a queued task — auto-start transcription
+        // immediately (a Resumed task continues from its own checkpoint).
+        if matches!(
+            kind,
+            podcast::RetryKind::Restarted | podcast::RetryKind::Resumed
+        ) {
             if let Err(error) =
                 podcast::start_task(snapshot_for_work.id.clone(), app_for_work.clone())
             {
                 // Surface as soft error string rather than panicking the command.
                 return Err(format!(
-                    "已创建新任务但自动开始失败：{error}。请在任务列表点击「开始」。"
+                    "任务已排队但自动开始失败：{error}。请在任务列表点击「开始」。"
                 ));
             }
         }
@@ -1783,46 +2554,42 @@ async fn restart_podcast_task(
 
 #[tauri::command]
 async fn open_task_result(task_id: String) -> Result<library::BookDetail, String> {
-    tauri::async_runtime::spawn_blocking(
-        move || -> Result<library::BookDetail, String> {
-            crate::cache::validate_task_id(&task_id)?;
-            let snapshot = control::ControlDb::open_current()?
-                .task_snapshot(&task_id)?
-                .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
-            if !matches!(snapshot.outcome, tasks::TaskOutcome::Success) {
-                return Err("TASK_RESULT_NOT_READY".to_string());
-            }
-            let book_id = snapshot
-                .book_id
-                .clone()
-                .ok_or_else(|| "TASK_RESULT_BOOK_MISSING".to_string())?;
-            match open_book_detail(&book_id) {
-                Ok(detail) => Ok(detail),
-                Err(error) if error.starts_with("Book not found:") => {
-                    // Recover: worker may have published to the wrong library root historically,
-                    // or the shelf folder was removed. Re-publish from managed task output.
-                    let locations = storage::StorageLocations::current_with_library_settings()?;
-                    let mut control = control::ControlDb::open_current()?;
-                    let transaction = podcast::publish_task_result_at(
-                        &mut control,
-                        &locations,
-                        &task_id,
+    tauri::async_runtime::spawn_blocking(move || -> Result<library::BookDetail, String> {
+        crate::cache::validate_task_id(&task_id)?;
+        let snapshot = control::ControlDb::open_current()?
+            .task_snapshot(&task_id)?
+            .ok_or_else(|| "TASK_NOT_FOUND".to_string())?;
+        if !matches!(snapshot.outcome, tasks::TaskOutcome::Success) {
+            return Err("TASK_RESULT_NOT_READY".to_string());
+        }
+        let book_id = snapshot
+            .book_id
+            .clone()
+            .ok_or_else(|| "TASK_RESULT_BOOK_MISSING".to_string())?;
+        match open_book_detail(&book_id) {
+            Ok(detail) => Ok(detail),
+            Err(error) if error.starts_with("Book not found:") => {
+                // Recover: worker may have published to the wrong library root historically,
+                // or the shelf folder was removed. Re-publish from managed task output.
+                let locations = storage::StorageLocations::current_with_library_settings()?;
+                let mut control = control::ControlDb::open_current()?;
+                let transaction =
+                    podcast::publish_task_result_at(&mut control, &locations, &task_id).map_err(
+                        |publish_error| {
+                            format!(
+                        "书架中找不到已完成播客。已尝试从任务输出重新发布但失败：{publish_error}"
                     )
-                    .map_err(|publish_error| {
-                        format!(
-                            "书架中找不到已完成播客。已尝试从任务输出重新发布但失败：{publish_error}"
-                        )
-                    })?;
-                    if !matches!(transaction.phase, publish::PublishPhase::Committed) {
-                        return Err(format!("重新发布未完成（{:?}）", transaction.phase));
-                    }
-                    open_book_detail(&transaction.book_id)
-                        .map_err(|open_error| format!("重新发布后仍无法打开播客：{open_error}"))
+                        },
+                    )?;
+                if !matches!(transaction.phase, publish::PublishPhase::Committed) {
+                    return Err(format!("重新发布未完成（{:?}）", transaction.phase));
                 }
-                Err(error) => Err(error),
+                open_book_detail(&transaction.book_id)
+                    .map_err(|open_error| format!("重新发布后仍无法打开播客：{open_error}"))
             }
-        },
-    )
+            Err(error) => Err(error),
+        }
+    })
     .await
     .map_err(|error| error.to_string())?
 }
@@ -1836,170 +2603,170 @@ async fn control_podcast_task(
     app: tauri::AppHandle,
 ) -> Result<tasks::TaskSnapshot, String> {
     // Claim check, worker suspend/kill and DB writes all block — off IPC thread.
-    tauri::async_runtime::spawn_blocking(
-        move || -> Result<tasks::TaskSnapshot, String> {
-            if request_id.trim().is_empty() {
-                return Err("INVALID_REQUEST_ID".to_string());
-            }
-            let input = serde_json::json!({
-                "taskId": task_id,
-                "action": action,
-                "expectedRevision": expected_revision,
-            });
-            let input_hash = format!(
-                "{:x}",
-                Sha256::digest(serde_json::to_vec(&input).map_err(|error| error.to_string())?)
-            );
-            let mut control = control::ControlDb::open_current()?;
-            match control.claim_command(&request_id, "control_podcast_task", &input_hash)? {
-                control::CommandClaim::Existing(record) => {
-                    if let Some(error) = record.error_code {
-                        return Err(error);
-                    }
-                    serde_json::from_str(
-                        record
-                            .result_json
-                            .as_deref()
-                            .ok_or_else(|| "COMMAND_RESULT_MISSING".to_string())?,
-                    )
-                    .map_err(|error| error.to_string())
+    tauri::async_runtime::spawn_blocking(move || -> Result<tasks::TaskSnapshot, String> {
+        if request_id.trim().is_empty() {
+            return Err("INVALID_REQUEST_ID".to_string());
+        }
+        // P-11-F09: the task id is spliced into the discard-intent marker
+        // path below — validate it before it ever reaches a `join`, not
+        // just inside the worker layer.
+        cache::validate_task_id(&task_id)?;
+        let input = serde_json::json!({
+            "taskId": task_id,
+            "action": action,
+            "expectedRevision": expected_revision,
+        });
+        let input_hash = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&input).map_err(|error| error.to_string())?)
+        );
+        let mut control = control::ControlDb::open_current()?;
+        match control.claim_command(&request_id, "control_podcast_task", &input_hash)? {
+            control::CommandClaim::Existing(record) => {
+                if let Some(error) = record.error_code {
+                    return Err(error);
                 }
-                control::CommandClaim::New => {
-                    let result = (|| {
-                        control.validate_task_control(
-                            &task_id,
-                            tasks::TaskKind::Podcast,
-                            expected_revision,
-                        )?;
-                        if !matches!(
-                            action.as_str(),
-                            "pause" | "resume" | "cancel" | "cancel_and_discard"
-                        ) {
-                            return Err("INVALID_TASK_CONTROL".to_string());
-                        }
-                        // P2-11: durable intent BEFORE process side effects —
-                        // a crash between "worker killed" and "DB updated" used
-                        // to leave the snapshot claiming the task still ran.
-                        // For cancel_and_discard the sibling marker is written
-                        // first too, so even a crash mid-discard stays
-                        // recoverable via reconcile_cancel_and_discard.
-                        let discard_locations = if action == "cancel_and_discard" {
-                            let locations = storage::StorageLocations::current()?;
-                            atomic_file::write(
-                                &discard_intent_path(&locations, &task_id),
-                                b"pending",
-                            )?;
-                            Some(locations)
-                        } else {
-                            None
-                        };
-                        let event = match control.control_task(
-                            &task_id,
-                            &action,
-                            expected_revision,
-                        ) {
-                            Ok(event) => event,
-                            Err(error) => {
-                                if let Some(locations) = &discard_locations {
-                                    let _ = fs::remove_file(
-                                        discard_intent_path(locations, &task_id),
-                                    );
-                                }
-                                return Err(error);
-                            }
-                        };
-                        let side_effect = match action.as_str() {
-                            "pause" => podcast::pause_task(&task_id),
-                            "resume" => podcast::resume_task(&task_id),
-                            "cancel" | "cancel_and_discard" => {
-                                match podcast::cancel_task(&task_id) {
-                                    // Worker already gone → the recorded
-                                    // terminal intent is the truth.
-                                    Err(error) if error == "WORKER_NOT_RUNNING" => Ok(()),
-                                    other => other,
-                                }
-                            }
-                            _ => unreachable!(),
-                        };
-                        if let Err(error) = side_effect {
-                            // Compensating transition: pause↔resume restore the
-                            // worker's real state so the DB stops lying about
-                            // it. For cancel the recorded intent stands — the
-                            // user did cancel; the Job Object and the
-                            // interrupted-task reaper reap any orphaned worker,
-                            // and a cancel_and_discard marker keeps the
-                            // pending discard recoverable.
-                            let inverse = match action.as_str() {
-                                "pause" => Some("resume"),
-                                "resume" => Some("pause"),
-                                _ => None,
-                            };
-                            if let Some(inverse) = inverse {
-                                let _ = control.control_task(
-                                    &task_id,
-                                    inverse,
-                                    event.snapshot.revision,
-                                );
+                serde_json::from_str(
+                    record
+                        .result_json
+                        .as_deref()
+                        .ok_or_else(|| "COMMAND_RESULT_MISSING".to_string())?,
+                )
+                .map_err(|error| error.to_string())
+            }
+            control::CommandClaim::New => {
+                let result = (|| {
+                    control.validate_task_control(
+                        &task_id,
+                        tasks::TaskKind::Podcast,
+                        expected_revision,
+                    )?;
+                    if !matches!(
+                        action.as_str(),
+                        "pause" | "resume" | "cancel" | "cancel_and_discard"
+                    ) {
+                        return Err("INVALID_TASK_CONTROL".to_string());
+                    }
+                    // P2-11: durable intent BEFORE process side effects —
+                    // a crash between "worker killed" and "DB updated" used
+                    // to leave the snapshot claiming the task still ran.
+                    // For cancel_and_discard the sibling marker is written
+                    // first too, so even a crash mid-discard stays
+                    // recoverable via reconcile_cancel_and_discard.
+                    let discard_locations = if action == "cancel_and_discard" {
+                        let locations = storage::StorageLocations::current()?;
+                        atomic_file::write(&discard_intent_path(&locations, &task_id), b"pending")?;
+                        Some(locations)
+                    } else {
+                        None
+                    };
+                    let event = match control.control_task(&task_id, &action, expected_revision) {
+                        Ok(event) => event,
+                        Err(error) => {
+                            if let Some(locations) = &discard_locations {
+                                let _ = fs::remove_file(discard_intent_path(locations, &task_id));
                             }
                             return Err(error);
                         }
-                        if let Some(locations) = &discard_locations {
-                            if let Err(error) =
-                                cache::discard_podcast_task_at(locations, &task_id)
-                            {
-                                // Marker stays → the reconcile sweep retries;
-                                // the intent is durable even though we report
-                                // the failure.
-                                return Err(format!("TASK_DISCARD_PENDING: {error}"));
+                    };
+                    let side_effect = match action.as_str() {
+                        "pause" => podcast::pause_task(&task_id),
+                        "resume" => podcast::resume_task(&task_id),
+                        "cancel" | "cancel_and_discard" => {
+                            match podcast::cancel_task(&task_id) {
+                                // Worker already gone → the recorded
+                                // terminal intent is the truth.
+                                Err(error) if error == "WORKER_NOT_RUNNING" => Ok(()),
+                                other => other,
                             }
+                        }
+                        _ => unreachable!(),
+                    };
+                    if let Err(error) = side_effect {
+                        // Compensating transition: pause↔resume restore the
+                        // worker's real state so the DB stops lying about
+                        // it. For cancel the recorded intent stands — the
+                        // user did cancel; the Job Object and the
+                        // interrupted-task reaper reap any orphaned worker,
+                        // and a cancel_and_discard marker keeps the
+                        // pending discard recoverable.
+                        let inverse = match action.as_str() {
+                            "pause" => Some("resume"),
+                            "resume" => Some("pause"),
+                            _ => None,
+                        };
+                        if let Some(inverse) = inverse {
                             let _ =
-                                fs::remove_file(discard_intent_path(locations, &task_id));
+                                control.control_task(&task_id, inverse, event.snapshot.revision);
                         }
-                        app.emit(podcast::TASK_EVENT_NAME, &event)
-                            .map_err(|error| error.to_string())?;
-                        Ok(event.snapshot)
-                    })();
-                    match result {
-                        Ok(snapshot) => {
-                            let json = serde_json::to_string(&snapshot)
-                                .map_err(|error| error.to_string())?;
-                            control.complete_command(
-                                &request_id,
-                                &json,
-                                None,
-                                i64::try_from(snapshot.revision).ok(),
-                            )?;
-                            Ok(snapshot)
+                        return Err(error);
+                    }
+                    if let Some(locations) = &discard_locations {
+                        if let Err(error) = cache::discard_podcast_task_at(locations, &task_id) {
+                            // Marker stays → the reconcile sweep retries;
+                            // the intent is durable even though we report
+                            // the failure.
+                            return Err(format!("TASK_DISCARD_PENDING: {error}"));
                         }
-                        Err(error) => {
-                            // Transient conflicts (revision/sequence races)
-                            // are not terminal results — release the claim so
-                            // an immediate retry re-executes cleanly instead
-                            // of replaying a cached failure.
-                            if zhihu::is_transient_persist_conflict(&error) {
-                                control.release_command(&request_id)?;
-                            } else {
-                                control.complete_command(
-                                    &request_id,
-                                    "{}",
-                                    Some(&error),
-                                    None,
-                                )?;
-                            }
-                            Err(error)
+                        let _ = fs::remove_file(discard_intent_path(locations, &task_id));
+                    }
+                    // Emit is best-effort: the state change already committed,
+                    // so a broadcast failure must not poison the command
+                    // result (the UI's snapshot poll converges anyway).
+                    if let Err(error) = app.emit(podcast::TASK_EVENT_NAME, &event) {
+                        eprintln!("Task event broadcast failed after persistence: {error}");
+                    }
+                    Ok(event.snapshot)
+                })();
+                match result {
+                    Ok(snapshot) => {
+                        let json =
+                            serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
+                        control.complete_command(
+                            &request_id,
+                            &json,
+                            None,
+                            i64::try_from(snapshot.revision).ok(),
+                        )?;
+                        Ok(snapshot)
+                    }
+                    Err(error) => {
+                        // Transient conflicts (revision/sequence races)
+                        // are not terminal results — release the claim so
+                        // an immediate retry re-executes cleanly instead
+                        // of replaying a cached failure. Same for
+                        // TASK_DISCARD_PENDING: the discard intent marker
+                        // stays on disk and the reconcile sweep retries
+                        // it — the failure describes the current attempt,
+                        // not a terminal property of the request (05-F10).
+                        if zhihu::is_transient_persist_conflict(&error)
+                            || error.starts_with("TASK_DISCARD_PENDING")
+                        {
+                            control.release_command(&request_id)?;
+                        } else {
+                            control.complete_command(&request_id, "{}", Some(&error), None)?;
                         }
+                        Err(error)
                     }
                 }
             }
-        },
-    )
+        }
+    })
     .await
     .map_err(|error| error.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tls::ensure_crypto_provider().expect("failed to initialize the TLS crypto provider");
+    // Fail-closed startup aborts: log to app.log first so the exit reason
+    // survives on disk, not just on a stderr nobody reads (12-F8).
+    if let Err(error) = tls::ensure_crypto_provider() {
+        storage::app_log(
+            "startup",
+            &format!("TLS crypto provider init failed: {error}"),
+        );
+        panic!("failed to initialize the TLS crypto provider: {error}");
+    }
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -2033,6 +2800,9 @@ pub fn run() {
             get_storage_usage,
             reveal_storage_directory,
             create_state_backup,
+            list_state_backups,
+            restore_state_backup,
+            take_control_db_recovery_notice,
             update_app_settings,
             clear_safe_cache,
             get_secret_status,
@@ -2069,6 +2839,7 @@ pub fn run() {
             create_zhihu_task,
             get_zhihu_login_status,
             start_zhihu_login,
+            clear_zhihu_login,
             start_zhihu_task,
             control_zhihu_task,
             restart_podcast_task,
@@ -2105,7 +2876,74 @@ pub fn run() {
                 // Orphaned `.incoming` staging and over-cap `.revisions`
                 // slots — residue a deleted journal can never reclaim.
                 publish::sweep_publish_residue(&locations.library_root);
-                reconcile_discard_markers(&locations);
+                // P-10-F1: a publish that crashed mid-commit left a book
+                // wedged until the user found the recovery UI. Advance every
+                // non-terminal journal to its converged state now — recovery
+                // is deterministic (journal phase decides the direction) and
+                // per-transaction tolerant so one bad journal cannot block
+                // the rest.
+                if let Ok(transactions) = publish::list_transactions(&locations.library_root) {
+                    for transaction in transactions {
+                        if matches!(
+                            transaction.phase,
+                            publish::PublishPhase::Committed | publish::PublishPhase::RolledBack
+                        ) {
+                            continue;
+                        }
+                        if let Err(error) = publish::recover_transaction(
+                            &locations.library_root,
+                            &transaction.transaction_id,
+                        ) {
+                            eprintln!(
+                                "startup publish recovery: {} failed: {error}",
+                                transaction.transaction_id
+                            );
+                        }
+                    }
+                }
+                // Marker sweep + publish-index reconcile share one control
+                // handle — the marker sweep consults task liveness before
+                // deleting anything.
+                if let Ok(control) = control::ControlDb::open_current() {
+                    reconcile_discard_markers(&locations, &control);
+                    // P-11-F08: the control.db publish index is only a
+                    // shortlist — reconcile it against the journals on disk so
+                    // recovered/swept transactions stop resurfacing and stale
+                    // 'prepared' rows left by a crashed writer get their real
+                    // terminal phase.
+                    if let Err(error) =
+                        control.reconcile_publish_transaction_index(&locations.library_root)
+                    {
+                        eprintln!("publish index reconcile failed: {error}");
+                    }
+                }
+            }
+            // 17-F3: the snapshot-path reap only runs when the UI asks for a
+            // snapshot — a wedged worker could display "Running" for as long
+            // as the user left the window alone. Sweep on a fixed cadence and
+            // push the events so the row turns Interrupted without waiting
+            // for a refresh trigger.
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(PODCAST_WORKER_REAP_INTERVAL);
+                    let reaped = (|| -> Result<Vec<tasks::TaskEvent>, String> {
+                        let control = control::ControlDb::open_current()?;
+                        let locations = storage::StorageLocations::current_with_library_settings()?;
+                        let work_root = locations.cache_root.join("Podcast").join("Tasks");
+                        control.reap_stale_workers(&work_root, PODCAST_WORKER_STALE_AFTER)
+                    })();
+                    match reaped {
+                        Ok(events) => {
+                            for event in events {
+                                let _ = handle.emit(podcast::TASK_EVENT_NAME, event);
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("periodic stale-worker reap failed: {error}")
+                        }
+                    }
+                });
             }
             // Windows: file path passed as CLI argument
             let Some(window) = app.get_webview_window("main") else {
@@ -2182,7 +3020,13 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building tauri application");
+        .unwrap_or_else(|error| {
+            storage::app_log(
+                "startup",
+                &format!("tauri application build failed: {error}"),
+            );
+            panic!("error while building tauri application: {error}");
+        });
 
     // macOS: file opened via Apple Event (double-click / Open With)
     app.run(|app_handle, event| match event {
@@ -2389,11 +3233,99 @@ mod tests {
             library_root: dir.join("Library"),
             runtime_root: dir.join("Runtime"),
         };
-        reconcile_discard_markers(&locations);
+        // The marker task has no control.db row — that is the "task row gone"
+        // case, which must still discard.
+        let control =
+            crate::control::ControlDb::open(&dir.join("Data").join("App").join("control.db"))
+                .unwrap();
+        reconcile_discard_markers(&locations, &control);
 
         assert!(!doomed.exists());
         assert!(!tasks_dir.join("task-doomed.discard-pending").exists());
         assert!(kept.join("partial.bin").exists());
+        // Windows holds control.db open until the connection drops.
+        drop(control);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reconcile_discard_markers_keeps_live_task_cache() {
+        // 02-F8: a marker stranded next to a task that is still non-terminal
+        // must not delete that task's cache mid-run.
+        let dir = scoped_temp_dir("discard-markers-live");
+        let tasks_dir = dir.join("Cache").join("Podcast").join("Tasks");
+        let live = tasks_dir.join("task-live");
+        fs::create_dir_all(&live).unwrap();
+        fs::write(live.join("partial.bin"), "x").unwrap();
+        fs::write(tasks_dir.join("task-live.discard-pending"), b"pending").unwrap();
+
+        let locations = crate::storage::StorageLocations {
+            channel: "test".to_string(),
+            settings_path: dir.join("settings.json"),
+            data_root: dir.join("Data"),
+            cache_root: dir.join("Cache"),
+            logs_root: dir.join("Logs"),
+            runtime_state_root: dir.join("RuntimeState"),
+            backups_root: dir.join("Backups"),
+            library_root: dir.join("Library"),
+            runtime_root: dir.join("Runtime"),
+        };
+        let control =
+            crate::control::ControlDb::open(&dir.join("Data").join("App").join("control.db"))
+                .unwrap();
+        let now = "2026-07-11T12:00:00Z".to_string();
+        control
+            .persist_task_event(&crate::tasks::TaskEvent {
+                schema_version: 1,
+                task_id: "task-live".to_string(),
+                sequence: 1,
+                revision: 1,
+                event_type: "created".to_string(),
+                created_at: now.clone(),
+                snapshot: crate::tasks::TaskSnapshot {
+                    id: "task-live".to_string(),
+                    kind: crate::tasks::TaskKind::Podcast,
+                    revision: 1,
+                    last_sequence: 1,
+                    lifecycle_state: crate::tasks::LifecycleState::Running,
+                    outcome: crate::tasks::TaskOutcome::None,
+                    required_action: crate::tasks::RequiredAction::None,
+                    progress: crate::tasks::TaskProgress {
+                        mode: crate::tasks::ProgressMode::Determinate,
+                        percent: Some(0.0),
+                        completed_units: Some(0),
+                        total_units: Some(1),
+                        label: None,
+                        unit: None,
+                        source_total_units: None,
+                        skipped_units: None,
+                    },
+                    error_code: None,
+                    error_message: None,
+                    retry_after_seconds: None,
+                    engine_stage: "transcribe".to_string(),
+                    engine_status: "working".to_string(),
+                    recoverable: true,
+                    can_pause: true,
+                    can_resume: false,
+                    can_retry: false,
+                    can_cancel: true,
+                    book_id: None,
+                    source_id: None,
+                    display_name: None,
+                    cache_lease_bytes: 0,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    last_heartbeat_at: None,
+                    checkpoint_at: None,
+                },
+            })
+            .unwrap();
+        reconcile_discard_markers(&locations, &control);
+
+        assert!(live.join("partial.bin").exists());
+        assert!(tasks_dir.join("task-live.discard-pending").exists());
+        drop(control);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2435,8 +3367,7 @@ mod tests {
         // serde_json string literal — a path with quotes/backslashes would
         // break out of a naive `"{path}"` interpolation inside eval'd JS.
         let hostile = r#"C:\weird "quoted"\backslash\file.md"#;
-        let script = initial_file_eval_script(hostile)
-            .expect("path serialization must succeed");
+        let script = initial_file_eval_script(hostile).expect("path serialization must succeed");
         assert!(script.contains(r#""quoted\""#));
         // The injected literal decodes back to exactly the original path.
         let literal = script

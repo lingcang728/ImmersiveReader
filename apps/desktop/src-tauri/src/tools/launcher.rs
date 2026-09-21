@@ -4,6 +4,49 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// 06-F-01/F-12: `Data\Private` holds the Zhihu login profile (DPAPI cookie
+/// file plus the Chromium profile, which keeps its own Cookies database and
+/// localStorage). DPAPI binds the cookie file to the user, but the rest of
+/// the profile is plain data — tighten the directory ACL to the owner +
+/// SYSTEM + Administrators so a second local account cannot browse it.
+/// Best-effort: a hardening failure must not block the sidecar launch.
+#[cfg(windows)]
+fn tighten_private_dir_acl(private_dir: &Path) {
+    use std::os::windows::process::CommandExt;
+    // S-1-5-18 SYSTEM, S-1-5-32-544 Administrators, S-1-3-4 OWNER RIGHTS —
+    // the SIDs avoid needing the localized account names; OWNER RIGHTS makes
+    // the creating user keep full control whoever runs the app.
+    let result = Command::new("icacls")
+        .arg(private_dir)
+        .args([
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "*S-1-3-4:(OI)(CI)F",
+        ])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output();
+    match result {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => crate::storage::app_log(
+            "tools",
+            &format!(
+                "icacls hardening of {} failed (exit {:?}): {}",
+                private_dir
+                    .file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_default(),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ),
+        Err(error) => {
+            crate::storage::app_log("tools", &format!("icacls hardening could not run: {error}"))
+        }
+    }
+}
+
 #[cfg(windows)]
 fn sidecar_stdout() -> Stdio {
     Stdio::piped()
@@ -55,6 +98,9 @@ pub(super) fn command_for(
     let paths = tool_paths(runtime_root, kind);
     require_runtime(runtime_root, &paths)?;
     let mut command = Command::new(&paths.executable);
+    // 06-F-04: do not hand the host's whole environment to the child — only
+    // the OS/tooling whitelist; explicit .env() calls below add the rest.
+    super::inherit_child_env(&mut command);
     command
         .arg(&paths.script)
         .current_dir(&paths.working_directory)
@@ -68,11 +114,14 @@ pub(super) fn command_for(
         ToolKind::Zhihu => {
             let locations = crate::storage::StorageLocations::current()?;
             let data_root = locations.data_root.join("Zhihu");
-            let profile_root = locations.data_root.join("Private").join("ZhihuProfile");
+            let private_root = locations.data_root.join("Private");
+            let profile_root = private_root.join("ZhihuProfile");
             let browser_cache = locations.cache_root.join("Zhihu").join("BrowserCache");
             fs::create_dir_all(&data_root).map_err(|error| error.to_string())?;
             fs::create_dir_all(&profile_root).map_err(|error| error.to_string())?;
             fs::create_dir_all(&browser_cache).map_err(|error| error.to_string())?;
+            #[cfg(windows)]
+            tighten_private_dir_acl(&private_root);
             command
                 .env("IMMERSIVE_LIBRARY_ROOT", &settings.library_root)
                 .env(

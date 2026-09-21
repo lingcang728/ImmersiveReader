@@ -133,12 +133,11 @@ fn unique_target(manual_root: &Path, title: &str) -> PathBuf {
     // silently normalize — leading dots hide the directory from the scan and
     // trailing dots/spaces are trimmed on create — and sidestep reserved
     // device names (a folder literally named `CON` cannot be created).
-    let mut base = title
-        .trim_matches(|c: char| c == '.' || c == ' ')
-        .to_string();
-    if base.is_empty() {
-        base = "未命名书目".to_string();
-    } else if crate::contracts::is_reserved_device_name(&base) {
+    // P-11-F11: the same sanitizer podcast publish uses — a source folder
+    // named `a:b|c?` (producible via `\\?\`/WSL/cloud sync) used to die on
+    // `create_dir_all` as ERROR_INVALID_NAME and fail the whole import.
+    let mut base = crate::contracts::sanitize_shelf_name(title, "未命名书目");
+    if crate::contracts::is_reserved_device_name(&base) {
         base.push('_');
     }
     let direct = manual_root.join(&base);
@@ -278,10 +277,19 @@ pub fn import_markdown_folder(source: &Path, library_root: &Path) -> Result<Impo
                 &staging.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR)),
             );
             let copied = (|| -> Result<(), String> {
-                if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                // P-10-F21/F4: fs::copy leaves bytes in the write cache and
+                // a source edited mid-copy yields a torn chapter under a
+                // valid name — copy through the synced helper and reject a
+                // byte-count mismatch instead of shelving it.
+                let expected = fs::metadata(&path)
+                    .map_err(|error| error.to_string())?
+                    .len();
+                let written = crate::atomic_file::copy_file_synced(&path, &destination)?;
+                if written != expected {
+                    return Err(format!(
+                        "torn copy ({written} of {expected} bytes — source changed during import)"
+                    ));
                 }
-                fs::copy(&path, &destination).map_err(|error| error.to_string())?;
                 Ok(())
             })();
             // P2-17: one unreadable/uncopyable file is an issue, not a
@@ -395,7 +403,10 @@ mod tests {
         assert!(!chapters.is_empty());
         for chapter in chapters {
             assert!(chapter.get("date").is_none(), "no null date");
-            assert!(chapter.get("metadataStatus").is_none(), "no null metadataStatus");
+            assert!(
+                chapter.get("metadataStatus").is_none(),
+                "no null metadataStatus"
+            );
             assert!(chapter.get("voteCount").is_some());
             assert!(chapter.get("wordCount").is_some());
         }

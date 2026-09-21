@@ -1,4 +1,4 @@
-use super::{CommandClaim, ControlDb, CONTROL_SCHEMA_VERSION};
+use super::{CommandClaim, ControlDb, CONTROL_SCHEMA_VERSION, TASK_EVENT_KEEP_LATEST};
 use crate::tasks::{
     LifecycleState, ProgressMode, RequiredAction, TaskErrorCode, TaskEvent, TaskKind, TaskOutcome,
     TaskProgress, TaskSnapshot,
@@ -324,6 +324,128 @@ fn task_snapshot_and_events_survive_reopen() {
 }
 
 #[test]
+fn task_events_keep_first_and_latest_n_per_task() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-event-cap-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    let database = ControlDb::open(&path).expect("control database must open");
+    let total = TASK_EVENT_KEEP_LATEST as u64 + 3;
+    for sequence in 1..=total {
+        database
+            .persist_task_event(&task_event(sequence, sequence))
+            .expect("event must persist");
+    }
+
+    let all = database
+        .task_events("podcast-1", 0, 10_000)
+        .expect("events must load");
+    assert_eq!(all.len() as i64, TASK_EVENT_KEEP_LATEST + 1);
+    assert_eq!(all.first().map(|event| event.sequence), Some(1));
+    assert_eq!(all.last().map(|event| event.sequence), Some(total));
+    // The reader-side contract holds through the gap: the newest event is
+    // always re-fetchable for rebroadcast.
+    let latest = database
+        .task_events("podcast-1", total - 1, 1)
+        .expect("latest event must load");
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].sequence, total);
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn prune_terminal_tasks_filters_on_sql_side() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-prune-terminal-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    let database = ControlDb::open(&path).expect("control database must open");
+
+    let mut terminal_old = task_event_for("old-terminal", TaskKind::Podcast, "book-1", 1, 1);
+    terminal_old.snapshot.lifecycle_state = LifecycleState::Terminal;
+    terminal_old.snapshot.updated_at = "2000-01-01T00:00:00Z".to_string();
+    database
+        .persist_task_event(&terminal_old)
+        .expect("old terminal event must persist");
+
+    let mut terminal_recent = task_event_for("recent-terminal", TaskKind::Podcast, "book-1", 1, 1);
+    terminal_recent.snapshot.lifecycle_state = LifecycleState::Terminal;
+    terminal_recent.snapshot.updated_at = chrono::Utc::now().to_rfc3339();
+    database
+        .persist_task_event(&terminal_recent)
+        .expect("recent terminal event must persist");
+
+    // A non-terminal row past the cutoff must survive the sweep.
+    let mut running_old = task_event_for("old-running", TaskKind::Podcast, "book-1", 1, 1);
+    running_old.snapshot.updated_at = "2000-01-01T00:00:00Z".to_string();
+    database
+        .persist_task_event(&running_old)
+        .expect("old running event must persist");
+
+    assert_eq!(
+        database
+            .prune_terminal_tasks_older_than(7)
+            .expect("prune must run"),
+        1
+    );
+    assert!(database
+        .task_snapshot("old-terminal")
+        .expect("snapshot lookup must run")
+        .is_none());
+    // Cascade: the pruned task's events go with the snapshot row.
+    assert!(database
+        .task_events("old-terminal", 0, 100)
+        .expect("event lookup must run")
+        .is_empty());
+    assert!(database
+        .task_snapshot("recent-terminal")
+        .expect("snapshot lookup must run")
+        .is_some());
+    assert!(database
+        .task_snapshot("old-running")
+        .expect("snapshot lookup must run")
+        .is_some());
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
+fn set_task_display_name_patches_snapshot_json_in_place() {
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-display-name-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let path = root.join("control.db");
+    let database = ControlDb::open(&path).expect("control database must open");
+    database
+        .persist_task_event(&task_event(1, 1))
+        .expect("task must persist");
+
+    database
+        .set_task_display_name("podcast-1", "episode-42")
+        .expect("display name must persist");
+    let snapshot = database
+        .task_snapshot("podcast-1")
+        .expect("snapshot must load")
+        .expect("snapshot must exist");
+    assert_eq!(snapshot.display_name.as_deref(), Some("episode-42"));
+    // json_set touches only the one key — the rest of the row is intact.
+    assert_eq!(snapshot.lifecycle_state, LifecycleState::Running);
+    assert_eq!(snapshot.last_sequence, 1);
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
 fn podcast_and_zhihu_active_snapshots_can_coexist() {
     let root = std::env::temp_dir().join(format!(
         "immersive-control-parallel-tasks-{}",
@@ -357,15 +479,14 @@ fn podcast_and_zhihu_active_snapshots_can_coexist() {
         .expect("active task snapshots must load");
     assert_eq!(active.len(), 2);
     assert!(active.iter().all(|snapshot| {
-        snapshot.lifecycle_state == LifecycleState::Running
-            && snapshot.outcome == TaskOutcome::None
+        snapshot.lifecycle_state == LifecycleState::Running && snapshot.outcome == TaskOutcome::None
     }));
-    assert!(active.iter().any(|snapshot| {
-        snapshot.id == "podcast-active" && snapshot.kind == TaskKind::Podcast
-    }));
-    assert!(active.iter().any(|snapshot| {
-        snapshot.id == "zhihu-active" && snapshot.kind == TaskKind::Zhihu
-    }));
+    assert!(active
+        .iter()
+        .any(|snapshot| { snapshot.id == "podcast-active" && snapshot.kind == TaskKind::Podcast }));
+    assert!(active
+        .iter()
+        .any(|snapshot| { snapshot.id == "zhihu-active" && snapshot.kind == TaskKind::Zhihu }));
 
     drop(database);
     fs::remove_dir_all(root).expect("test root must be removed");
@@ -563,7 +684,10 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
     // chunking band is 18–24 → raw 50% maps to 21.
     assert_eq!(stdout.snapshot.progress.percent, Some(21.0));
     assert_eq!(stdout.snapshot.engine_stage, "chunking");
-    assert_eq!(stdout.snapshot.progress.label.as_deref(), Some("正在切分音频"));
+    assert_eq!(
+        stdout.snapshot.progress.label.as_deref(),
+        Some("正在切分音频")
+    );
     let ndjson = database
         .record_worker_line(
             "podcast-1",
@@ -578,7 +702,10 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
     assert_eq!(ndjson.snapshot.engine_stage, "transcribing");
     assert_eq!(ndjson.snapshot.progress.completed_units, Some(11));
     assert_eq!(ndjson.snapshot.progress.total_units, Some(20));
-    assert_eq!(ndjson.snapshot.progress.label.as_deref(), Some("正在语音转写"));
+    assert_eq!(
+        ndjson.snapshot.progress.label.as_deref(),
+        Some("正在语音转写")
+    );
     // Spammy stderr without stage/% change is throttled (prevents UI flicker).
     assert!(database
         .record_worker_line("podcast-1", "stderr", "worker warning")
@@ -646,6 +773,51 @@ fn worker_stdout_stderr_and_exit_map_to_task_events() {
 }
 
 #[test]
+fn stale_worker_output_never_revives_a_queued_task() {
+    // 02-F9: a worker line/finish landing on a Queued row belongs to a stale
+    // pipe (the task was requeued/rolled back while it drained) — both must
+    // be dropped instead of resurrecting the row as Running/Terminal.
+    let root = std::env::temp_dir().join(format!(
+        "immersive-control-queued-stale-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("test root must exist");
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let mut queued = task_event(1, 1);
+    queued.task_id = "podcast-queued".to_string();
+    queued.snapshot.id = "podcast-queued".to_string();
+    queued.snapshot.lifecycle_state = LifecycleState::Queued;
+    queued.snapshot.engine_stage = "queued".to_string();
+    queued.snapshot.engine_status = "waiting".to_string();
+    database
+        .persist_task_event(&queued)
+        .expect("queued task must persist");
+
+    assert!(database
+        .record_worker_line(
+            "podcast-queued",
+            "stdout",
+            r#"{"type":"progress","stage":"transcribe","percent":50.0}"#,
+        )
+        .expect("queued worker line must not error")
+        .is_none());
+    assert!(database
+        .finish_worker_task("podcast-queued", true, None)
+        .expect("queued worker finish must not error")
+        .is_none());
+    let snapshot = database
+        .task_snapshot("podcast-queued")
+        .expect("snapshot must load")
+        .expect("task must exist");
+    assert_eq!(snapshot.lifecycle_state, LifecycleState::Queued);
+    assert_eq!(snapshot.revision, 1);
+    drop(database);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
 fn task_controls_enforce_revision_and_transition_pause_resume_cancel() {
     let root = std::env::temp_dir().join(format!(
         "immersive-control-task-controls-{}",
@@ -691,14 +863,9 @@ fn start_reservation_can_be_rolled_back_without_losing_the_task() {
     ));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("test root must exist");
-    let mut database = ControlDb::open(&root.join("control.db")).expect("control database must open");
-    let mut queued = task_event_for(
-        "zhihu-start",
-        TaskKind::Zhihu,
-        "zhihu:author",
-        1,
-        1,
-    );
+    let mut database =
+        ControlDb::open(&root.join("control.db")).expect("control database must open");
+    let mut queued = task_event_for("zhihu-start", TaskKind::Zhihu, "zhihu:author", 1, 1);
     queued.snapshot.lifecycle_state = LifecycleState::Queued;
     queued.snapshot.engine_stage = "queued".to_string();
     queued.snapshot.engine_status = "waiting".to_string();
@@ -912,7 +1079,10 @@ fn corrupt_control_database_is_quarantined_and_rebuilt() {
     let stale_wal_left = fs::read(root.join("control.db-wal"))
         .map(|bytes| bytes == b"stale wal")
         .unwrap_or(false);
-    assert!(!stale_wal_left, "stale WAL sidecar must not survive rebuild");
+    assert!(
+        !stale_wal_left,
+        "stale WAL sidecar must not survive rebuild"
+    );
     drop(database);
     // The rebuilt file is a real database: reopen is a plain open and the
     // idempotency claim persists.
@@ -1201,10 +1371,7 @@ fn reap_stale_workers_marks_silent_running_tasks() {
     database
         .persist_task_event(&silent)
         .expect("silent task must persist");
-    let state_dir = work_root
-        .join("podcast-silent")
-        .join("work")
-        .join("state");
+    let state_dir = work_root.join("podcast-silent").join("work").join("state");
     fs::create_dir_all(&state_dir).expect("state dir must exist");
     let heartbeat = chrono::Local::now()
         .naive_local()
@@ -1227,12 +1394,11 @@ fn reap_stale_workers_marks_silent_running_tasks() {
         .persist_task_event(&paused)
         .expect("paused task must persist");
 
-    assert_eq!(
-        database
-            .reap_stale_workers(&work_root, stale_after)
-            .expect("reaper must run"),
-        1
-    );
+    let reaped_events = database
+        .reap_stale_workers(&work_root, stale_after)
+        .expect("reaper must run");
+    assert_eq!(reaped_events.len(), 1);
+    assert_eq!(reaped_events[0].snapshot.id, "podcast-1");
     let reaped = database
         .task_snapshot("podcast-1")
         .expect("reaped snapshot must load")
@@ -1264,12 +1430,10 @@ fn reap_stale_workers_marks_silent_running_tasks() {
     }
 
     // Idempotent: everything is either fresh or already terminal now.
-    assert_eq!(
-        database
-            .reap_stale_workers(&work_root, stale_after)
-            .expect("second reap must be a no-op"),
-        0
-    );
+    assert!(database
+        .reap_stale_workers(&work_root, stale_after)
+        .expect("second reap must be a no-op")
+        .is_empty());
     drop(database);
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
@@ -1481,7 +1645,8 @@ fn open_skips_schema_bootstrap_when_version_is_current() {
     drop(healed);
 
     // P3-25: a database stamped by a NEWER build must never be downgraded —
-    // the batch is gated on `version < CONTROL_SCHEMA_VERSION`, not `!=`.
+    // opening it at all would risk reading a format this build cannot
+    // understand, so it is refused outright.
     {
         let newer = ControlDb::open(&path).expect("control database must reopen");
         newer
@@ -1489,20 +1654,13 @@ fn open_skips_schema_bootstrap_when_version_is_current() {
             .execute_batch("PRAGMA user_version = 99")
             .expect("user_version must set");
     }
-    let respected = ControlDb::open(&path).expect("control database must reopen");
-    assert!(
-        !respected.schema_bootstrap_ran(),
-        "future version must skip the schema batch"
-    );
-    let version: i64 = respected
-        .connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("user_version must read");
-    assert_eq!(
-        version, 99,
-        "written version must be respected, not stamped back"
-    );
-    drop(respected);
+    match ControlDb::open(&path) {
+        Err(error) => assert!(
+            error.starts_with("CONTROL_SCHEMA_TOO_NEW"),
+            "future version must be rejected with CONTROL_SCHEMA_TOO_NEW, got {error}"
+        ),
+        Ok(_) => panic!("future-version database must not open"),
+    }
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
 

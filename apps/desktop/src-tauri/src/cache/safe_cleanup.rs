@@ -126,25 +126,33 @@ pub fn discard_podcast_task_at(
         .join("Tasks")
         .join(task_id);
     let metrics = remove_managed_path(locations, &cache_path)?;
-    let recovery = locations
+    // Drop the whole per-task data dir — task.json/recovery.json are dead
+    // weight once the task is discarded, and a lingering task.json contract
+    // read like evidence of life to anything scanning `Data\Podcast\Tasks`.
+    let task_data_dir = locations
         .data_root
         .join("Podcast")
         .join("Tasks")
-        .join(task_id)
-        .join("recovery.json");
-    if recovery.exists() {
+        .join(task_id);
+    if task_data_dir.exists() {
         let data_root =
             fs::canonicalize(&locations.data_root).map_err(|error| error.to_string())?;
-        let parent = recovery
-            .parent()
-            .ok_or_else(|| "Invalid Podcast recovery path".to_string())?;
-        if parent.exists() {
-            let canonical_parent = fs::canonicalize(parent).map_err(|error| error.to_string())?;
-            if !canonical_parent.starts_with(&data_root) {
-                return Err("Podcast recovery path is outside the managed Data root".to_string());
-            }
+        let canonical_dir = fs::canonicalize(&task_data_dir).map_err(|error| error.to_string())?;
+        if canonical_dir == data_root || !canonical_dir.starts_with(&data_root) {
+            return Err("Podcast task data path is outside the managed Data root".to_string());
         }
-        fs::remove_file(recovery).map_err(|error| error.to_string())?;
+        let metadata = fs::symlink_metadata(&canonical_dir).map_err(|error| error.to_string())?;
+        if metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && !crate::atomic_file::is_reparse_point(&metadata)
+        {
+            fs::remove_dir_all(&canonical_dir).map_err(|error| error.to_string())?;
+        } else if metadata.is_dir() {
+            // A junction/mount point: unlink the link itself — never recurse.
+            fs::remove_dir(&canonical_dir).map_err(|error| error.to_string())?;
+        } else {
+            fs::remove_file(&canonical_dir).map_err(|error| error.to_string())?;
+        }
     }
     Ok(metrics)
 }

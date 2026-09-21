@@ -12,7 +12,7 @@ fn budget_rejection_never_copies_input() {
             preview,
             PodcastPreviewOptions {
                 translate: true,
-            polish: true,
+                polish: true,
                 max_api_cost_cny: 0.0,
             },
         )
@@ -47,7 +47,7 @@ fn reuse_existing_returns_book_without_creating_task() {
             preview,
             PodcastPreviewOptions {
                 translate: false,
-            polish: true,
+                polish: true,
                 max_api_cost_cny: 0.0,
             },
         )

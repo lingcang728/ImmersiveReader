@@ -35,7 +35,7 @@ impl AppChannel {
         let qa_run_id = std::env::var("IMMERSIVE_QA_RUN_ID").ok();
         match Self::detect(qa_run_id.as_deref()) {
             Ok(channel) => channel,
-            Err(message) => panic!("{message}"),
+            Err(message) => panic!("invalid IMMERSIVE_QA_RUN_ID: {message}"),
         }
     }
 

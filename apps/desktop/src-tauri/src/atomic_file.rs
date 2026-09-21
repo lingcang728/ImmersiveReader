@@ -76,6 +76,9 @@ fn wide_path(path: &Path) -> Vec<u16> {
 impl AtomicReplacer for PlatformReplacer {
     fn replace(&self, source: &Path, target: &Path) -> io::Result<()> {
         const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        // F-20: WRITE_THROUGH makes NTFS commit the rename's directory entry
+        // to the journal before returning — the Windows analogue of fsync'ing
+        // the parent directory after rename(2) on POSIX.
         const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
         let source_wide = wide_path(source);
         let target_wide = wide_path(target);
@@ -221,6 +224,29 @@ fn write_with(path: &Path, data: &[u8], replacer: &impl AtomicReplacer) -> Resul
 
 pub fn write(path: &Path, data: &[u8]) -> Result<(), String> {
     write_with(path, data, &PlatformReplacer)
+}
+
+/// Copy `source` to `target` and flush the destination before returning.
+/// `fs::copy` leaves bytes in the write cache — a crash right after could
+/// commit a zero-filled/truncated file under a good-looking name inside a
+/// staged book tree. Syncing here keeps the publish/import staging durable
+/// through the rename that follows. Returns the copied byte count so callers
+/// can detect a torn copy (`source` shrank mid-copy) instead of shelving it.
+pub(crate) fn copy_file_synced(source: &Path, target: &Path) -> Result<u64, String> {
+    let normalized_source = long_path(source);
+    let normalized_target = long_path(target);
+    if let Some(parent) = normalized_target.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let bytes =
+        fs::copy(&normalized_source, &normalized_target).map_err(|error| error.to_string())?;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&normalized_target)
+        .map_err(|error| error.to_string())?;
+    file.sync_all()
+        .map_err(|error| error.to_string())
+        .map(|_| bytes)
 }
 
 #[cfg(test)]

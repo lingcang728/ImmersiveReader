@@ -12,7 +12,7 @@ fn queued_task_is_persisted_before_broadcast() {
             preview,
             PodcastPreviewOptions {
                 translate: true,
-            polish: true,
+                polish: true,
                 max_api_cost_cny: 0.0,
             },
         )
@@ -39,7 +39,10 @@ fn queued_task_is_persisted_before_broadcast() {
 
     assert_eq!(result.tasks.len(), 1);
     // Preparing + progress + ready (at least the first and last snapshots).
-    assert!(broadcasts >= 2, "expected prepare+ready broadcasts, got {broadcasts}");
+    assert!(
+        broadcasts >= 2,
+        "expected prepare+ready broadcasts, got {broadcasts}"
+    );
     let task_id = &result.tasks[0].id;
     let data_task = locations
         .data_root
@@ -86,6 +89,53 @@ fn queued_task_is_persisted_before_broadcast() {
 }
 
 #[test]
+fn stale_preview_releases_claim_so_same_request_id_retries() {
+    // PODCAST_PREVIEW_STALE is process-local state, not a property of the
+    // request: after a restart the user re-previews the same files, lands on
+    // the same content-addressed preview_id and request_id, and the retry
+    // must re-execute instead of replaying a cached error.
+    let (root, locations, preview) = fixture("stale-preview");
+    let control_path = root.join("control.db");
+    let mut control = ControlDb::open(&control_path).expect("control database must open");
+    let store = PodcastPreviewStore::default();
+    let approval = approved();
+
+    // No preview stored → PODCAST_PREVIEW_STALE, claim released not cached.
+    let stale = super::super::add_podcast_files_at(
+        &store,
+        &mut control,
+        &locations,
+        &request(DuplicatePolicy::NewRevision, Some(&approval), "request-1"),
+        |_| {},
+    )
+    .expect_err("missing preview must fail with PODCAST_PREVIEW_STALE");
+    assert_eq!(stale, "PODCAST_PREVIEW_STALE");
+
+    store
+        .insert(
+            preview,
+            PodcastPreviewOptions {
+                translate: false,
+                polish: true,
+                max_api_cost_cny: 0.0,
+            },
+        )
+        .expect("preview must be stored");
+
+    let retried = super::super::add_podcast_files_at(
+        &store,
+        &mut control,
+        &locations,
+        &request(DuplicatePolicy::NewRevision, Some(&approval), "request-1"),
+        |_| {},
+    )
+    .expect("retry after re-preview must re-execute, not replay the stale error");
+    assert_eq!(retried.tasks.len(), 1);
+    drop(control);
+    fs::remove_dir_all(root).expect("fixture must be removed");
+}
+
+#[test]
 fn completed_request_replays_without_copying_or_broadcasting() {
     let (root, locations, preview) = fixture("replay");
     let control_path = root.join("control.db");
@@ -95,7 +145,7 @@ fn completed_request_replays_without_copying_or_broadcasting() {
             preview,
             PodcastPreviewOptions {
                 translate: false,
-            polish: true,
+                polish: true,
                 max_api_cost_cny: 0.0,
             },
         )

@@ -16,11 +16,15 @@ pub(crate) const READER_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60
 
 /// P2-23: the reader document is a compiled single-file bundle whose whole
 /// resource surface is inline <script>/<style> blocks, same-origin fetches
-/// (`manifest`/`progress`/`content`/`heartbeat`) and same-origin or https
-/// images. Everything else is denied. `frame-ancestors` names every parent
+/// (`manifest`/`progress`/`content`/`heartbeat`) and same-origin, embedded
+/// or blob images. Everything else is denied. `frame-ancestors` names every parent
 /// origin that legitimately embeds the reader iframe: the vite dev origin,
 /// and the Tauri production origins (Windows uses http://tauri.localhost).
-const READER_DOCUMENT_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors http://localhost:1420 http://tauri.localhost https://tauri.localhost tauri://localhost";
+// 12-F13: no remote image origins — the zhihu archive pipeline downloads
+// whitelisted images into the book root and the markdown renderer replaces
+// remote URLs with a placeholder pixel, so `https:` was a residual allowance
+// that only served tracking pixels / one-bit exfil via hostile markdown.
+const READER_DOCUMENT_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors http://localhost:1420 http://tauri.localhost https://tauri.localhost tauri://localhost";
 /// Non-document routes (JSON, progress, chapter bytes) get the strictest
 /// policy — it also defangs scriptable payloads such as image/svg+xml when
 /// a content URL is navigated to directly instead of loaded via <img>.
@@ -34,7 +38,10 @@ const SVG_CSP: &str = "sandbox; default-src 'none'; frame-ancestors 'none'";
 #[derive(Clone)]
 pub struct ReaderSession {
     pub book_root: PathBuf,
-    pub manifest: Manifest,
+    /// 16-F13: `session_for` clones the session on every request so the
+    /// registry lock releases before any response IO — an Arc keeps that
+    /// clone cheap even for manifests with thousands of chapters.
+    pub manifest: Arc<Manifest>,
 }
 
 pub type Sessions = Arc<RwLock<HashMap<String, (ReaderSession, Instant)>>>;
@@ -128,6 +135,17 @@ pub fn close_session(sessions: &Sessions, session_id: &str) -> Result<bool, Stri
         .map_err(|_| "Reader session store is unavailable".to_string())?
         .remove(session_id)
         .is_some())
+}
+
+/// True while `session_id` is a live session — the expired sweep runs first,
+/// so an idle-past-TTL id reports false even before its lazy removal. Lets
+/// lib.rs prune its book→session tracking map without a separate clock.
+pub fn session_alive(sessions: &Sessions, session_id: &str) -> bool {
+    let Ok(mut sessions) = sessions.write() else {
+        return false;
+    };
+    prune_expired_sessions(&mut sessions, Instant::now());
+    sessions.contains_key(session_id)
 }
 
 fn session_for(sessions: &Sessions, session_id: &str) -> Option<ReaderSession> {
@@ -253,7 +271,7 @@ fn content_response(session: &ReaderSession, raw_relative: &str) -> ReaderRespon
         Ok(value) => value.into_owned(),
         Err(_) => return response(400, "Invalid encoded path", "text/plain; charset=utf-8"),
     };
-    if !is_safe_relative_path(&decoded) || !is_book_resource(&decoded, &session.manifest) {
+    if !is_safe_relative_path(&decoded) || !is_book_resource(&decoded, session.manifest.as_ref()) {
         return response(
             403,
             "Content path is not allowed",
@@ -284,6 +302,18 @@ fn content_response(session: &ReaderSession, raw_relative: &str) -> ReaderRespon
     }
 }
 
+/// Re-read the book's manifest for each progress request (F20): the session
+/// snapshot goes stale when the book is re-imported mid-session, and
+/// validating against the old chapter set could quarantine a healthy
+/// `.reading.json` on GET or write ids the new manifest rejects on PUT.
+/// Falls back to the session snapshot when the file can't be re-read —
+/// `load_progress`/`save_progress` still fail closed on their own.
+fn current_manifest(session: &ReaderSession) -> Arc<Manifest> {
+    crate::library::read_manifest(&session.book_root.join("manifest.json"))
+        .map(Arc::new)
+        .unwrap_or_else(|_| Arc::clone(&session.manifest))
+}
+
 /// P2-21 read-merge-write — shares `library::merge_progress` so both writers
 /// (the Svelte 精读 workspace via `save_book_progress` and this reader via
 /// PUT /progress) converge on the same `.reading.json` under one merge
@@ -311,14 +341,27 @@ fn progress_put(request: &ReaderRequest, origin: &str, session: &ReaderSession) 
         Ok(value) => value,
         Err(error) => return response(400, error.to_string(), "text/plain; charset=utf-8"),
     };
+    // P-10-F9: serialize the load→merge→write against the 精读 surface —
+    // merge alone cannot prevent a lost update when two writers interleave.
+    // A poisoned registry/lock degrades to the unlocked path rather than
+    // deadlocking the reader. The Arc must outlive the guard, so it gets its
+    // own binding.
+    let progress_lock = crate::library::book_progress_lock(&session.manifest.book_id).ok();
+    let _progress_guard = progress_lock.as_ref().and_then(|lock| lock.lock().ok());
     // P2-21: read-merge-write. If the disk state is unreadable (load_progress
     // already quarantined it), keep the writer's payload rather than dropping
-    // the update entirely.
-    let merged = match crate::progress::load_progress(&session.book_root, &session.manifest) {
+    // the update entirely. When the quarantine rename itself failed, the
+    // corrupt file still sits at .reading.json and the save below would
+    // overwrite it — copy it aside first so the evidence survives (F11).
+    let manifest = current_manifest(session);
+    let merged = match crate::progress::load_progress(&session.book_root, manifest.as_ref()) {
         Ok(existing) => crate::library::merge_progress(&existing, &progress),
-        Err(_) => progress,
+        Err(_) => {
+            crate::progress::preserve_unreadable(&session.book_root);
+            progress
+        }
     };
-    match crate::progress::save_progress(&session.book_root, &session.manifest, &merged) {
+    match crate::progress::save_progress(&session.book_root, manifest.as_ref(), &merged) {
         Ok(()) => response(204, Vec::new(), "text/plain; charset=utf-8"),
         Err(error) => response(400, error, "text/plain; charset=utf-8"),
     }
@@ -341,14 +384,15 @@ pub(crate) fn handle(
     };
     let route = parts[2..].join("/");
     match (request.method.as_str(), route.as_str()) {
-        ("GET", "reader") => document_response(
-            200,
-            Arc::clone(reader_html),
-            "text/html; charset=utf-8",
-        ),
+        ("GET", "reader") => {
+            document_response(200, Arc::clone(reader_html), "text/html; charset=utf-8")
+        }
         ("GET", "manifest") => json(&session.manifest),
         ("GET", "progress") => {
-            match crate::progress::load_progress(&session.book_root, &session.manifest) {
+            match crate::progress::load_progress(
+                &session.book_root,
+                current_manifest(&session).as_ref(),
+            ) {
                 Ok(progress) => json(&progress),
                 Err(error) => response(500, error, "text/plain; charset=utf-8"),
             }
@@ -368,8 +412,8 @@ mod tests {
         insert_session_at, is_book_resource, prune_expired_sessions, ReaderSession, Sessions,
         MAX_READER_SESSIONS, READER_SESSION_TTL,
     };
-    use crate::library::merge_progress;
     use crate::contracts::{Manifest, ReadingProgress};
+    use crate::library::merge_progress;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
@@ -401,7 +445,7 @@ mod tests {
             (
                 ReaderSession {
                     book_root: PathBuf::from("book"),
-                    manifest,
+                    manifest: Arc::new(manifest),
                 },
                 inserted_at,
             ),
@@ -420,7 +464,7 @@ mod tests {
         .expect("fixture must deserialize");
         let session = ReaderSession {
             book_root: PathBuf::from("book"),
-            manifest,
+            manifest: Arc::new(manifest),
         };
         let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
         let stale = Instant::now();
@@ -450,15 +494,14 @@ mod tests {
 
     #[test]
     fn merge_unions_read_marks_and_prefers_the_fresher_cursor() {
-        let progress = |current: &str, position: f64, read: &[&str], updated: &str| {
-            ReadingProgress {
+        let progress =
+            |current: &str, position: f64, read: &[&str], updated: &str| ReadingProgress {
                 schema_version: 1,
                 current: current.to_string(),
                 position,
                 read: read.iter().map(|id| id.to_string()).collect(),
                 updated: updated.to_string(),
-            }
-        };
+            };
         // The reader surface saved later: its cursor wins, but the earlier
         // surface's `read` mark survives the merge.
         let existing = progress("ch-1", 0.2, &["ch-1"], "2026-07-15T10:00:00Z");

@@ -36,38 +36,18 @@ fn safe_segment(value: &str) -> bool {
 /// Folder name for a podcast book under Library/`播客/`.
 /// Strips Windows-illegal characters and trims length while keeping CJK titles readable.
 pub(crate) fn sanitize_podcast_folder_name(raw: &str) -> String {
-    let mut name = raw
-        .chars()
-        .map(|ch| match ch {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => ' ',
-            c if c.is_control() => ' ',
-            c => c,
-        })
-        .collect::<String>();
-    while name.contains("  ") {
-        name = name.replace("  ", " ");
-    }
-    let name = name.trim().trim_matches('.').to_string();
-    let mut name = if name.is_empty() {
-        "未命名播客".to_string()
-    } else {
-        name
-    };
-    // Keep path segments short enough for Windows MAX_PATH comfort.
-    if name.chars().count() > 80 {
-        name = name.chars().take(80).collect::<String>();
-        name = name.trim().trim_matches('.').to_string();
-    }
-    if name.is_empty() {
-        "未命名播客".to_string()
-    } else {
-        name
-    }
+    // Shared mapping lives in contracts::sanitize_shelf_name (P-11-F11) so
+    // manual import shelves sanitize identically.
+    crate::contracts::sanitize_shelf_name(raw, "未命名播客")
 }
 
 fn podcast_library_relative_path(display_name: &str, source_id: &str) -> String {
     let suffix = source_id.get(..12).unwrap_or(source_id);
-    format!("播客/{}-{}", sanitize_podcast_folder_name(display_name), suffix)
+    format!(
+        "播客/{}-{}",
+        sanitize_podcast_folder_name(display_name),
+        suffix
+    )
 }
 
 /// `.revisions/{source}/{revision}` archives the pre-publish final copy. A
@@ -224,7 +204,17 @@ fn copy_outputs(
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
         }
-        fs::copy(&source, &destination).map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
+        // fs::copy leaves bytes in the write cache — a crash right after
+        // could commit a truncated chapter under a good name. Flush the copy
+        // and verify the byte count so a torn source read cannot slip in.
+        let expected_len = fs::metadata(&source).map(|meta| meta.len()).unwrap_or(0);
+        let copied = crate::atomic_file::copy_file_synced(&source, &destination)
+            .map_err(|error| format!("PUBLISH_FAILED: {error}"))?;
+        if copied != expected_len {
+            return Err(format!(
+                "PUBLISH_FAILED: torn copy of {file_name} ({copied} of {expected_len} bytes)"
+            ));
+        }
         exported_sources.push((file_name.clone(), destination.clone()));
         let title = Path::new(&file_name)
             .file_stem()
@@ -463,8 +453,18 @@ pub fn publish_task_result_at(
     )?;
     let committed = commit_transaction(&locations.library_root, &transaction)?;
     if !matches!(committed.phase, PublishPhase::Committed) {
-        // commit_transaction returns Ok(RolledBack) when validation fails mid-flight.
-        // Surface that as a hard error so Retry does not mark the task successful.
+        // commit_transaction returns Ok(RolledBack) when validation fails
+        // mid-flight. Surface that as a hard error so Retry does not mark
+        // the task successful — and write the terminal phase into the index
+        // so the recovery sweep does not keep resurfacing a finished journal
+        // as 'prepared' forever.
+        let _ = control.record_publish_transaction(
+            &committed.transaction_id,
+            task_id,
+            &book_id,
+            "rolled_back",
+            &format!(".transactions/{}.json", task_id),
+        );
         return Err(format!(
             "PUBLISH_FAILED: transaction ended in {:?}",
             committed.phase
@@ -485,7 +485,9 @@ pub fn publish_task_result_at(
 
 #[cfg(test)]
 mod tests {
-    use super::{podcast_library_relative_path, publish_task_result_at, sanitize_podcast_folder_name};
+    use super::{
+        podcast_library_relative_path, publish_task_result_at, sanitize_podcast_folder_name,
+    };
 
     #[test]
     fn sanitizes_podcast_folder_names_for_windows() {
@@ -493,10 +495,7 @@ mod tests {
             sanitize_podcast_folder_name(r#"[商业就是这样] 349.Vol.264 把世界杯作为方法"#),
             "[商业就是这样] 349.Vol.264 把世界杯作为方法"
         );
-        assert_eq!(
-            sanitize_podcast_folder_name(r#"a/b:c*d?"#),
-            "a b c d"
-        );
+        assert_eq!(sanitize_podcast_folder_name(r#"a/b:c*d?"#), "a b c d");
         assert_eq!(sanitize_podcast_folder_name("..."), "未命名播客");
         assert_eq!(
             podcast_library_relative_path("episode", "abcdef1234567890"),
@@ -603,12 +602,14 @@ mod tests {
             snapshot,
             created_at: now,
         };
-        let mut control = ControlDb::open(&locations.data_root.join(r"App\control.db")).expect("db");
+        let mut control =
+            ControlDb::open(&locations.data_root.join(r"App\control.db")).expect("db");
         control.persist_task_event(&event).expect("persist");
         let err = publish_task_result_at(&mut control, &locations, task_id).expect_err("must fail");
         assert!(
             err.contains("PUBLISH_FAILED")
-                && (err.contains("no Markdown output") || err.contains("output directory is missing")),
+                && (err.contains("no Markdown output")
+                    || err.contains("output directory is missing")),
             "unexpected error: {err}"
         );
         drop(control);
@@ -749,7 +750,10 @@ mod tests {
             .expect("chapters array")
         {
             assert!(chapter.get("date").is_none(), "no null date");
-            assert!(chapter.get("metadataStatus").is_none(), "no null metadataStatus");
+            assert!(
+                chapter.get("metadataStatus").is_none(),
+                "no null metadataStatus"
+            );
             assert!(chapter.get("voteCount").is_some());
             assert!(chapter.get("wordCount").is_some());
         }

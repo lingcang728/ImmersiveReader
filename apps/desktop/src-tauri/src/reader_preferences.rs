@@ -102,7 +102,9 @@ pub(crate) fn load_from(path: &Path) -> Result<ReaderPreferencesLoad, String> {
     };
     if let Err(error) = validate(&preferences) {
         quarantine_corrupt(path);
-        return Err(format!("Invalid reader preferences were quarantined: {error}"));
+        return Err(format!(
+            "Invalid reader preferences were quarantined: {error}"
+        ));
     }
     Ok(ReaderPreferencesLoad {
         preferences,

@@ -82,6 +82,10 @@ pub struct CreateZhihuTaskRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ZhihuLoginStatus {
     pub logged_in: bool,
+    /// P3-2: sidecar-reported reason the last login flow failed (browser
+    /// launch failure etc.) — absent on older sidecars.
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -269,6 +273,23 @@ pub fn start_login(settings: &AppSettings) -> Result<(), String> {
     }
 }
 
+/// Blocking: one bounded (~15s) sidecar HTTP request, plus a possible sidecar
+/// launch on first use. Call only from a blocking context — never directly on
+/// the Tauri IPC event-loop thread.
+/// 06-F-01: clears every trace of the Zhihu session — DPAPI cookie file,
+/// Chromium profile, browser cache — via the authenticated sidecar endpoint.
+pub fn clear_login(settings: &AppSettings) -> Result<(), String> {
+    let response: ApiResponse<serde_json::Value> =
+        crate::tools::zhihu_post_json(settings, "/api/login/clear", &serde_json::json!({}))?;
+    if response.success {
+        Ok(())
+    } else {
+        Err(response
+            .error
+            .unwrap_or_else(|| "ZHIHU_LOGIN_CLEAR_FAILED".to_string()))
+    }
+}
+
 /// Blocking: SQLite reads/writes plus one bounded (~15s) sidecar HTTP request
 /// (and a possible sidecar launch on first use). Call only from a blocking
 /// context — never directly on the Tauri IPC event-loop thread.
@@ -291,20 +312,26 @@ pub fn start_task(
         app.emit(TASK_EVENT_NAME, event)
             .map_err(|error| error.to_string())?;
     }
-    let response: ApiResponse<serde_json::Value> =
-        match crate::tools::zhihu_post_json(
-            settings,
-            &format!("/api/tasks/{task_id}/start"),
-            &serde_json::json!({}),
-        ) {
-            Ok(response) => response,
-            Err(error) => {
-                if let Some(event) = control.rollback_starting_task(task_id)? {
-                    let _ = app.emit(TASK_EVENT_NAME, event);
-                }
-                return Err(error);
+    let response: ApiResponse<serde_json::Value> = match crate::tools::zhihu_post_json(
+        settings,
+        &format!("/api/tasks/{task_id}/start"),
+        &serde_json::json!({}),
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            if is_remote_task_gone(&error) {
+                // The remote row is gone — rolling back to Queued would
+                // leave a zombie that can never start. Converge to the
+                // terminal "remote gone" state instead.
+                mark_remote_task_gone(&mut control, task_id, Some(app))?;
+                return Err("ZHIHU_REMOTE_TASK_GONE".to_string());
             }
-        };
+            if let Some(event) = control.rollback_starting_task(task_id)? {
+                let _ = app.emit(TASK_EVENT_NAME, event);
+            }
+            return Err(error);
+        }
+    };
     if !response.success {
         if let Some(event) = control.rollback_starting_task(task_id)? {
             let _ = app.emit(TASK_EVENT_NAME, event);
@@ -373,7 +400,25 @@ pub fn control_task(
                     _ => unreachable!(),
                 };
                 let response: ApiResponse<serde_json::Value> =
-                    crate::tools::zhihu_post_json(settings, &path, &serde_json::json!({}))?;
+                    match crate::tools::zhihu_post_json(settings, &path, &serde_json::json!({})) {
+                        Ok(response) => response,
+                        Err(error) => {
+                            if !is_remote_task_gone(&error) {
+                                return Err(error);
+                            }
+                            // The remote row was deleted/rebuilt — the action
+                            // can never apply. Converge the local mirror; a
+                            // cancel is trivially satisfied (nothing left to
+                            // cancel) and returns the freshest snapshot.
+                            mark_remote_task_gone(&mut control, task_id, Some(app))?;
+                            if action == "cancel" {
+                                return control
+                                    .task_snapshot(task_id)?
+                                    .ok_or_else(|| "TASK_NOT_FOUND".to_string());
+                            }
+                            return Err("ZHIHU_REMOTE_TASK_GONE".to_string());
+                        }
+                    };
                 if !response.success {
                     return Err(response
                         .error
@@ -385,8 +430,12 @@ pub fn control_task(
                 // against the freshest revision rather than failing.
                 match persist_control_event(&mut control, task_id, action, expected_revision) {
                     Ok(event) => {
-                        app.emit(TASK_EVENT_NAME, event.clone())
-                            .map_err(|error| error.to_string())?;
+                        // Emit is best-effort: the transition already
+                        // committed — a broadcast failure must not become
+                        // the command's result (the UI poll converges).
+                        if let Err(error) = app.emit(TASK_EVENT_NAME, event.clone()) {
+                            eprintln!("Task event broadcast failed after persistence: {error}");
+                        }
                         Ok(event.snapshot)
                     }
                     Err(error)
@@ -617,6 +666,61 @@ fn remote_snapshot(remote: RemoteTask) -> TaskSnapshot {
     }
 }
 
+/// The sidecar answered but the task row no longer exists (deleted remotely,
+/// or the sidecar DB/profile was rebuilt). Unlike timeouts/5xx this is
+/// deterministic: the local mirror must converge to a terminal state instead
+/// of polling a ghost forever (previously a remote-gone task stayed
+/// Running/Paused until the user gave up).
+const REMOTE_TASK_GONE: &str = "SIDECAR_HTTP_STATUS_404";
+
+fn is_remote_task_gone(error: &str) -> bool {
+    error == REMOTE_TASK_GONE
+}
+
+/// Local mirror of a remote-gone task: terminal + interrupted, not retryable
+/// — the remote row is gone, so there is nothing left to resume or cancel;
+/// the user re-creates the task from scratch.
+fn remote_gone_snapshot(mut snapshot: TaskSnapshot) -> TaskSnapshot {
+    snapshot.lifecycle_state = LifecycleState::Terminal;
+    snapshot.outcome = TaskOutcome::Interrupted;
+    snapshot.error_code = Some(TaskErrorCode::EngineCrashed);
+    snapshot.error_message =
+        Some("知乎 sidecar 中该任务已不存在（远端记录被删除或重建）；请重新创建任务。".to_string());
+    snapshot.engine_stage = "lost".to_string();
+    snapshot.engine_status = "missing".to_string();
+    snapshot.recoverable = false;
+    snapshot.can_pause = false;
+    snapshot.can_resume = false;
+    snapshot.can_retry = false;
+    snapshot.can_cancel = false;
+    snapshot.updated_at = chrono::Utc::now().to_rfc3339();
+    snapshot
+}
+
+/// Persist the remote-gone convergence (no-op when already terminal) and emit
+/// the event so the UI reflects it immediately. Best-effort: callers still
+/// surface the original error/result afterwards.
+fn mark_remote_task_gone(
+    control: &mut ControlDb,
+    task_id: &str,
+    app: Option<&AppHandle>,
+) -> Result<(), String> {
+    let Some(current) = control.task_snapshot(task_id)? else {
+        return Ok(());
+    };
+    if current.lifecycle_state == LifecycleState::Terminal {
+        return Ok(());
+    }
+    if let Some(event) =
+        control.record_external_snapshot(remote_gone_snapshot(current), "engine_task_lost")?
+    {
+        if let Some(app) = app {
+            let _ = app.emit(TASK_EVENT_NAME, event);
+        }
+    }
+    Ok(())
+}
+
 /// Blocking single-task fetch: one bounded (~15s) sidecar HTTP request via
 /// `tools::zhihu_get_json` (which may also launch the sidecar on first use).
 /// Only call from blocking threads — poller threads and reconcile workers, or
@@ -724,7 +828,15 @@ pub fn ensure_poller(task_id: String, settings: AppSettings, app: AppHandle) {
                         break;
                     }
                 }
-                Err(_) => {
+                Err(error) => {
+                    if is_remote_task_gone(&error) {
+                        // Deterministic "remote row deleted" — converge the
+                        // local mirror to Interrupted and stop supervising.
+                        if let Ok(mut control) = ControlDb::open_current() {
+                            let _ = mark_remote_task_gone(&mut control, &task_id, Some(&app));
+                        }
+                        break;
+                    }
                     // Keep supervising; transient sidecar/network blips
                     // should not stop the loop — but a sidecar that never
                     // answers backs off exponentially and eventually trips
@@ -775,7 +887,7 @@ pub fn reconcile_active_tasks(
         // in the same control DB, so skipping this pass is safe.
         return Ok(0);
     };
-    let control = ControlDb::open_current()?;
+    let mut control = ControlDb::open_current()?;
     let tasks = control.task_snapshots(Some(TaskKind::Zhihu))?;
     let mut pending = VecDeque::new();
     for snapshot in tasks {
@@ -852,10 +964,16 @@ pub fn reconcile_active_tasks(
                     // the poller starts on next start/resume.
                 }
             }
-            Ok((_task_id, Err(_))) => {
+            Ok((task_id, Err(error))) => {
                 received += 1;
-                // Leave local state; avoid marking crashed solely because the
-                // sidecar was briefly down.
+                if is_remote_task_gone(&error) {
+                    // The remote row is gone for good — converge the local
+                    // mirror instead of leaving a zombie Running/Paused row.
+                    let _ = mark_remote_task_gone(&mut control, &task_id, app);
+                    updated = updated.saturating_add(1);
+                }
+                // Other errors leave local state; avoid marking crashed
+                // solely because the sidecar was briefly down.
             }
             Err(_) => break, // deadline elapsed or all workers exited early
         }

@@ -259,16 +259,39 @@ pub fn reconcile(root: &Path) -> Result<(), String> {
                 continue;
             }
         }
+        // Only `*.json` names are live journals — quarantined
+        // `.corrupt-*` files share the directory and must not be reparsed.
+        if !entry.file_name().to_string_lossy().ends_with(".json") {
+            continue;
+        }
         let journal: TrashJournal = match fs::read_to_string(entry.path())
             .ok()
             .and_then(|raw| serde_json::from_str::<TrashJournal>(&raw).ok())
         {
             Some(value) if value.schema_version == 1 => value,
             _ => {
-                eprintln!(
-                    "trash reconcile: skipping unreadable journal {}",
-                    entry.path().display()
-                );
+                // P-10-F19: an unreadable journal can never be applied — left
+                // in place it is retried on every pass and silently wedges its
+                // item forever. Quarantine it as evidence (rename, never
+                // delete) so the operation stops blocking and the half-done
+                // state stays diagnosable. The trash item itself still loads
+                // from its `trash-entry.json` and remains recoverable.
+                let quarantined = entry.path().with_file_name(format!(
+                    "{}.corrupt-{}",
+                    entry.file_name().to_string_lossy(),
+                    Uuid::new_v4().simple()
+                ));
+                if fs::rename(entry.path(), &quarantined).is_ok() {
+                    eprintln!(
+                        "trash reconcile: quarantined unreadable journal to {}",
+                        quarantined.display()
+                    );
+                } else {
+                    eprintln!(
+                        "trash reconcile: skipping unreadable journal {}",
+                        entry.path().display()
+                    );
+                }
                 continue;
             }
         };
@@ -395,7 +418,12 @@ pub fn list(root: &Path) -> Result<Vec<TrashItem>, String> {
     if !trash_root.exists() {
         return Ok(Vec::new());
     }
-    reconcile(root)?;
+    // P-11-F10: listing is a read path — on a read-only library `reconcile`
+    // cannot even create `.trash/.journal` and would fail the whole call.
+    // Degrade to listing what is on disk; mutating ops still reconcile first.
+    if let Err(error) = reconcile(root) {
+        eprintln!("trash list: reconcile unavailable, showing stale view: {error}");
+    }
     let trash_root = managed_trash_root(root)?;
     let mut items = Vec::new();
     for entry in fs::read_dir(trash_root).map_err(|error| error.to_string())? {

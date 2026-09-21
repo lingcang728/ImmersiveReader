@@ -54,6 +54,7 @@ fn fixture(name: &str) -> (PathBuf, StorageLocations, PodcastFilesPreview) {
         budget: PodcastBudgetPreview {
             estimated_disk_bytes: 1024,
             estimated_translation_tokens: 100,
+            estimated_polish_tokens: 0,
             estimated_api_cost_upper_cny: 0.1,
             available_disk_bytes: 2048,
             estimate_version: "test-estimate".to_string(),

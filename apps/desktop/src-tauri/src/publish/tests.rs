@@ -1,6 +1,5 @@
 use super::{
-    commit_transaction, commit_transaction_until,
-    hash_file, load_transaction, recover_transaction,
+    commit_transaction, commit_transaction_until, hash_file, load_transaction, recover_transaction,
     transaction::CrashPoint, PublishPhase, PublishTransaction,
 };
 use std::fs;
@@ -14,7 +13,13 @@ fn root(name: &str) -> PathBuf {
     path
 }
 
-fn write_book_with_identity(path: &Path, revision: u64, title: &str, book_id: &str, source_id: &str) {
+fn write_book_with_identity(
+    path: &Path,
+    revision: u64,
+    title: &str,
+    book_id: &str,
+    source_id: &str,
+) {
     fs::create_dir_all(path).expect("book directory must exist");
     fs::write(
         path.join("manifest.json"),
@@ -154,11 +159,8 @@ fn prepared_validation_failure_preserves_last_successful_book() {
     let root = root("prepared-validation-failure");
     write_book(&root.join(r"Podcast\abc"), 1, "old");
     let transaction = prepared(&root);
-    fs::write(
-        root.join(r".incoming\tx-1\manifest.json"),
-        b"not-json",
-    )
-    .expect("incoming manifest must be corruptible");
+    fs::write(root.join(r".incoming\tx-1\manifest.json"), b"not-json")
+        .expect("incoming manifest must be corruptible");
 
     let recovered = commit_transaction(&root, &transaction).expect("failure must be journaled");
     assert_eq!(recovered.phase, PublishPhase::RolledBack);
@@ -228,7 +230,10 @@ fn recovers_when_killed_between_old_move_and_journal() {
         .expect_err("crash injection must interrupt publication");
     let interrupted = load_transaction(&root, "tx-1").expect("journal must load");
     assert_eq!(interrupted.phase, PublishPhase::Prepared);
-    assert!(!root.join(r"Podcast\abc").exists(), "old book already moved");
+    assert!(
+        !root.join(r"Podcast\abc").exists(),
+        "old book already moved"
+    );
     assert!(root.join(r".revisions\podcast-abc\1").exists());
 
     let recovered = recover_transaction(&root, "tx-1").expect("recovery must succeed");
@@ -255,16 +260,21 @@ fn rollback_quarantines_an_unvalidated_final_instead_of_deadlocking() {
     .expect_err("crash injection must interrupt publication");
     // Simulate foreign/corrupt content landing at final while incoming vanishes.
     fs::remove_dir_all(root.join(r".incoming\tx-1")).expect("incoming removable");
-    write_book_with_identity(&root.join(r"Podcast\abc"), 9, "foreign", "podcast:zzz", "zzz");
+    write_book_with_identity(
+        &root.join(r"Podcast\abc"),
+        9,
+        "foreign",
+        "podcast:zzz",
+        "zzz",
+    );
 
     let recovered = recover_transaction(&root, "tx-1").expect("recovery must roll back");
     assert_eq!(recovered.phase, PublishPhase::RolledBack);
     let manifest = fs::read_to_string(root.join(r"Podcast\abc\manifest.json"))
         .expect("old manifest must be restored");
     assert!(manifest.contains(r#""title":"old""#));
-    let quarantined =
-        fs::read_to_string(root.join(r".incoming\failed-tx-1\manifest.json"))
-            .expect("foreign final must be quarantined, not destroyed");
+    let quarantined = fs::read_to_string(root.join(r".incoming\failed-tx-1\manifest.json"))
+        .expect("foreign final must be quarantined, not destroyed");
     assert!(quarantined.contains(r#""title":"foreign""#));
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
@@ -291,21 +301,34 @@ fn rollback_without_any_archive_still_converges() {
 }
 
 #[test]
-fn rejects_a_republish_whose_archive_slot_is_occupied() {
-    // The protective error stays: a fresh Prepared transaction may not
-    // silently overwrite an already-archived rollback directory. Callers that
-    // legitimately retry pick a free archive slot (podcast publish does).
+fn republish_with_occupied_archive_slot_relocates_instead_of_overwriting() {
+    // The protective rule moved from "reject" to "relocate": an occupied
+    // rollback slot may hold a genuine archive from a previous crashed
+    // attempt — it is never overwritten. The old final parks in a free
+    // `-recover<N>` sibling (journaled BEFORE the rename) and the publish
+    // still commits.
     let root = root("rollback-occupied");
     write_book(&root.join(r"Podcast\abc"), 1, "old");
     write_book(&root.join(r".revisions\podcast-abc\1"), 0, "archived");
     let transaction = prepared(&root);
 
-    let error = commit_transaction(&root, &transaction)
-        .expect_err("occupied rollback path must be rejected");
-    assert!(error.contains("rollback path already exists"));
-    let manifest = fs::read_to_string(root.join(r"Podcast\abc\manifest.json"))
-        .expect("existing final must be untouched");
-    assert!(manifest.contains(r#""title":"old""#));
+    let committed = commit_transaction(&root, &transaction)
+        .expect("occupied rollback slot must relocate, not reject");
+    assert_eq!(committed.phase, PublishPhase::Committed);
+    assert_eq!(
+        committed.rollback_relative_path, ".revisions/podcast-abc/1-recover1",
+        "journal must record the relocated archive slot"
+    );
+    let archived = fs::read_to_string(root.join(r".revisions\podcast-abc\1\manifest.json"))
+        .expect("occupied archive must be untouched");
+    assert!(archived.contains(r#""title":"archived""#));
+    let relocated =
+        fs::read_to_string(root.join(r".revisions\podcast-abc\1-recover1\manifest.json"))
+            .expect("old final must park in the recover slot");
+    assert!(relocated.contains(r#""title":"old""#));
+    let live = fs::read_to_string(root.join(r"Podcast\abc\manifest.json"))
+        .expect("new final must be committed");
+    assert!(live.contains(r#""title":"new""#));
     fs::remove_dir_all(root).expect("fixture must be removed");
 }
 

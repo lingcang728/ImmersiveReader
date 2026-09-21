@@ -44,10 +44,38 @@ fn execute<T: DeserializeOwned + Serialize>(
             Ok(result)
         }
         Err(error_code) => {
-            control.complete_command(request_id, "{}", Some(&error_code), None)?;
+            // P-11-F15: only deterministic request-shape errors are cached as
+            // the claim's terminal result — the same request would fail the
+            // same way, so replay is honest. Transient/environment failures
+            // (IO, locking, half-finished journals) release the claim so an
+            // immediate retry re-executes; restore/permanent_delete are
+            // idempotent under reconcile() so re-execution is safe.
+            if is_deterministic_trash_error(&error_code) {
+                control.complete_command(request_id, "{}", Some(&error_code), None)?;
+            } else {
+                control.release_command(request_id)?;
+            }
             Err(error_code)
         }
     }
+}
+
+/// Errors that depend only on the request's shape, not on the environment —
+/// the only ones safe to cache for idempotent replay. `CONFLICT` is
+/// deliberately absent: it reports the *destination* already exists, which is
+/// external filesystem state the user can clear by hand — caching it would
+/// wedge the restore for the whole retention window (the original P1). Raw
+/// IO error strings (file locks, AV scans) are likewise never in this list.
+fn is_deterministic_trash_error(error: &str) -> bool {
+    matches!(
+        error,
+        "INVALID_ARGUMENT"
+            | "NOT_FOUND"
+            | "REVISION_CONFLICT"
+            | "PATH_OUTSIDE_MANAGED_ROOT"
+            | "INVALID_TRASH_ENTRY"
+            | "INVALID_TRASH_JOURNAL"
+    )
 }
 
 pub fn restore_idempotent(

@@ -150,7 +150,11 @@ fn execute_claimed_settings_migration(
         .map_err(|error| fail("MIGRATION_FAILED", error.to_string()))?;
     let original =
         fs::read(&legacy.settings).map_err(|error| fail("MIGRATION_FAILED", error.to_string()))?;
-    fs::write(&rollback, &original)
+    // P-11-F12: the rollback copy is recovery evidence — a torn write would
+    // look like a usable backup yet silently lose the pre-migration
+    // settings. Write it through the same temp+fsync+replace path as every
+    // other durable file.
+    crate::atomic_file::write(&rollback, &original)
         .map_err(|error| fail("MIGRATION_FAILED", error.to_string()))?;
     let source_version =
         source_schema(&legacy.settings).map_err(|error| fail("MIGRATION_FAILED", error))?;
@@ -213,8 +217,8 @@ fn execute_claimed_settings_migration(
         receipt_path: receipt_path.to_string_lossy().into_owned(),
         completed_kinds: vec!["app_settings".to_string()],
     };
-    let result_json =
-        serde_json::to_string(&result).map_err(|error| fail("MIGRATION_FAILED", error.to_string()))?;
+    let result_json = serde_json::to_string(&result)
+        .map_err(|error| fail("MIGRATION_FAILED", error.to_string()))?;
     control
         .complete_migration_run(
             &migration_id,
@@ -243,15 +247,38 @@ pub fn execute_settings_migration(
     // and every retry replays COMMAND_IN_PROGRESS.
     match execute_claimed_settings_migration(&control, legacy, target, preview_id) {
         Ok(result) => {
-            let result_json =
-                serde_json::to_string(&result).map_err(|error| error.to_string())?;
+            let result_json = serde_json::to_string(&result).map_err(|error| error.to_string())?;
             control.complete_command(request_id, &result_json, None, None)?;
             Ok(result)
         }
         Err((code, detail)) => {
-            let failure = serde_json::json!({ "error": detail }).to_string();
-            control.complete_command(request_id, &failure, Some(&code), None)?;
+            // P-11-F15: only deterministic request-shape errors are cached —
+            // replaying MIGRATION_CONFLICT/PREVIEW_STALE for the same request
+            // is honest because the same request would fail the same way.
+            // MIGRATION_FAILED wraps environment/IO errors: caching it would
+            // poison request_id forever even though the migration may have
+            // run halfway. Release the claim instead — re-execution is safe
+            // because the preview gate and settings_already_migrated() make
+            // a retry converge on the same outcome.
+            if is_deterministic_migration_error(&code) {
+                let failure = serde_json::json!({ "error": detail }).to_string();
+                control.complete_command(request_id, &failure, Some(&code), None)?;
+            } else {
+                control.release_command(request_id)?;
+            }
             Err(code)
         }
     }
+}
+
+/// Errors that depend only on the request's shape, not on the environment —
+/// the only ones safe to cache for idempotent replay.
+fn is_deterministic_migration_error(code: &str) -> bool {
+    matches!(
+        code,
+        "INVALID_ARGUMENT"
+            | "MIGRATION_PREVIEW_STALE"
+            | "MIGRATION_CONFLICT"
+            | "MIGRATION_SOURCE_MISSING"
+    )
 }

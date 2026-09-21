@@ -42,6 +42,16 @@ fn same_or_descendant(candidate: &str, root: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('\\'))
 }
 
+/// Canonical-prefix containment for command arguments: true when `path`
+/// resolves to `root` itself or a descendant. Unlike a bare
+/// `Path::starts_with` this canonicalizes the deepest existing prefix first,
+/// so a symlink/junction in the tail cannot fake containment.
+pub(crate) fn path_within(root: &Path, path: &Path) -> bool {
+    let resolved = canonicalize_for_comparison(path);
+    let resolved_root = canonicalize_for_comparison(root);
+    resolved.starts_with(&resolved_root)
+}
+
 pub fn validate_library_root(
     candidate: &Path,
     locations: &StorageLocations,

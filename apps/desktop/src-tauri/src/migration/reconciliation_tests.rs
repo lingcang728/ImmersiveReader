@@ -2,7 +2,6 @@ use super::reconcile_zhihu_archive;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -19,16 +18,8 @@ fn root() -> PathBuf {
 }
 
 fn sqlite(database: &Path, sql: &str) {
-    let output = Command::new("sqlite3")
-        .arg(database)
-        .arg(sql)
-        .output()
-        .expect("installed sqlite3 must start");
-    assert!(
-        output.status.success(),
-        "sqlite failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let connection = rusqlite::Connection::open(database).expect("fixture db must open");
+    connection.execute_batch(sql).expect("fixture sql must run");
 }
 
 #[test]
@@ -60,8 +51,7 @@ fn reconciliation_classifies_every_non_destructive_conflict() {
         "#,
     );
 
-    let report = reconcile_zhihu_archive(Path::new("sqlite3"), &database, &output)
-        .expect("reconciliation must succeed");
+    let report = reconcile_zhihu_archive(&database, &output).expect("reconciliation must succeed");
     let kinds = report
         .issues
         .iter()
@@ -106,8 +96,8 @@ fn reconciliation_prefers_archive_catalog_and_ignores_generated_index() {
         "#,
     );
 
-    let report = reconcile_zhihu_archive(Path::new("sqlite3"), &database, &output)
-        .expect("archive reconciliation must succeed");
+    let report =
+        reconcile_zhihu_archive(&database, &output).expect("archive reconciliation must succeed");
 
     assert_eq!(report.database_success_rows, 1);
     assert_eq!(report.markdown_files, 1);

@@ -376,9 +376,7 @@ mod tests {
         let mut process = manager.processes.remove("zhihu").expect("process exists");
         process.child.kill().expect("child must be killable");
         let _ = process.child.wait();
-        manager
-            .processes
-            .insert("zhihu".to_string(), process);
+        manager.processes.insert("zhihu".to_string(), process);
 
         assert_eq!(
             manager.begin_launch("zhihu").expect("claim must load"),

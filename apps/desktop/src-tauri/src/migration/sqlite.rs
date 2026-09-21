@@ -1,71 +1,15 @@
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// P3-26: bound one external sqlite3 invocation — `.output()` had no
-/// timeout, so a hung child blocked the whole migration forever. On timeout
-/// the child is killed and reaped.
-const SQLITE_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
-/// Pipe drains stop after this many bytes — a runaway child spamming stdout
-/// can never grow the buffer without bound.
-const SQLITE_OUTPUT_CAP: u64 = 4 * 1024 * 1024;
-
-fn spawn_drain(stream: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut buffer = Vec::new();
-        if let Some(stream) = stream {
-            let _ = stream.take(SQLITE_OUTPUT_CAP).read_to_end(&mut buffer);
-        }
-        buffer
-    })
-}
-
-/// Spawn `command` with piped stdout/stderr, drain both on threads (a child
-/// writing past the pipe buffer cannot deadlock the exit poll), and bound
-/// the wait by [`SQLITE_COMMAND_TIMEOUT`]. `pub(super)` so
-/// `reconciliation.rs` shares the same bound for its sqlite3 calls.
-pub(super) fn run_bounded(command: &mut Command) -> Result<Output, String> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("SQLite executable failed to start: {error}"))?;
-    let stdout_reader = spawn_drain(child.stdout.take());
-    let stderr_reader = spawn_drain(child.stderr.take());
-    let deadline = Instant::now() + SQLITE_COMMAND_TIMEOUT;
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(25));
-            }
-            Ok(None) => {
-                timed_out = true;
-                let _ = child.kill();
-                break child.wait().map_err(|error| error.to_string());
-            }
-            Err(error) => break Err(format!("SQLite wait failed: {error}")),
-        }
-    };
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
-    if timed_out {
-        return Err("SQLITE_COMMAND_TIMEOUT".to_string());
-    }
-    let status = status?;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
+/// P-11-F04: migration no longer shells out to a `sqlite3` CLI found on
+/// PATH — bundled rusqlite runs the same checks in-process. `busy_timeout`
+/// bounds every lock wait; there is no child process to hang or to inject
+/// arguments into.
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,27 +31,12 @@ pub struct MigrationReceipt {
     pub error_code: Option<String>,
 }
 
-fn sqlite(executable: &Path, database: &Path, sql: &str) -> Result<String, String> {
-    let mut command = Command::new(executable);
-    command
-        .arg("-batch")
-        .arg("-noheader")
-        .arg(database)
-        .arg(sql);
-    let output = run_bounded(&mut command)?;
-    if !output.status.success() {
-        return Err(format!(
-            "SQLite command failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    String::from_utf8(output.stdout)
-        .map(|value| value.trim().to_string())
-        .map_err(|error| format!("SQLite output was not UTF-8: {error}"))
-}
-
-fn sqlite_string(value: &Path) -> String {
-    value.to_string_lossy().replace('\'', "''")
+fn open_checked(database: &Path) -> Result<Connection, String> {
+    let connection = Connection::open(database).map_err(|error| error.to_string())?;
+    connection
+        .busy_timeout(SQLITE_BUSY_TIMEOUT)
+        .map_err(|error| error.to_string())?;
+    Ok(connection)
 }
 
 fn source_files(source: &Path) -> Vec<PathBuf> {
@@ -121,57 +50,74 @@ fn source_files(source: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn copy_rollback(source: &Path, rollback: &Path) -> Result<Vec<PathBuf>, String> {
-    fs::create_dir_all(rollback).map_err(|error| error.to_string())?;
+fn copy_set(source: &Path, directory: &Path) -> Result<Vec<PathBuf>, String> {
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     let paths = source_files(source);
     for path in &paths {
         let name = path
             .file_name()
             .ok_or_else(|| "SQLite source has no file name".to_string())?;
-        fs::copy(path, rollback.join(name)).map_err(|error| error.to_string())?;
+        // P-11-F12: copies are recovery evidence and migration input — flush
+        // them so a crash cannot leave a zero-filled file under a valid name.
+        crate::atomic_file::copy_file_synced(path, &directory.join(name))
+            .map_err(|error| error.to_string())?;
     }
     Ok(paths)
 }
 
-fn integrity(executable: &Path, database: &Path) -> Result<(), String> {
-    let result = sqlite(executable, database, "PRAGMA integrity_check;")?;
+fn integrity(connection: &Connection) -> Result<(), String> {
+    let result: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
     if result != "ok" {
         return Err(format!("SQLite integrity check failed: {result}"));
     }
-    let foreign_keys = sqlite(executable, database, "PRAGMA foreign_key_check;")?;
-    if !foreign_keys.is_empty() {
-        return Err(format!("SQLite foreign key check failed: {foreign_keys}"));
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement.query([]).map_err(|error| error.to_string())?;
+    if let Some(row) = rows.next().map_err(|error| error.to_string())? {
+        let detail = (0..row.as_ref().column_count())
+            .map(|index| row.get::<_, String>(index).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("|");
+        return Err(format!("SQLite foreign key check failed: {detail}"));
     }
     Ok(())
 }
 
-fn schema_version(executable: &Path, database: &Path) -> Result<u32, String> {
-    sqlite(executable, database, "PRAGMA user_version;")?
-        .parse::<u32>()
-        .map_err(|error| format!("Invalid SQLite user_version: {error}"))
+fn schema_version(connection: &Connection) -> Result<u32, String> {
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+        .map_err(|error| error.to_string())
 }
 
-fn table_counts(executable: &Path, database: &Path) -> Result<BTreeMap<String, u64>, String> {
-    let names = sqlite(
-        executable,
-        database,
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;",
-    )?;
-    names
-        .lines()
-        .filter(|name| !name.is_empty())
-        .map(|name| {
-            let quoted = name.replace('"', "\"\"");
-            let count = sqlite(
-                executable,
-                database,
-                &format!("SELECT COUNT(*) FROM \"{quoted}\";"),
-            )?
-            .parse::<u64>()
-            .map_err(|error| format!("Invalid row count for {name}: {error}"))?;
-            Ok((name.to_string(), count))
-        })
-        .collect()
+fn table_counts(connection: &Connection) -> Result<BTreeMap<String, u64>, String> {
+    let names = {
+        let mut statement = connection
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .map_err(|error| error.to_string())?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        names
+    };
+    let mut counts = BTreeMap::new();
+    for name in names {
+        let quoted = name.replace('"', "\"\"");
+        // SQLite integers are i64 — rusqlite has no FromSql for u64.
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        counts.insert(name, u64::try_from(count).unwrap_or(0));
+    }
+    Ok(counts)
 }
 
 fn write_receipt(path: &Path, receipt: &MigrationReceipt) -> Result<(), String> {
@@ -218,7 +164,6 @@ fn initial_receipt(
 }
 
 fn execute(
-    executable: &Path,
     source: &Path,
     target: &Path,
     rollback: &Path,
@@ -231,7 +176,7 @@ fn execute(
     if target.exists() {
         return Err("SQLite target database already exists".to_string());
     }
-    let copied = copy_rollback(source, rollback)?;
+    let copied = copy_set(source, rollback)?;
     receipt.source_paths = copied
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
@@ -242,42 +187,76 @@ fn execute(
             .insert("sourceDatabaseSha256".to_string(), hash);
     }
     write_receipt(receipt_path, receipt)?;
-    // P3-26: no wal_checkpoint on the source — TRUNCATE mutates the very
-    // database this migration is only supposed to read. integrity_check and
-    // VACUUM INTO already see through the WAL, so the source stays read-only.
-    integrity(executable, source)?;
-    receipt.source_schema_version = schema_version(executable, source)?;
-    receipt.table_counts_before = table_counts(executable, source)?;
     let parent = target
         .parent()
         .ok_or_else(|| "SQLite target has no parent".to_string())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let temporary = target.with_extension(format!("migration.{}.db", uuid::Uuid::new_v4()));
-    let vacuum = format!("VACUUM INTO '{}';", sqlite_string(&temporary));
-    if let Err(error) = sqlite(executable, source, &vacuum) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    let verified = (|| {
-        integrity(executable, &temporary)?;
-        receipt.target_schema_version = schema_version(executable, &temporary)?;
-        receipt.table_counts_after = table_counts(executable, &temporary)?;
-        if receipt.source_schema_version != receipt.target_schema_version
-            || receipt.table_counts_before != receipt.table_counts_after
-        {
-            return Err("SQLite target schema or row counts differ".to_string());
+
+    // P-11-F06/F-07: SQLite never opens the source file itself. A source in
+    // WAL mode can carry live or stale -wal/-shm sidecars — opening it
+    // directly would replay (and possibly checkpoint on close) against the
+    // file this migration promised to leave read-only. Instead the
+    // db+wal+shm set is copied into a private work dir; SQLite's own WAL
+    // recovery runs on the COPY (salt/checksum validation ignores torn or
+    // stale frames), and VACUUM INTO consolidates the result. The source is
+    // only ever touched by fs::copy.
+    let work_root = parent.join(format!("migration-work-{}", uuid::Uuid::new_v4()));
+    let outcome = (|| -> Result<(), String> {
+        copy_set(source, &work_root)?;
+        let work_name = source
+            .file_name()
+            .ok_or_else(|| "SQLite source has no file name".to_string())?;
+        let work_db = work_root.join(work_name);
+        let work = open_checked(&work_db)?;
+        integrity(&work)?;
+        receipt.source_schema_version = schema_version(&work)?;
+        receipt.table_counts_before = table_counts(&work)?;
+        let temporary = target.with_extension(format!("migration.{}.db", uuid::Uuid::new_v4()));
+        work.execute("VACUUM INTO ?1", [temporary.to_string_lossy().as_ref()])
+            .map_err(|error| error.to_string())?;
+        drop(work);
+        let verified = (|| {
+            let check = open_checked(&temporary)?;
+            integrity(&check)?;
+            receipt.target_schema_version = schema_version(&check)?;
+            receipt.table_counts_after = table_counts(&check)?;
+            drop(check);
+            if receipt.source_schema_version != receipt.target_schema_version
+                || receipt.table_counts_before != receipt.table_counts_after
+            {
+                return Err("SQLite target schema or row counts differ".to_string());
+            }
+            // P-11-F07: re-check the commit point — the early `target.exists()`
+            // gate ran before VACUUM, and a stale `-wal`/`-shm`/`‑journal`
+            // sibling left by a deleted same-name database would be replayed
+            // against the fresh file on first open (silent corruption).
+            if target.exists() {
+                return Err("SQLite target database already exists".to_string());
+            }
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let mut name = target.as_os_str().to_os_string();
+                name.push(suffix);
+                if Path::new(&name).exists() {
+                    return Err(format!(
+                        "SQLite target has a stale {suffix} sidecar — remove it before migrating"
+                    ));
+                }
+            }
+            fs::rename(&temporary, target).map_err(|error| error.to_string())?;
+            Ok(())
+        })();
+        if verified.is_err() {
+            let _ = fs::remove_file(&temporary);
         }
-        fs::rename(&temporary, target).map_err(|error| error.to_string())?;
-        Ok(())
+        verified
     })();
-    if verified.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    verified
+    // The work copy is scratch space — always remove it; the pristine set in
+    // `rollback` remains the recovery evidence.
+    let _ = fs::remove_dir_all(&work_root);
+    outcome
 }
 
 pub fn migrate_sqlite_verified(
-    executable: &Path,
     source: &Path,
     target: &Path,
     rollback: &Path,
@@ -285,14 +264,7 @@ pub fn migrate_sqlite_verified(
     executor_version: &str,
 ) -> Result<MigrationReceipt, String> {
     let mut receipt = initial_receipt(source, target, rollback, receipt_path, executor_version);
-    match execute(
-        executable,
-        source,
-        target,
-        rollback,
-        receipt_path,
-        &mut receipt,
-    ) {
+    match execute(source, target, rollback, receipt_path, &mut receipt) {
         Ok(()) => {
             receipt.status = "success".to_string();
             receipt.error_code = None;

@@ -68,6 +68,8 @@ fn preview_is_read_only_deterministic_and_marks_sensitive_profile() {
         .expect("recent-files must be listed");
     assert!(recent_files.exists);
     assert!(!recent_files.sensitive);
-    assert!(recent_files.target_path.ends_with(r"Target\Settings\recent-files.json"));
+    assert!(recent_files
+        .target_path
+        .ends_with(r"Target\Settings\recent-files.json"));
     fs::remove_dir_all(root).expect("fixture must be removed");
 }

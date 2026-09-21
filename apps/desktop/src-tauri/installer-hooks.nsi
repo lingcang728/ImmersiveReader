@@ -36,4 +36,21 @@
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\App Paths\immersive-reader.exe"
   DeleteRegKey HKCU "Software\ImmersiveReader"
   DeleteRegValue HKCU "Software\RegisteredApplications" "沉浸阅读"
+
+  ; 06-F-09: opt-in full data removal. Silent uninstalls (/S) and the default
+  ; button keep everything — destructive cleanup is always an explicit user
+  ; choice, never a silent default. Covers both channels: %LOCALAPPDATA%
+  ; ImmersiveReader(+QA) app roots, the roaming settings dir, the Documents
+  ; library roots, and the Credential Manager secrets.
+  IfSilent immersive_keep_user_data
+  MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "是否同时删除沉浸阅读的全部本机数据？$\r$\n$\r$\n包括：书库文稿（Documents\沉浸阅读）、设置、任务记录、缓存、知乎登录档案，以及已保存的 DeepSeek API Key。$\r$\n$\r$\n选「否」保留全部数据。" /SD IDNO IDNO immersive_keep_user_data
+  ; YES falls through here.
+  RMDir /r "$LOCALAPPDATA\ImmersiveReader"
+  RMDir /r "$LOCALAPPDATA\ImmersiveReader-QA"
+  RMDir /r "$APPDATA\immersive-reader"
+  RMDir /r "$DOCUMENTS\沉浸阅读"
+  RMDir /r "$DOCUMENTS\Codex\ImmersiveReader-QA"
+  ExecWait 'cmdkey.exe /delete:com.lingcang.immersivereading/deepseek-api-key'
+  ExecWait 'cmdkey.exe /delete:com.lingcang.immersivereading.qa/deepseek-api-key'
+immersive_keep_user_data:
 !macroend

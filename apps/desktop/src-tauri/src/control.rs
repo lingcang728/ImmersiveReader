@@ -73,6 +73,21 @@ pub struct ControlDb {
     /// databases at the current `user_version` skip it entirely instead of
     /// re-executing every `CREATE TABLE IF NOT EXISTS` on each open.
     schema_bootstrap_ran: bool,
+    /// P-10-F6: true when this `open` had to quarantine a corrupt control.db
+    /// and rebuild an empty schema — the caller must surface the recovery to
+    /// the user instead of silently presenting an empty task list.
+    recovered_from_corruption: bool,
+}
+
+/// Outcome of the version-gated schema bootstrap inside `open_inner`.
+enum SchemaBootstrap {
+    /// DDL batch ran — schema was missing or behind CONTROL_SCHEMA_VERSION.
+    Ran,
+    /// Database already at the current version — nothing was written.
+    Current,
+    /// Database stamped by a NEWER build — refusing to open rather than
+    /// sharing a schema this build does not understand (P-10-F8).
+    TooNew(i64),
 }
 
 /// P2-12/P3-25: schema bootstrap runs only while `PRAGMA user_version` is
@@ -86,12 +101,26 @@ pub struct ControlDb {
 /// Version history: 1 = initial control schema. 2 = drop `cache_leases`,
 /// which was created but never written or read — the live cache-lease store
 /// is the per-task `recovery.json` under `Data\Podcast\Tasks` (`cache.rs`).
-const CONTROL_SCHEMA_VERSION: i64 = 2;
+pub(crate) const CONTROL_SCHEMA_VERSION: i64 = 2;
 
 /// P3-25: retention maintenance runs at most once per process — lazily from
 /// `ControlDb::open_current` (so it always runs in the app) or explicitly via
 /// `control::run_maintenance`, whichever happens first.
 static MAINTENANCE_RAN: AtomicBool = AtomicBool::new(false);
+
+/// P-10-F6: process-wide one-shot flag — set when a corrupt control.db was
+/// quarantined and an empty schema rebuilt. `open_current` callers drop their
+/// instance right away, so the per-instance `recovered_from_corruption` flag
+/// could never reach the UI; this flag persists until the notice command
+/// consumes it.
+static CONTROL_DB_RECOVERY_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// True exactly once per corruption recovery — the UI polls this at startup
+/// to surface "task history was rebuilt empty" instead of silently showing
+/// an empty list.
+pub(crate) fn take_recovery_pending() -> bool {
+    CONTROL_DB_RECOVERY_PENDING.swap(false, Ordering::SeqCst)
+}
 
 /// P3-25: settled control rows are retained 30 days — long enough to replay
 /// a retried command or audit a finished migration/publish, short enough
@@ -233,7 +262,62 @@ fn quarantine_corrupt_database(path: &Path) -> Result<(), String> {
             ));
         }
     }
+    prune_corrupt_backups(path, CORRUPT_BACKUP_GROUPS_KEPT);
     Ok(())
+}
+
+/// P-10-F6(b): `*.corrupt-<epoch>` quarantine files are forensic evidence,
+/// not a growth channel — keep only the newest few sets.
+const CORRUPT_BACKUP_GROUPS_KEPT: usize = 5;
+
+/// 16-F7: per-task event history keeps the newest N rows plus the very first
+/// one. The readers (`lib.rs` restart/create paths) only ever fetch the
+/// latest event, so the truncated middle is diagnostic detail, not data.
+const TASK_EVENT_KEEP_LATEST: i64 = 500;
+
+/// Group `control.db.corrupt-<epoch>[-N]` and `control.db-wal/-shm.corrupt-<epoch>`
+/// siblings by their epoch and drop all but the newest `keep` groups.
+fn prune_corrupt_backups(db_path: &Path, keep: usize) {
+    let Some(dir) = db_path.parent() else {
+        return;
+    };
+    let Some(stem) = db_path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    let mut groups: std::collections::BTreeMap<u64, Vec<PathBuf>> =
+        std::collections::BTreeMap::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(stem) {
+            continue;
+        }
+        let Some(pos) = name.find(".corrupt-") else {
+            continue;
+        };
+        let digits: String = name[pos + ".corrupt-".len()..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        let Ok(epoch) = digits.parse::<u64>() else {
+            continue;
+        };
+        groups.entry(epoch).or_default().push(entry.path());
+    }
+    // BTreeMap iterates oldest-first: drop leading groups until `keep` remain.
+    while groups.len() > keep {
+        if let Some((_, files)) = groups.pop_first() {
+            for file in files {
+                let _ = fs::remove_file(file);
+            }
+        }
+    }
 }
 
 /// Repair podcast tasks that were interrupted before a task contract existed.
@@ -296,12 +380,41 @@ impl ControlDb {
             .parent()
             .ok_or_else(|| "Control database has no parent directory".to_string())?;
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        // P-10-F7: `restore_state_backup` parks the live set, then renames a
+        // staged `control.db.restore-*` sibling into place. A crash in that
+        // window leaves the db missing but the stage intact — pick it up
+        // here instead of rebuilding empty over a recoverable database.
+        if !path.exists() {
+            let stage_prefix = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| format!("{name}.restore-"));
+            if let (Some(stage_prefix), Ok(entries)) = (stage_prefix, fs::read_dir(parent)) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else { continue };
+                    if name.starts_with(&stage_prefix) {
+                        if let Err(error) = fs::rename(entry.path(), path) {
+                            eprintln!("restore pickup failed for {name}: {error}");
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         let connection = match Connection::open(path) {
             Ok(connection) => connection,
             Err(error) => {
                 if quarantine_corrupt && is_corrupt_database(&error) {
                     quarantine_corrupt_database(path)?;
-                    return Self::open_inner(path, false);
+                    let mut rebuilt = Self::open_inner(path, false)?;
+                    rebuilt.recovered_from_corruption = true;
+                    CONTROL_DB_RECOVERY_PENDING.store(true, Ordering::SeqCst);
+                    crate::storage::app_log(
+                        "control",
+                        "control.db was corrupt; quarantined and rebuilt empty (task history unrecoverable)",
+                    );
+                    return Ok(rebuilt);
                 }
                 return Err(error.to_string());
             }
@@ -394,10 +507,18 @@ impl ControlDb {
                 "#;
         let mut last_lock_error = None;
         for attempt in 0..=8 {
-            let bootstrap = (|| -> Result<bool, SqliteError> {
+            let bootstrap = (|| -> Result<SchemaBootstrap, SqliteError> {
                 connection.execute_batch(preamble)?;
                 let version: i64 =
                     connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                // P-10-F8: a database stamped by a NEWER build carries a
+                // schema this build does not understand — sharing it could
+                // write rows the newer build considers malformed, and the old
+                // "never downgrades" comment meant the schema batch was merely
+                // skipped while reads/writes still ran. Refuse to open.
+                if version > CONTROL_SCHEMA_VERSION {
+                    return Ok(SchemaBootstrap::TooNew(version));
+                }
                 // Sentinel check covers a database whose version was stamped
                 // without the full schema (interrupted bootstrap, hand edit).
                 let schema_missing: bool = connection.query_row(
@@ -414,15 +535,21 @@ impl ControlDb {
                     connection.execute_batch(&format!(
                         "PRAGMA user_version = {CONTROL_SCHEMA_VERSION}"
                     ))?;
-                    return Ok(true);
+                    return Ok(SchemaBootstrap::Ran);
                 }
-                Ok(false)
+                Ok(SchemaBootstrap::Current)
             })();
             match bootstrap {
-                Ok(schema_bootstrap_ran) => {
+                Ok(SchemaBootstrap::TooNew(version)) => {
+                    return Err(format!(
+                        "CONTROL_SCHEMA_TOO_NEW: control.db is schema {version}, newer than this build's {CONTROL_SCHEMA_VERSION} — update the app instead of opening it"
+                    ));
+                }
+                Ok(schema_bootstrap) => {
                     return Ok(Self {
                         connection,
-                        schema_bootstrap_ran,
+                        schema_bootstrap_ran: matches!(schema_bootstrap, SchemaBootstrap::Ran),
+                        recovered_from_corruption: false,
                     })
                 }
                 Err(error) if is_retryable_initialization_lock(&error) && attempt < 8 => {
@@ -436,7 +563,14 @@ impl ControlDb {
                     if quarantine_corrupt && is_corrupt_database(&error) {
                         drop(connection);
                         quarantine_corrupt_database(path)?;
-                        return Self::open_inner(path, false);
+                        let mut rebuilt = Self::open_inner(path, false)?;
+                        rebuilt.recovered_from_corruption = true;
+                        CONTROL_DB_RECOVERY_PENDING.store(true, Ordering::SeqCst);
+                        crate::storage::app_log(
+                            "control",
+                            "control.db was corrupt; quarantined and rebuilt empty (task history unrecoverable)",
+                        );
+                        return Ok(rebuilt);
                     }
                     return Err(error.to_string());
                 }
@@ -449,6 +583,13 @@ impl ControlDb {
     /// `false` on a routine open of an already-current database.
     pub fn schema_bootstrap_ran(&self) -> bool {
         self.schema_bootstrap_ran
+    }
+
+    /// P-10-F6: true when this `open` had to quarantine a corrupt control.db
+    /// and rebuild an empty schema. Callers should surface this — the task
+    /// list is empty because recovery happened, not because there is nothing.
+    pub fn recovered_from_corruption(&self) -> bool {
+        self.recovered_from_corruption
     }
 
     /// P2-9/P2-10: the whole claim decision runs inside one IMMEDIATE
@@ -541,15 +682,19 @@ impl ControlDb {
 
     /// Requeue a terminal task so the engine start path (which requires
     /// Queued) can run it again. Only `can_retry` terminal tasks may requeue —
-    /// cancelled tasks stay cancelled.
-    pub fn requeue_terminal_task(
-        &mut self,
-        task_id: &str,
-    ) -> Result<Option<TaskEvent>, String> {
+    /// and for Zhihu a *cancelled* task never qualifies: the sidecar already
+    /// dropped it, so requeueing would strand the row in Queued after the
+    /// remote start fails and rolls back (P3 limbo state). A cancelled
+    /// *podcast* task stays retryable — its cache lease is kept precisely so
+    /// the resume path can reuse it.
+    pub fn requeue_terminal_task(&mut self, task_id: &str) -> Result<Option<TaskEvent>, String> {
         let Some(mut snapshot) = self.task_snapshot(task_id)? else {
             return Err("TASK_NOT_FOUND".to_string());
         };
-        if snapshot.lifecycle_state != LifecycleState::Terminal || !snapshot.can_retry {
+        if snapshot.lifecycle_state != LifecycleState::Terminal
+            || !snapshot.can_retry
+            || (snapshot.kind == TaskKind::Zhihu && snapshot.outcome == TaskOutcome::Cancelled)
+        {
             return Ok(None);
         }
         let now = chrono::Utc::now().to_rfc3339();
@@ -569,8 +714,16 @@ impl ControlDb {
         snapshot.retry_after_seconds = None;
         snapshot.engine_stage = "queued".to_string();
         snapshot.engine_status = "waiting".to_string();
-        snapshot.progress.mode = crate::tasks::ProgressMode::Indeterminate;
-        snapshot.progress.percent = None;
+        snapshot.progress = crate::tasks::TaskProgress {
+            mode: crate::tasks::ProgressMode::Indeterminate,
+            percent: None,
+            completed_units: None,
+            total_units: None,
+            label: Some("等待续跑".to_string()),
+            unit: None,
+            source_total_units: None,
+            skipped_units: None,
+        };
         snapshot.can_pause = false;
         snapshot.can_resume = false;
         snapshot.can_retry = false;
@@ -589,6 +742,11 @@ impl ControlDb {
         Ok(Some(event))
     }
 
+    /// Settle an in-progress claim. `completed_at IS NULL` makes the write
+    /// first-wins: when an abandoned claim is reclaimed by a retry while the
+    /// original caller is still alive, both may execute the command body
+    /// concurrently (F4) — but only the FIRST settle lands; the stale holder's
+    /// later write can never overwrite a recorded result.
     pub fn complete_command(
         &self,
         request_id: &str,
@@ -599,7 +757,7 @@ impl ControlDb {
         let changed = self
             .connection
             .execute(
-                "UPDATE command_results SET completed_at = ?2, result_json = ?3, error_code = ?4, resulting_revision = ?5 WHERE request_id = ?1",
+                "UPDATE command_results SET completed_at = ?2, result_json = ?3, error_code = ?4, resulting_revision = ?5 WHERE request_id = ?1 AND completed_at IS NULL",
                 params![
                     request_id,
                     chrono::Utc::now().to_rfc3339(),
@@ -609,10 +767,47 @@ impl ControlDb {
                 ],
             )
             .map_err(|error| error.to_string())?;
-        if changed != 1 {
-            return Err("Command request was not claimed".to_string());
+        if changed == 1 {
+            return Ok(());
         }
-        Ok(())
+        // Distinguish "already settled by a sibling claimant" from "row never
+        // claimed" so stale holders get a meaningful error instead of a
+        // generic failure.
+        let settled = self
+            .connection
+            .query_row(
+                "SELECT completed_at IS NOT NULL FROM command_results WHERE request_id = ?1",
+                [request_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .unwrap_or(false);
+        Err(if settled {
+            "COMMAND_ALREADY_COMPLETED".to_string()
+        } else {
+            "COMMAND_NOT_CLAIMED".to_string()
+        })
+    }
+
+    /// Re-open a *completed* claim for re-execution — the "same request, but
+    /// the recorded task finished so run it again" path (`create_zhihu_task`,
+    /// `restart_podcast_task`). The flip to in-progress is a single atomic
+    /// UPDATE, so exactly one of several racing re-runs wins; losers observe
+    /// the in-progress claim and replay it like any mid-flight duplicate.
+    /// `created_at` is refreshed so the re-run gets a fresh abandoned-claim
+    /// window, and the stored result is cleared so a subsequent
+    /// `CommandClaim::Existing` never replays the stale outcome.
+    /// Returns `false` when the row is missing or already in-progress.
+    pub fn reopen_completed_command(&self, request_id: &str) -> Result<bool, String> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE command_results SET completed_at = NULL, result_json = NULL, error_code = NULL, resulting_revision = NULL, created_at = ?2 WHERE request_id = ?1 AND completed_at IS NOT NULL",
+                params![request_id, chrono::Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(changed == 1)
     }
 
     pub fn begin_migration_run(
@@ -755,6 +950,80 @@ impl ControlDb {
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
+    }
+
+    /// P-11-F08: reconcile `publish_transaction_index` against the journal
+    /// files under `library_root` — the filesystem is authoritative.
+    /// - A row whose journal is gone (swept terminal journal, quarantined
+    ///   corrupt file) is deleted — a stale row would resurface a phantom
+    ///   transaction on every recovery sweep forever.
+    /// - A row whose journal still exists but recorded a different phase
+    ///   (the writer crashed between the journal update and the index write)
+    ///   is resynced to the journal's real phase.
+    ///
+    /// Returns how many index rows were changed.
+    pub fn reconcile_publish_transaction_index(&self, library_root: &Path) -> Result<u32, String> {
+        let rows = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT transaction_id, journal_relative_path, phase FROM publish_transaction_index",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        };
+        let mut changed = 0_u32;
+        for (transaction_id, relative, stored_phase) in rows {
+            // The stored path is a forward-slash relative path; anything that
+            // fails the shared segment rules is already bogus index data, and
+            // dropping the row is the correct outcome either way.
+            let journal_path = crate::contracts::is_safe_relative_path(&relative)
+                .then(|| library_root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR)));
+            let journal_phase = journal_path
+                .as_ref()
+                .filter(|path| path.is_file())
+                .and_then(|path| fs::read_to_string(path).ok())
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|value| {
+                    value
+                        .get("phase")
+                        .and_then(|phase| phase.as_str())
+                        .map(str::to_string)
+                });
+            match journal_phase {
+                None => {
+                    // Journal gone or unreadable — the row is dead weight.
+                    self.connection
+                        .execute(
+                            "DELETE FROM publish_transaction_index WHERE transaction_id = ?1",
+                            [&transaction_id],
+                        )
+                        .map_err(|error| error.to_string())?;
+                    changed += 1;
+                }
+                Some(phase) if phase != stored_phase => {
+                    self.connection
+                        .execute(
+                            "UPDATE publish_transaction_index SET phase = ?1, updated_at = ?2 WHERE transaction_id = ?3",
+                            params![phase, chrono::Utc::now().to_rfc3339(), transaction_id],
+                        )
+                        .map_err(|error| error.to_string())?;
+                    changed += 1;
+                }
+                _ => {}
+            }
+        }
+        Ok(changed)
     }
 
     /// P3-25: one bounded-retention + space-reclamation pass over the
@@ -961,6 +1230,18 @@ impl ControlDb {
                 ],
             )
             .map_err(|error| error.to_string())?;
+        // 16-F7: bound per-task history — a long transcription emitting at
+        // the 4/s cap would otherwise accumulate ~150k rows before the task
+        // goes terminal and cascades. Keep the first event (creation
+        // context) plus the newest TASK_EVENT_KEEP_LATEST; consumers only
+        // ever re-read the newest row, and live-sync gaps already fall back
+        // to a snapshot refresh.
+        transaction
+            .execute(
+                "DELETE FROM task_events WHERE task_id = ?1 AND sequence NOT IN (SELECT sequence FROM task_events WHERE task_id = ?1 ORDER BY sequence DESC LIMIT ?2) AND sequence <> (SELECT MIN(sequence) FROM task_events WHERE task_id = ?1)",
+                params![event.task_id, TASK_EVENT_KEEP_LATEST],
+            )
+            .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())
     }
 
@@ -1003,26 +1284,38 @@ impl ControlDb {
     }
 
     /// Drop terminal task history older than `max_age_days` (events cascade-delete).
-    pub fn prune_terminal_tasks_older_than(&mut self, max_age_days: i64) -> Result<u32, String> {
+    /// 16-F6: pure-SQL filter — `updated_at` is a real column kept in sync with
+    /// the snapshot's `updatedAt`, and `lifecycleState` is the serde camelCase
+    /// key of `LifecycleState::Terminal`. Filtering in SQL avoids deserializing
+    /// every snapshot row on each acquisition-snapshot refresh.
+    pub fn prune_terminal_tasks_older_than(&self, max_age_days: i64) -> Result<u32, String> {
         if max_age_days <= 0 {
             return Ok(0);
         }
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(max_age_days)).to_rfc3339();
-        let snapshots = self.task_snapshots(None)?;
-        let mut removed = 0_u32;
-        for snapshot in snapshots {
-            if snapshot.lifecycle_state != LifecycleState::Terminal {
-                continue;
-            }
-            if snapshot.updated_at.as_str() >= cutoff.as_str() {
-                continue;
-            }
-            self.connection
-                .execute("DELETE FROM task_snapshots WHERE id = ?1", [&snapshot.id])
-                .map_err(|error| error.to_string())?;
-            removed = removed.saturating_add(1);
-        }
-        Ok(removed)
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM task_snapshots WHERE updated_at < ?1 AND json_extract(snapshot_json, '$.lifecycleState') = 'terminal'",
+                params![cutoff],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(u32::try_from(deleted).unwrap_or(u32::MAX))
+    }
+
+    /// 16-F6: persist a backfilled display name into the stored snapshot JSON
+    /// so `enrich_task_display_names` does not re-read task.json for legacy
+    /// rows on every acquisition snapshot. `json_set` patches the single key
+    /// in place, preserving every other field (including newer-than-this-code
+    /// ones) exactly as stored.
+    pub fn set_task_display_name(&self, task_id: &str, display_name: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "UPDATE task_snapshots SET snapshot_json = json_set(snapshot_json, '$.displayName', ?2) WHERE id = ?1",
+                params![task_id, display_name],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub fn task_snapshots_for_book(&self, book_id: &str) -> Result<Vec<TaskSnapshot>, String> {
@@ -1130,10 +1423,7 @@ impl ControlDb {
 
     /// Mark podcast tasks that never got a task contract / input copy as explicit
     /// INPUT_COPY_FAILED (not auto-recoverable). Idempotent for already-failed rows.
-    pub fn repair_orphaned_podcast_tasks_at(
-        &mut self,
-        data_root: &Path,
-    ) -> Result<u32, String> {
+    pub fn repair_orphaned_podcast_tasks_at(&mut self, data_root: &Path) -> Result<u32, String> {
         let snapshots = self.task_snapshots(Some(TaskKind::Podcast))?;
         let mut repaired = 0u32;
         for snapshot in snapshots {
@@ -1192,7 +1482,13 @@ impl ControlDb {
         let snapshots = self.task_snapshots(None)?;
         let mut podcast_task_ids = Vec::new();
         for snapshot in snapshots {
-            if !is_active_task(&snapshot.lifecycle_state) {
+            // Queued counts too: a queued task still holds its copied input
+            // and cache lease, and one left Queued could be pulled by
+            // `start_next_queued_worker` in the stop window — cancelling it
+            // here both frees its cache intent and closes that race.
+            if !is_active_task(&snapshot.lifecycle_state)
+                && snapshot.lifecycle_state != LifecycleState::Queued
+            {
                 continue;
             }
             if matches!(snapshot.kind, TaskKind::Podcast) {
@@ -1242,9 +1538,7 @@ impl ControlDb {
                 continue;
             }
             let has_live_worker = active_ids.iter().any(|id| id == &snapshot.id);
-            if has_live_worker
-                && !snapshot_heartbeat_stale(&snapshot, RECOVERY_STALE_HEARTBEAT)
-            {
+            if has_live_worker && !snapshot_heartbeat_stale(&snapshot, RECOVERY_STALE_HEARTBEAT) {
                 continue;
             }
             self.persist_task_event(&worker_lost_event(snapshot)?)?;
@@ -1265,12 +1559,16 @@ impl ControlDb {
     /// `work_root` is the per-task cache root holding one directory per task id
     /// — `locations.cache_root.join("Podcast").join("Tasks")` — so the worker
     /// state file resolves to `work_root/<task_id>/work/state/<task_id>.json`.
+    /// Returns the persisted "worker_heartbeat_stale" events so callers can
+    /// also push them over the task-event channel — a periodic sweep that only
+    /// writes the DB would leave the UI showing a dead worker as Running
+    /// until the next unrelated refresh (17-F3).
     pub fn reap_stale_workers(
         &self,
         work_root: &Path,
         stale_after: Duration,
-    ) -> Result<usize, String> {
-        let mut reaped = 0usize;
+    ) -> Result<Vec<TaskEvent>, String> {
+        let mut reaped = Vec::new();
         for snapshot in self.task_snapshots(Some(TaskKind::Podcast))? {
             if snapshot.lifecycle_state != LifecycleState::Running {
                 continue;
@@ -1281,8 +1579,9 @@ impl ControlDb {
             if !stale {
                 continue;
             }
-            self.persist_task_event(&stale_worker_event(snapshot, stale_after)?)?;
-            reaped = reaped.saturating_add(1);
+            let event = stale_worker_event(snapshot, stale_after)?;
+            self.persist_task_event(&event)?;
+            reaped.push(event);
         }
         Ok(reaped)
     }
@@ -1307,7 +1606,15 @@ impl ControlDb {
             let (task_id, raw) = row.map_err(|error| error.to_string())?;
             let snapshot: TaskSnapshot =
                 serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-            if snapshot.kind == TaskKind::Podcast && is_active_task(&snapshot.lifecycle_state) {
+            // Queued podcast tasks carry a discardable cache (input copy +
+            // lease) even though they never ran — capturing the intent now
+            // means the sweep deletes it even if the task gets pulled into
+            // Starting during the stop window (it is then cancelled as
+            // active) or stays Queued until cancel_active_tasks ends it.
+            if snapshot.kind == TaskKind::Podcast
+                && (is_active_task(&snapshot.lifecycle_state)
+                    || snapshot.lifecycle_state == LifecycleState::Queued)
+            {
                 task_ids.push(task_id);
             }
         }
@@ -1404,10 +1711,7 @@ impl ControlDb {
         Ok(Some(event))
     }
 
-    pub fn rollback_starting_task(
-        &mut self,
-        task_id: &str,
-    ) -> Result<Option<TaskEvent>, String> {
+    pub fn rollback_starting_task(&mut self, task_id: &str) -> Result<Option<TaskEvent>, String> {
         let Some(mut snapshot) = self.task_snapshot(task_id)? else {
             return Err("TASK_NOT_FOUND".to_string());
         };
@@ -1478,7 +1782,21 @@ impl ControlDb {
         let Some(mut snapshot) = self.task_snapshot(task_id)? else {
             return Err("TASK_NOT_FOUND".to_string());
         };
-        if matches!(snapshot.lifecycle_state, LifecycleState::Terminal) {
+        // Terminal rows are immutable, and a Queued row has no live worker
+        // behind it — a line landing there is a stale pipe draining after a
+        // requeue/rollback and must not resurrect the row as Running.
+        if matches!(
+            snapshot.lifecycle_state,
+            LifecycleState::Terminal | LifecycleState::Queued
+        ) {
+            // 17-F9: still log the drop — when a stale-worker reap races a
+            // just-finishing worker, the worker's late fatal/completed line is
+            // the only evidence of what it actually did before being reaped.
+            eprintln!(
+                "worker line dropped for {} task {task_id} ({stream}): {}",
+                lifecycle_state_name(&snapshot.lifecycle_state),
+                line.chars().take(160).collect::<String>()
+            );
             return Ok(None);
         }
         let now = chrono::Utc::now().to_rfc3339();
@@ -1486,7 +1804,11 @@ impl ControlDb {
         let event_kind = json
             .as_ref()
             .and_then(|value| value.get("type").and_then(|v| v.as_str()))
-            .unwrap_or(if stream == "stderr" { "stderr" } else { "stdout" });
+            .unwrap_or(if stream == "stderr" {
+                "stderr"
+            } else {
+                "stdout"
+            });
         let is_fatal = event_kind == "fatal" || event_kind == "completed";
         // Generic "working" must not clobber a more specific stage (and must not
         // count as a stage change that defeats event throttling).
@@ -1512,7 +1834,8 @@ impl ControlDb {
             .as_deref()
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
             .map(|value| {
-                let elapsed = chrono::Utc::now().signed_duration_since(value.with_timezone(&chrono::Utc));
+                let elapsed =
+                    chrono::Utc::now().signed_duration_since(value.with_timezone(&chrono::Utc));
                 elapsed.num_milliseconds() >= 250
             })
             .unwrap_or(true);
@@ -1521,7 +1844,8 @@ impl ControlDb {
             .as_deref()
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
             .map(|value| {
-                let elapsed = chrono::Utc::now().signed_duration_since(value.with_timezone(&chrono::Utc));
+                let elapsed =
+                    chrono::Utc::now().signed_duration_since(value.with_timezone(&chrono::Utc));
                 elapsed.num_milliseconds() >= 4000
             })
             .unwrap_or(true);
@@ -1587,8 +1911,7 @@ impl ControlDb {
             snapshot.progress.mode = crate::tasks::ProgressMode::Determinate;
             let floor = snapshot.progress.percent.unwrap_or(0.0);
             let stage_floor = map_pipeline_percent(&next_stage, Some(0.0));
-            snapshot.progress.percent =
-                Some(mapped.max(floor).max(stage_floor).clamp(0.0, 100.0));
+            snapshot.progress.percent = Some(mapped.max(floor).max(stage_floor).clamp(0.0, 100.0));
         } else if stage_changed {
             // Real work not reported for this stage — do not forge a percent.
             snapshot.progress.mode = crate::tasks::ProgressMode::Indeterminate;
@@ -1686,6 +2009,55 @@ impl ControlDb {
         Ok(Some(event))
     }
 
+    /// A successful restart created a fresh task for the same input: flip the
+    /// old terminal row's retry affordance off so repeated clicks cannot
+    /// spawn parallel full re-runs publishing to the same book id.
+    pub fn mark_task_superseded(
+        &mut self,
+        task_id: &str,
+        successor_id: &str,
+    ) -> Result<Option<TaskEvent>, String> {
+        let Some(mut snapshot) = self.task_snapshot(task_id)? else {
+            return Err("TASK_NOT_FOUND".to_string());
+        };
+        if snapshot.lifecycle_state != LifecycleState::Terminal || !snapshot.can_retry {
+            return Ok(None);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        snapshot.last_sequence = snapshot
+            .last_sequence
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_EVENT_SEQUENCE".to_string())?;
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
+        snapshot.can_retry = false;
+        snapshot.can_cancel = false;
+        snapshot.error_message = Some(format!(
+            "{}（已重试，新任务 {successor_id} 进行中）",
+            snapshot
+                .error_message
+                .as_deref()
+                .unwrap_or("任务已被新的重试任务替代")
+                .chars()
+                .take(400)
+                .collect::<String>()
+        ));
+        snapshot.updated_at = now.clone();
+        let event = TaskEvent {
+            schema_version: 1,
+            task_id: snapshot.id.clone(),
+            sequence: snapshot.last_sequence,
+            revision: snapshot.revision,
+            event_type: "superseded_by_retry".to_string(),
+            snapshot,
+            created_at: now,
+        };
+        self.persist_task_event(&event)?;
+        Ok(Some(event))
+    }
+
     /// Recover a previously failed/interrupted terminal task to success (e.g. re-publish).
     pub fn mark_terminal_task_success(
         &mut self,
@@ -1750,12 +2122,39 @@ impl ControlDb {
         success: bool,
         message: Option<&str>,
     ) -> Result<Option<TaskEvent>, String> {
+        self.finish_worker_task_with_outcome(
+            task_id,
+            if success {
+                TaskOutcome::Success
+            } else {
+                TaskOutcome::Failed
+            },
+            message,
+        )
+    }
+
+    /// Terminal finish with an explicit outcome — `PartialSuccess` covers the
+    /// 05-F6 case where the pipeline completed but a stage (e.g. polish) was
+    /// silently degraded.
+    pub fn finish_worker_task_with_outcome(
+        &mut self,
+        task_id: &str,
+        outcome: TaskOutcome,
+        message: Option<&str>,
+    ) -> Result<Option<TaskEvent>, String> {
         let Some(mut snapshot) = self.task_snapshot(task_id)? else {
             return Err("TASK_NOT_FOUND".to_string());
         };
-        if matches!(snapshot.lifecycle_state, LifecycleState::Terminal) {
+        // A finish landing on a Queued row belongs to a stale worker (the row
+        // was requeued/rolled back while its pipe drained) — ignoring it keeps
+        // the queued retry alive instead of slamming it to a bogus Terminal.
+        if matches!(
+            snapshot.lifecycle_state,
+            LifecycleState::Terminal | LifecycleState::Queued
+        ) {
             return Ok(None);
         }
+        let success = !matches!(outcome, TaskOutcome::Failed);
         let now = chrono::Utc::now().to_rfc3339();
         snapshot.last_sequence = snapshot
             .last_sequence
@@ -1766,28 +2165,23 @@ impl ControlDb {
             .checked_add(1)
             .ok_or_else(|| "INVALID_TASK_REVISION".to_string())?;
         snapshot.lifecycle_state = LifecycleState::Terminal;
-        snapshot.outcome = if success {
-            TaskOutcome::Success
-        } else {
-            TaskOutcome::Failed
-        };
+        snapshot.outcome = outcome;
         snapshot.error_code = if success {
             None
         } else {
             worker_error_code(message).or(Some(TaskErrorCode::Unknown))
         };
-        snapshot.error_message = message.map(|value| value.trim().chars().take(500).collect());
+        snapshot.error_message = message.map(worker_error_message);
         snapshot.retry_after_seconds = if success {
             None
         } else {
             worker_retry_after_seconds(message)
         };
-        snapshot.required_action =
-            if snapshot.error_code == Some(TaskErrorCode::BudgetConfirmationRequired) {
-                RequiredAction::ApproveBudget
-            } else {
-                RequiredAction::None
-            };
+        snapshot.required_action = if success {
+            RequiredAction::None
+        } else {
+            worker_required_action(message, snapshot.error_code.clone())
+        };
         snapshot.engine_stage = if success {
             "completed".to_string()
         } else {
@@ -2004,6 +2398,7 @@ fn worker_error_code(message: Option<&str>) -> Option<TaskErrorCode> {
         "UPSTREAM_UNAVAILABLE" => Some(TaskErrorCode::UpstreamUnavailable),
         "TRANSCRIPTION_FAILED" => Some(TaskErrorCode::TranscriptionFailed),
         "MODEL_LOAD_FAILED" => Some(TaskErrorCode::ModelLoadFailed),
+        "SECRET_MISSING" => Some(TaskErrorCode::SecretMissing),
         "ENGINE_BUSY" => Some(TaskErrorCode::EngineBusy),
         "INVALID_TASK_SPEC" => Some(TaskErrorCode::InvalidTaskSpec),
         "PATH_OUTSIDE_MANAGED_ROOT" => Some(TaskErrorCode::PathOutsideManagedRoot),
@@ -2021,6 +2416,49 @@ fn worker_retry_after_seconds(message: Option<&str>) -> Option<u64> {
     value
         .get("retryAfterSeconds")
         .and_then(serde_json::Value::as_u64)
+}
+
+/// 01-F3: a fatal record's `message` field is the human-readable text
+/// `record_worker_line` already stored for the same line — the terminal write
+/// must persist that parsed text, not the raw NDJSON envelope. Plain stderr
+/// tail lines (no JSON) pass through trimmed.
+fn worker_error_message(message: &str) -> String {
+    let parsed = serde_json::from_str::<serde_json::Value>(message).ok();
+    let text = parsed
+        .as_ref()
+        .and_then(|value| value.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| message.trim());
+    text.chars().take(500).collect()
+}
+
+/// The worker's fatal line may carry `requiredAction` verbatim; when it is
+/// absent, well-known error codes imply the action (a SECRET_MISSING fatal
+/// from an older worker still deserves the configure-secret UI).
+fn worker_required_action(
+    message: Option<&str>,
+    error_code: Option<TaskErrorCode>,
+) -> RequiredAction {
+    if let Some(action) = message
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.get("requiredAction")?.as_str().map(str::to_string))
+    {
+        match action.as_str() {
+            "approve_budget" => return RequiredAction::ApproveBudget,
+            "configure_secret" => return RequiredAction::ConfigureSecret,
+            "login" => return RequiredAction::Login,
+            "captcha" => return RequiredAction::Captcha,
+            "free_disk_space" => return RequiredAction::FreeDiskSpace,
+            _ => {}
+        }
+    }
+    match error_code {
+        Some(TaskErrorCode::BudgetConfirmationRequired) => RequiredAction::ApproveBudget,
+        Some(TaskErrorCode::SecretMissing) | Some(TaskErrorCode::UpstreamUnauthorized) => {
+            RequiredAction::ConfigureSecret
+        }
+        _ => RequiredAction::None,
+    }
 }
 
 fn is_active_task(state: &LifecycleState) -> bool {
@@ -2065,7 +2503,8 @@ fn snapshot_liveness_age(snapshot: &TaskSnapshot) -> Option<Duration> {
     .flatten()
     {
         if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(stamp) {
-            let elapsed = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
+            let elapsed =
+                chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
             let age = elapsed.to_std().unwrap_or(Duration::ZERO);
             best = Some(best.map_or(age, |current| current.min(age)));
         }
@@ -2186,10 +2625,7 @@ fn interrupted_terminal_event(
     })
 }
 
-fn interrupted_event(
-    snapshot: TaskSnapshot,
-    exit_code: Option<i32>,
-) -> Result<TaskEvent, String> {
+fn interrupted_event(snapshot: TaskSnapshot, exit_code: Option<i32>) -> Result<TaskEvent, String> {
     interrupted_terminal_event(
         snapshot,
         "engine_crashed",
@@ -2207,21 +2643,19 @@ fn worker_lost_event(snapshot: TaskSnapshot) -> Result<TaskEvent, String> {
         snapshot,
         "worker_lost",
         "interrupted",
-        "未找到该任务的存活工作进程（可能随应用退出被终止），任务已标记为中断；可通过重试续跑。".to_string(),
+        "未找到该任务的存活工作进程（可能随应用退出被终止），任务已标记为中断；可重试续跑。"
+            .to_string(),
     )
 }
 
 /// P1-15 event: every heartbeat source has been silent past the threshold.
-fn stale_worker_event(
-    snapshot: TaskSnapshot,
-    stale_after: Duration,
-) -> Result<TaskEvent, String> {
+fn stale_worker_event(snapshot: TaskSnapshot, stale_after: Duration) -> Result<TaskEvent, String> {
     interrupted_terminal_event(
         snapshot,
         "worker_heartbeat_stale",
         "stalled",
         format!(
-            "工作进程心跳超过 {} 秒未更新（可能已挂起或退出），任务已标记为中断；可通过重试续跑。",
+            "工作进程心跳超过 {} 秒未更新（可能已挂起或退出），任务已标记为中断；可重试续跑。",
             stale_after.as_secs()
         ),
     )
@@ -2306,9 +2740,19 @@ fn controlled_event(mut snapshot: TaskSnapshot, action: &str) -> Result<TaskEven
             snapshot.can_cancel = false;
             "cancelled"
         }
+        // Terminal failed/interrupted tasks keep holding their cache lease
+        // (input copy + normalized WAV + chunks) with no way to release it —
+        // cancel_and_discard on a terminal row is the "丢弃缓存" affordance.
+        // Successful tasks are excluded: their cache was already released at
+        // publish and rewriting the success record would corrupt it.
         "cancel_and_discard"
             if is_active_task(&snapshot.lifecycle_state)
-                || snapshot.lifecycle_state == LifecycleState::Queued =>
+                || snapshot.lifecycle_state == LifecycleState::Queued
+                || (snapshot.lifecycle_state == LifecycleState::Terminal
+                    && matches!(
+                        snapshot.outcome,
+                        TaskOutcome::Failed | TaskOutcome::Interrupted | TaskOutcome::Cancelled
+                    )) =>
         {
             snapshot.lifecycle_state = LifecycleState::Terminal;
             snapshot.outcome = TaskOutcome::Cancelled;

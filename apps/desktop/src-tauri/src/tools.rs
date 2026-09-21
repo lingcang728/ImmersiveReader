@@ -5,9 +5,9 @@ use serde::Serialize;
 use std::collections::HashSet;
 #[cfg(windows)]
 use std::sync::Condvar;
-use std::sync::{Mutex, OnceLock};
 #[cfg(windows)]
 use std::sync::MutexGuard;
+use std::sync::{Mutex, OnceLock};
 #[cfg(windows)]
 use std::time::Duration;
 
@@ -18,6 +18,89 @@ mod ready;
 mod sidecar_http;
 #[cfg(windows)]
 mod tool_manager;
+
+/// 06-F-04: managed children used to inherit the host's entire environment —
+/// every credential sitting in the user's shell env (cloud tokens, proxy
+/// passwords, CI secrets) was handed verbatim to node.exe/python.exe.
+/// `env_clear` plus this whitelist keeps only OS plumbing (SystemRoot for
+/// DLL/winsock/temp resolution, PATH for grandchild executable lookups),
+/// corporate-proxy settings so managed egress keeps working, and this app's
+/// own override namespaces. Explicit `.env()` calls on the command still
+/// apply on top of this base.
+const CHILD_ENV_NAMES: &[&str] = &[
+    "ALLUSERSPROFILE",
+    "APPDATA",
+    "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
+    "COMSPEC",
+    "DriverData",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "PATH",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER",
+    "PROCESSOR_LEVEL",
+    "PROCESSOR_REVISION",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "PSModulePath",
+    "PUBLIC",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERDOMAIN",
+    "USERDOMAIN_ROAMINGPROFILE",
+    "USERNAME",
+    "USERPROFILE",
+    "WINDIR",
+    // Corporate egress keeps working through managed proxies.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+];
+
+/// App/tooling namespaces passed through so documented debug and runtime
+/// overrides keep working. None of these hold third-party secrets; the
+/// DeepSeek key is injected explicitly by the worker, not via env inheritance.
+const CHILD_ENV_PREFIXES: &[&str] = &[
+    "IMMERSIVE_",
+    "ZHIHU_",
+    "OBSCURA_",
+    "PODCAST_TRANSCRIBER_",
+    "PLAYWRIGHT_",
+];
+
+/// Reset `command` to a clean environment, then copy only the whitelisted
+/// host variables (exact names and app prefixes, case-insensitive) into it.
+pub(crate) fn inherit_child_env(command: &mut std::process::Command) {
+    command.env_clear();
+    for (name, value) in std::env::vars_os() {
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let whitelisted = CHILD_ENV_NAMES
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(name_str))
+            || CHILD_ENV_PREFIXES.iter().any(|p| {
+                // get() not [] — a multibyte env name could panic on a
+                // non-char-boundary slice.
+                name_str
+                    .get(..p.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(p))
+            });
+        if whitelisted {
+            command.env(&name, &value);
+        }
+    }
+}
 
 #[cfg(windows)]
 use crate::job_object::JobObject;
@@ -210,9 +293,7 @@ fn gate_engine_health(kind: ToolKind) -> Result<HealthGate, String> {
         match manager.refresh(key)? {
             Some(snapshot) if snapshot.exit_status.is_none() => {
                 match (snapshot.port, manager.token(key)) {
-                    (Some(port), Some(token)) => {
-                        Some((snapshot.pid, port, token.to_string()))
-                    }
+                    (Some(port), Some(token)) => Some((snapshot.pid, port, token.to_string())),
                     _ => None,
                 }
             }
@@ -236,9 +317,7 @@ fn gate_engine_health(kind: ToolKind) -> Result<HealthGate, String> {
         match manager.record_health_probe(key, pid, healthy)? {
             ProbeOutcome::Healthy => return Ok(HealthGate::Healthy),
             ProbeOutcome::Gone => return Ok(HealthGate::NotRunning),
-            ProbeOutcome::Failed(failures)
-                if failures < tool_manager::HEALTH_FAILURE_THRESHOLD =>
-            {
+            ProbeOutcome::Failed(failures) if failures < tool_manager::HEALTH_FAILURE_THRESHOLD => {
                 return Ok(HealthGate::Degraded);
             }
             ProbeOutcome::Failed(_) => {

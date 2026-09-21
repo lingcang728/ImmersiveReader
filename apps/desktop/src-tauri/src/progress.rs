@@ -77,12 +77,38 @@ pub fn load_progress(book_root: &Path, manifest: &Manifest) -> Result<ReadingPro
     Ok(progress)
 }
 
+/// P-10-F11: `load_progress` quarantines an unreadable `.reading.json` by
+/// rename; when that rename failed, the corrupt original is still sitting in
+/// place and the caller's next `save_progress` would atomically overwrite it
+/// — destroying the only evidence of *why* the state was rejected. Copy (not
+/// move) it aside so the incoming payload can still land. Best-effort: a
+/// failed copy changes nothing downstream.
+pub(crate) fn preserve_unreadable(book_root: &Path) {
+    let path = progress_path(book_root);
+    if !path.is_file() {
+        return;
+    }
+    let backup = path.with_file_name(format!(
+        ".reading.{}-{}.corrupt",
+        now_marker(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let _ = fs::copy(&path, &backup);
+}
+
 pub fn save_progress(
     book_root: &Path,
     manifest: &Manifest,
     progress: &ReadingProgress,
 ) -> Result<(), String> {
     validate_reading(progress, manifest)?;
+    // P-10-F10: refuse to resurrect a deleted book — `atomic_write_file`
+    // runs `create_dir_all` on the parent, so a save racing a delete would
+    // otherwise recreate the book directory with a lone ghost `.reading.json`
+    // that no scan can attribute to a book.
+    if !book_root.join("manifest.json").is_file() {
+        return Err("Book directory no longer exists".to_string());
+    }
     let data = serde_json::to_vec_pretty(progress).map_err(|error| error.to_string())?;
     crate::atomic_write_file(&progress_path(book_root), &data)
 }
@@ -106,6 +132,13 @@ mod tests {
             std::env::temp_dir().join(format!("immersive-reader-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp book must be created");
+        // save_progress refuses to write into a dir without manifest.json
+        // (ghost-resurrection guard) — the fixture must look like a real book.
+        fs::write(
+            dir.join("manifest.json"),
+            include_str!("../../../../packages/contracts/fixtures/manifest.valid.json"),
+        )
+        .expect("manifest fixture must write");
         dir
     }
 

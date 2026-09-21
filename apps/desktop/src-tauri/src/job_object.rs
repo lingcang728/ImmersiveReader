@@ -109,10 +109,7 @@ pub fn suspend_process(process: HANDLE, process_id: u32) -> Result<(), String> {
     for (suspended, thread) in threads.iter().enumerate() {
         let previous = unsafe { SuspendThread(thread.as_raw_handle() as HANDLE) };
         if previous == u32::MAX {
-            let error = format!(
-                "SuspendThread failed: {}",
-                std::io::Error::last_os_error()
-            );
+            let error = format!("SuspendThread failed: {}", std::io::Error::last_os_error());
             for frozen in threads.iter().take(suspended) {
                 unsafe { ResumeThread(frozen.as_raw_handle() as HANDLE) };
             }
