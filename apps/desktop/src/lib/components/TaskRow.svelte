@@ -153,6 +153,28 @@
 		if (code === 'RATE_LIMITED') return '请求过于频繁，请稍后重试';
 		if (code === 'LOGIN_REQUIRED') return '需要重新登录知乎';
 		if (code === 'CAPTCHA_REQUIRED') return '需要完成人机验证';
+		// 05-F5: high-value codes that used to fall through to the generic
+		// "处理失败，可点击重试" — several are deterministic and a retry would
+		// just burn the same failure again.
+		if (code === 'UPSTREAM_UNAUTHORIZED') return 'DeepSeek 密钥无效或已过期，请重新配置';
+		if (code === 'INSUFFICIENT_DISK' || code === 'LOCAL_IO') {
+			return '磁盘空间不足或写入失败，请清理后重试';
+		}
+		if (code === 'MODEL_LOAD_FAILED') return '语音模型加载失败，请检查运行环境后重试';
+		if (code === 'MODEL_INCOMPATIBLE' || code === 'PIPELINE_INCOMPATIBLE' || code === 'CONFIG_INCOMPATIBLE') {
+			return '任务与当前引擎版本不兼容，请重新创建任务';
+		}
+		if (code === 'ENGINE_PROTOCOL_MISMATCH' || code === 'ENGINE_UNAVAILABLE') {
+			return '转写引擎异常，请重启应用后重试';
+		}
+		if (code === 'ENGINE_BUSY') return '转写引擎忙，请稍后重试';
+		if (code === 'INVALID_TASK_SPEC' || code === 'PROMPT_BUDGET_EXCEEDED') {
+			return '任务参数无效，请重新创建任务';
+		}
+		if (code === 'LOCAL_NETWORK' || code === 'LOCAL_TIMEOUT' || code === 'UPSTREAM_TIMEOUT' || code === 'UPSTREAM_UNAVAILABLE') {
+			return '网络连接异常，请检查网络后重试';
+		}
+		if (code === 'TRANSCRIPTION_FAILED') return '转写失败，可重试';
 		if (task.lifecycleState === 'terminal' && task.outcome === 'failed') {
 			return '处理失败，可点击重试';
 		}
@@ -168,6 +190,7 @@
 		| { kind: 'relogin' }
 		| { kind: 'open' }
 		| { kind: 'cancel' }
+		| { kind: 'discard' }
 		| { kind: 'approveBudget' }
 		| null;
 
@@ -206,6 +229,20 @@
 		if (task.canCancel && task.lifecycleState !== 'terminal') {
 			return { action: { kind: 'cancel' }, label: '取消' };
 		}
+		// 05-F4: failed/interrupted podcast tasks keep their cache lease (input
+		// copy + 16kHz WAV + chunks, ≈230MB/h) forever because the lease is only
+		// released at publish — offer the wired-but-unused cancel_and_discard
+		// path. A user-cancelled row still holding its lease is offered too;
+		// an already-discarded row (recoverable=false, canRetry=false) is not.
+		if (
+			task.kind === 'podcast' &&
+			task.lifecycleState === 'terminal' &&
+			(task.outcome === 'failed' ||
+				task.outcome === 'interrupted' ||
+				(task.outcome === 'cancelled' && (task.recoverable || task.canRetry)))
+		) {
+			return { action: { kind: 'discard' }, label: '丢弃缓存' };
+		}
 		return null;
 	}
 
@@ -233,6 +270,7 @@
 	// P3-12: themed confirm instead of window.confirm — the cancel only
 	// dispatches after the user confirms inside the dialog.
 	let pendingCancelAction: Action = null;
+	let pendingDiscardAction: Action = null;
 	let pendingBudgetAction = false;
 	let budgetInput = '';
 
@@ -249,6 +287,10 @@
 			pendingCancelAction = action;
 			return;
 		}
+		if (action.kind === 'discard') {
+			pendingDiscardAction = action;
+			return;
+		}
 		if (action.kind === 'approveBudget') {
 			budgetInput = '';
 			pendingBudgetAction = true;
@@ -263,8 +305,25 @@
 		dispatchAction(action);
 	}
 
+	function confirmDiscardAction() {
+		const action = pendingDiscardAction;
+		pendingDiscardAction = null;
+		dispatchAction(action);
+	}
+
+	// 05-F7: the worker's BUDGET_CONFIRMATION_REQUIRED fatal carries the
+	// verified estimate floor ("…below the verified estimate 12.34 CNY").
+	// Surface it and reject lower inputs — otherwise a retry below the floor
+	// dies again at spec validation before doing any work.
+	$: budgetFloorCny = (() => {
+		const match = /verified estimate\s+([0-9]+(?:\.[0-9]+)?)/i.exec(task.errorMessage || '');
+		return match ? Number.parseFloat(match[1]) : null;
+	})();
 	$: parsedBudgetLimit = Number.parseFloat(budgetInput);
-	$: budgetValid = Number.isFinite(parsedBudgetLimit) && parsedBudgetLimit > 0;
+	$: budgetValid =
+		Number.isFinite(parsedBudgetLimit) &&
+		parsedBudgetLimit > 0 &&
+		(budgetFloorCny === null || parsedBudgetLimit + 1e-9 >= budgetFloorCny);
 
 	function confirmBudgetAction() {
 		if (!budgetValid) return;
@@ -312,6 +371,10 @@
 		if (action.kind === 'cancel') {
 			if (task.kind === 'podcast') onControlTask(task.id, 'cancel', task.revision);
 			else onControlZhihuTask(task.id, 'cancel', task.revision);
+			return;
+		}
+		if (action.kind === 'discard') {
+			onControlTask(task.id, 'cancel_and_discard', task.revision);
 		}
 	}
 </script>
@@ -336,7 +399,11 @@
 		class:flowing
 		class:determinate={percent !== null}
 		class:wave-on={waveEnabled}
+		role="progressbar"
 		aria-label={percent !== null ? `进度 ${Math.round(percent)}%` : '进行中'}
+		aria-valuemin={0}
+		aria-valuemax={100}
+		aria-valuenow={percent !== null ? Math.round(percent) : undefined}
 	>
 		{#if percent !== null}
 			<span class="task-fill-clip" style={`transform:scaleX(${percent / 100})`}>
@@ -412,17 +479,41 @@
 		</WorkflowDialogShell>
 	{/if}
 
+	{#if pendingDiscardAction}
+		<WorkflowDialogShell
+			titleId={`task-discard-title-${task.id}`}
+			descriptionId={`task-discard-desc-${task.id}`}
+			title="丢弃任务缓存"
+			description="将删除该任务的输入副本与中间产物缓存；之后重试需要重新转写。确定丢弃？"
+			maxWidth="420px"
+			onClose={() => (pendingDiscardAction = null)}
+		>
+			<div slot="footer" class="task-confirm-actions">
+				<button type="button" class="wf-quiet" on:click={() => (pendingDiscardAction = null)}
+					>暂不丢弃</button
+				>
+				<button type="button" class="wf-primary" on:click={confirmDiscardAction}>丢弃缓存</button>
+			</div>
+		</WorkflowDialogShell>
+	{/if}
+
 	{#if pendingBudgetAction}
 		<WorkflowDialogShell
 			titleId={`task-budget-title-${task.id}`}
 			descriptionId={`task-budget-desc-${task.id}`}
 			title="提高预算重试"
-			description="该任务因超出 API 预算上限而停止。输入新的单任务预算上限（元）后将重新转写。"
+			description={budgetFloorCny !== null
+				? `该任务因超出 API 预算上限而停止。核验预估下限约 ¥${budgetFloorCny.toFixed(2)}，低于该值会再次失败。输入新的单任务预算上限（元）后将重新转写。`
+				: '该任务因超出 API 预算上限而停止。输入新的单任务预算上限（元）后将重新转写。'}
 			maxWidth="420px"
 			onClose={() => (pendingBudgetAction = false)}
 		>
 			<label class="task-budget-field">
-				<span>新的预算上限（元）</span>
+				<span
+					>新的预算上限（元）{#if budgetFloorCny !== null}，不低于 ¥{budgetFloorCny.toFixed(
+						2
+					)}{/if}</span
+				>
 				<input
 					type="number"
 					min="0.01"

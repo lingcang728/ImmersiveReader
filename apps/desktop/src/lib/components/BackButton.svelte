@@ -30,7 +30,7 @@
 		width: 36px;
 		height: 36px;
 		padding: 0;
-		border: 1px solid color-mix(in srgb, var(--link) 42%, var(--line));
+		border: 1px solid color-mix(in srgb, var(--link) 42%, var(--line, var(--hr)));
 		border-radius: 10px;
 		background: color-mix(in srgb, var(--link) 12%, var(--bg-secondary));
 		color: var(--link);
@@ -42,7 +42,7 @@
 			color 0.15s ease;
 	}
 	.back-btn:hover {
-		border-color: color-mix(in srgb, var(--link) 68%, var(--line));
+		border-color: color-mix(in srgb, var(--link) 68%, var(--line, var(--hr)));
 		background: color-mix(in srgb, var(--link) 20%, var(--bg-secondary));
 	}
 	.back-btn:focus-visible {

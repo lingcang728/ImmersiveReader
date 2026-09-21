@@ -7,6 +7,10 @@ param(
   [switch]$NoShortcuts,
   # Rebuild Start Menu / Search / Default Apps icons without running NSIS.
   [switch]$RepairShellIdentity,
+  # Permit installing an installer whose filename version is newer than the
+  # repository version — off by default so a stale re-touched artifact cannot
+  # slip through as a warning.
+  [switch]$AllowNewerInstaller,
   # Default: %LOCALAPPDATA%\Programs\ImmersiveReader — a per-user install root
   # outside the source tree. Installing into the monorepo root let
   # robocopy /MIR and `git clean -xdf` tear the live production install.
@@ -311,6 +315,17 @@ function Update-ImmersiveReaderShellIdentity {
   }
 }
 
+function Assert-NotReparsePoint {
+  # robocopy /MIR follows junctions and can mirror-delete the TARGET tree —
+  # the runtime is multi-GB and junctioning it to another drive is a
+  # reasonable user setup, so refuse to mirror across reparse points.
+  param([Parameter(Mandatory)][string]$Path)
+  if ((Test-Path -LiteralPath $Path) -and
+      ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw "Refusing to mirror across a junction/symlink: $Path"
+  }
+}
+
 function Get-ProcessesUnderDirectory {
   param([Parameter(Mandatory)][string]$Root)
 
@@ -483,7 +498,10 @@ if ($installerVersion -lt $repoVersion) {
   throw "Newest installer $($installer.Name) is v$installerVersion, older than the repository version v$repoVersion — rebuild instead of installing a stale artifact."
 }
 if ($installerVersion -gt $repoVersion) {
-  Write-Warning "Installer version $installerVersion is newer than the repository version $repoVersion."
+  if (-not $AllowNewerInstaller) {
+    throw "Installer version $installerVersion is newer than the repository version $repoVersion — a stale re-touched artifact would install silently. Rebuild, or pass -AllowNewerInstaller to confirm."
+  }
+  Write-Warning "Installer version $installerVersion is newer than the repository version $repoVersion (-AllowNewerInstaller)."
 }
 $existingExe = Join-Path $InstallDir "immersive-reader.exe"
 if (Test-Path -LiteralPath $existingExe) {
@@ -505,6 +523,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $sourceRuntime 'manifest.json'))) {
 Stop-ProcessesUnderDirectory -Root $InstallDir
 $targetRuntime = Join-Path $InstallDir 'runtime'
 if ([System.IO.Path]::GetFullPath($sourceRuntime) -ne [System.IO.Path]::GetFullPath($targetRuntime)) {
+  # /MIR must never run across a junction: it would follow the link and could
+  # mirror-delete the link target's contents.
+  Assert-NotReparsePoint -Path $sourceRuntime
+  Assert-NotReparsePoint -Path $targetRuntime
+  Assert-NotReparsePoint -Path $InstallDir
   & robocopy $sourceRuntime $targetRuntime /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
   if ($LASTEXITCODE -gt 7) { throw "Runtime install failed with robocopy exit code $LASTEXITCODE" }
 }

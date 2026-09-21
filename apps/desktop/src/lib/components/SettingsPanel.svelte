@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import { invoke } from "@tauri-apps/api/core";
+	import { invokeCommand as invoke } from "$lib/ipc";
+	import { reportError } from "$lib/errors";
 	import {
 		settingsOpen,
 		currentTheme,
@@ -53,6 +54,14 @@
 	type CacheClearResult = { deletedItems: number; releasedBytes: number; skipped: Array<{ reason: string }> };
 	type PublishTransaction = { transactionId: string; phase: string; bookId: string };
 	type StateBackupResult = { backupPath: string; included: string[]; skipped: string[] };
+	type StateBackupInfo = {
+		path: string;
+		createdAt?: string | null;
+		appVersion?: string | null;
+		channel?: string | null;
+		included: string[];
+	};
+	type StateRestoreResult = { restored: string[]; preRestorePath: string };
 	type MigrationRun = { migrationId: string; previewId: string; scope: string; status: string; receiptPath?: string | null };
 
 	let locations: StorageLocations | null = null;
@@ -62,6 +71,7 @@
 	let publishRecovery: PublishTransaction[] = [];
 	let migrationRuns: MigrationRun[] = [];
 	let backupResult: StateBackupResult | null = null;
+	let stateBackups: StateBackupInfo[] = [];
 	let panelLoading = false;
 	let advancedLoading = false;
 	let advancedOpen = false;
@@ -121,7 +131,7 @@
 				invoke<SecretStatus>("get_secret_status")
 			]);
 		} catch (error) {
-			panelNotice = `设置状态读取失败：${String(error)}`;
+			panelNotice = `设置状态读取失败：${reportError("设置状态读取", error)}`;
 		} finally {
 			panelLoading = false;
 		}
@@ -131,14 +141,15 @@
 		if (advancedLoaded || advancedLoading) return;
 		advancedLoading = true;
 		try {
-			[usage, publishRecovery, migrationRuns] = await Promise.all([
+			[usage, publishRecovery, migrationRuns, stateBackups] = await Promise.all([
 				invoke<StorageUsage>("get_storage_usage"),
 				invoke<PublishTransaction[]>("get_publish_recovery_status"),
-				invoke<MigrationRun[]>("get_migration_runs")
+				invoke<MigrationRun[]>("get_migration_runs"),
+				invoke<StateBackupInfo[]>("list_state_backups")
 			]);
 			advancedLoaded = true;
 		} catch (error) {
-			panelNotice = `高级状态读取失败：${String(error)}`;
+			panelNotice = `高级状态读取失败：${reportError("高级状态读取", error)}`;
 		} finally {
 			advancedLoading = false;
 		}
@@ -161,7 +172,7 @@
 			await navigator.clipboard.writeText(path);
 			panelNotice = "路径已复制";
 		} catch (error) {
-			panelNotice = `复制失败：${String(error)}`;
+			panelNotice = `复制失败：${reportError("复制路径", error)}`;
 		}
 	}
 
@@ -169,7 +180,7 @@
 		try {
 			await invoke("reveal_storage_directory", { kind });
 		} catch (error) {
-			panelNotice = `无法打开目录：${String(error)}`;
+			panelNotice = `无法打开目录：${reportError("打开目录", error)}`;
 		}
 	}
 
@@ -190,7 +201,7 @@
 			});
 			panelNotice = `已清理 ${result.deletedItems} 项，释放 ${formatBytes(result.releasedBytes)}${result.skipped.length ? `，跳过 ${result.skipped.length} 项受保护任务` : ""}`;
 		} catch (error) {
-			panelNotice = `缓存清理失败：${String(error)}`;
+			panelNotice = `缓存清理失败：${reportError("缓存清理", error)}`;
 		} finally {
 			actionBusy = false;
 		}
@@ -200,7 +211,7 @@
 		if (actionBusy) return;
 		if (!confirmed) {
 			confirmRequest = {
-				message: "创建当前 channel 的状态备份？Library、Cache、Logs、凭据和浏览器 Profile 会被排除。",
+				message: "创建当前渠道的状态备份？Library、Cache、Logs、凭据和浏览器 Profile 会被排除。",
 				proceed: () => void createStateBackup(true)
 			};
 			return;
@@ -208,9 +219,38 @@
 		actionBusy = true;
 		try {
 			backupResult = await invoke<StateBackupResult>("create_state_backup");
+			stateBackups = await invoke<StateBackupInfo[]>("list_state_backups");
 			panelNotice = "状态备份已创建";
 		} catch (error) {
-			panelNotice = `状态备份失败：${String(error)}`;
+			panelNotice = `状态备份失败：${reportError("状态备份", error)}`;
+		} finally {
+			actionBusy = false;
+		}
+	}
+
+	function formatBackupTime(createdAt?: string | null): string {
+		if (!createdAt) return "未知时间";
+		const date = new Date(createdAt);
+		return Number.isNaN(date.getTime()) ? createdAt : date.toLocaleString();
+	}
+
+	async function restoreStateBackup(backup: StateBackupInfo, confirmed = false) {
+		if (actionBusy) return;
+		if (!confirmed) {
+			confirmRequest = {
+				message: `恢复到 ${formatBackupTime(backup.createdAt)} 的状态备份？当前设置与任务数据库会先自动快照到 pre-restore 目录再被替换，完成后建议重启应用使恢复生效。`,
+				proceed: () => void restoreStateBackup(backup, true)
+			};
+			return;
+		}
+		actionBusy = true;
+		try {
+			const result = await invoke<StateRestoreResult>("restore_state_backup", { backupPath: backup.path });
+			panelNotice = result.restored.length
+				? `已恢复 ${result.restored.join("、")}；建议重启应用使任务历史与设置完全生效`
+				: "备份中没有可恢复的内容";
+		} catch (error) {
+			panelNotice = `恢复失败：${reportError("状态恢复", error)}`;
 		} finally {
 			actionBusy = false;
 		}
@@ -227,7 +267,7 @@
 			apiKey = "";
 			panelNotice = "Key 已写入 Credential Manager；界面不会显示它";
 		} catch (error) {
-			panelNotice = `Key 保存失败：${String(error)}`;
+			panelNotice = `Key 保存失败：${reportError("保存 API Key", error)}`;
 		} finally {
 			actionBusy = false;
 		}
@@ -237,7 +277,7 @@
 		if (actionBusy) return;
 		if (!confirmed) {
 			confirmRequest = {
-				message: "删除当前 channel 的 DeepSeek Key？",
+				message: "删除当前渠道的 DeepSeek Key？",
 				proceed: () => void deleteApiKey(true)
 			};
 			return;
@@ -247,7 +287,7 @@
 			secretStatus = await invoke<SecretStatus>("delete_deepseek_api_key");
 			panelNotice = "DeepSeek Key 已删除";
 		} catch (error) {
-			panelNotice = `Key 删除失败：${String(error)}`;
+			panelNotice = `Key 删除失败：${reportError("删除 API Key", error)}`;
 		} finally {
 			actionBusy = false;
 		}
@@ -258,9 +298,9 @@
 		actionBusy = true;
 		try {
 			migrationPreview = await invoke<MigrationPreview>("preview_legacy_migration", { scope: "all" });
-			panelNotice = "迁移 preview 已刷新；未写入任何数据";
+			panelNotice = "迁移预览已刷新；未写入任何数据";
 		} catch (error) {
-			panelNotice = `迁移 preview 失败：${String(error)}`;
+			panelNotice = `迁移预览失败：${reportError("迁移预览", error)}`;
 		} finally {
 			actionBusy = false;
 		}
@@ -280,7 +320,7 @@
 			publishRecovery = await invoke<PublishTransaction[]>("recover_publish_transactions", { transactionIds: null });
 			panelNotice = "发布恢复检查已完成";
 		} catch (error) {
-			panelNotice = `发布恢复失败：${String(error)}`;
+			panelNotice = `发布恢复失败：${reportError("发布恢复", error)}`;
 		} finally {
 			actionBusy = false;
 		}
@@ -351,10 +391,32 @@
 		// Backdrop clicks land on the <dialog> element itself.
 		if (event.target === event.currentTarget) closePanel();
 	}
+
+	// radiogroup 键盘约定：方向键在选项间移动并选中。
+	function radioGroupKeydown(event: KeyboardEvent) {
+		if (
+			event.key !== "ArrowLeft" &&
+			event.key !== "ArrowRight" &&
+			event.key !== "ArrowUp" &&
+			event.key !== "ArrowDown"
+		) {
+			return;
+		}
+		const group = event.currentTarget as HTMLElement;
+		const radios = Array.from(group.querySelectorAll<HTMLElement>('[role="radio"]'));
+		const index = radios.indexOf(document.activeElement as HTMLElement);
+		if (index < 0 || radios.length < 2) return;
+		event.preventDefault();
+		const step = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+		const next = radios[(index + step + radios.length) % radios.length];
+		next.focus();
+		next.click();
+	}
 </script>
 
 {#if $settingsOpen}
 	<dialog
+		id="settings-panel"
 		class="settings-dialog"
 		use:settingsDialog
 		aria-modal="true"
@@ -379,12 +441,20 @@
 			{/if}
 
 			<div class="settings-title section-title">外观</div>
-			<div class="settings-title nested-title">主题</div>
-			<div class="theme-grid">
+			<div class="settings-title nested-title" id="settings-theme-label">主题</div>
+			<div
+				class="theme-grid"
+				role="radiogroup"
+				tabindex="-1"
+				aria-labelledby="settings-theme-label"
+				on:keydown={radioGroupKeydown}
+			>
 				{#each themePairs as pair}
 					<button
 						class="theme-option"
 						class:active={$currentTheme.name === pair.light.name}
+						role="radio"
+						aria-checked={$currentTheme.name === pair.light.name}
 						on:click={() => ($currentTheme = pair.light)}
 					>
 						<div
@@ -398,6 +468,8 @@
 					<button
 						class="theme-option"
 						class:active={$currentTheme.name === pair.dark.name}
+						role="radio"
+						aria-checked={$currentTheme.name === pair.dark.name}
 						on:click={() => ($currentTheme = pair.dark)}
 					>
 						<div
@@ -416,18 +488,26 @@
 				<div class="typo-row">
 					<span class="typo-label">字号</span>
 					<div class="typo-options">
-						<button class="typo-btn" on:click={() => adjustFontScale(-1)} title="缩小 (Ctrl+-)">−</button>
-						<span class="typo-value">{Math.round($fontScale * 100)}%</span>
-						<button class="typo-btn" on:click={() => adjustFontScale(1)} title="放大 (Ctrl+=)">+</button>
+						<button class="typo-btn" on:click={() => adjustFontScale(-1)} title="缩小 (Ctrl+-)" aria-label="缩小字号">−</button>
+						<span class="typo-value" aria-live="polite">{Math.round($fontScale * 100)}%</span>
+						<button class="typo-btn" on:click={() => adjustFontScale(1)} title="放大 (Ctrl+=)" aria-label="放大字号">+</button>
 					</div>
 				</div>
 				<div class="typo-row">
 					<span class="typo-label">行距</span>
-					<div class="typo-options">
+					<div
+						class="typo-options"
+						role="radiogroup"
+						tabindex="-1"
+						aria-label="行距"
+						on:keydown={radioGroupKeydown}
+					>
 						{#each READING_LINE_HEIGHTS as lh}
 							<button
 								class="typo-btn"
 								class:active={$readingLineHeight === lh}
+								role="radio"
+								aria-checked={$readingLineHeight === lh}
 								on:click={() => ($readingLineHeight = lh)}
 							>
 								{lh.toFixed(1)}
@@ -437,11 +517,19 @@
 				</div>
 				<div class="typo-row">
 					<span class="typo-label">栏宽</span>
-					<div class="typo-options">
+					<div
+						class="typo-options"
+						role="radiogroup"
+						tabindex="-1"
+						aria-label="栏宽"
+						on:keydown={radioGroupKeydown}
+					>
 						{#each READING_WIDTHS as w}
 							<button
 								class="typo-btn"
 								class:active={$readingWidth === w}
+								role="radio"
+								aria-checked={$readingWidth === w}
 								on:click={() => ($readingWidth = w)}
 							>
 								{widthLabels[w]}
@@ -451,10 +539,18 @@
 				</div>
 				<div class="typo-row">
 					<span class="typo-label">字体</span>
-					<div class="typo-options">
+					<div
+						class="typo-options"
+						role="radiogroup"
+						tabindex="-1"
+						aria-label="字体"
+						on:keydown={radioGroupKeydown}
+					>
 						<button
 							class="typo-btn"
 							class:active={$readingFontFamily === "sans"}
+							role="radio"
+							aria-checked={$readingFontFamily === "sans"}
 							on:click={() => ($readingFontFamily = "sans")}
 						>
 							黑体
@@ -462,6 +558,8 @@
 						<button
 							class="typo-btn typo-serif"
 							class:active={$readingFontFamily === "serif"}
+							role="radio"
+							aria-checked={$readingFontFamily === "serif"}
 							on:click={() => ($readingFontFamily = "serif")}
 						>
 							宋体
@@ -473,6 +571,7 @@
 					<label class="toggle-switch" title="打开文章后自动进入沉浸模式">
 						<input
 							type="checkbox"
+							aria-label="打开文章后自动进入沉浸模式"
 							checked={$autoFocusMode}
 							on:change={() => ($autoFocusMode = !$autoFocusMode)}
 						/>
@@ -594,6 +693,17 @@
 							<span>{backupResult.backupPath}</span>
 						</div>
 					{/if}
+					{#if stateBackups.length}
+						<div class="status-card">
+							<strong>状态备份 {stateBackups.length} 份</strong>
+							{#each stateBackups.slice(0, 5) as backup}
+								<div class="backup-row">
+									<span>{formatBackupTime(backup.createdAt)}{backup.appVersion ? ` · v${backup.appVersion}` : ""}</span>
+									<button type="button" class="mini-btn" disabled={actionBusy} on:click={() => void restoreStateBackup(backup)}>恢复</button>
+								</div>
+							{/each}
+						</div>
+					{/if}
 					{#if publishRecovery.length}
 						<div class="status-card recovery-card">
 							<strong>待恢复发布 {publishRecovery.length}</strong>
@@ -657,6 +767,17 @@
 		margin: 12px 0 10px;
 		color: var(--text-secondary);
 	}
+	.backup-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		font-size: 12px;
+		color: var(--text-secondary);
+	}
+	.backup-row + .backup-row {
+		margin-top: 6px;
+	}
 	.advanced-toggle {
 		margin-top: 22px;
 		width: 100%;
@@ -694,11 +815,20 @@
 	}
 	.close-btn {
 		border: 0;
+		border-radius: 6px;
 		background: transparent;
 		color: var(--text-secondary);
 		font-size: 24px;
 		line-height: 1;
 		cursor: pointer;
+	}
+	.close-btn:hover {
+		color: var(--text);
+		background: var(--bg-secondary);
+	}
+	.close-btn:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: 2px;
 	}
 	.notice {
 		margin-bottom: 14px;
@@ -767,9 +897,7 @@
 		opacity: 0.55;
 	}
 	.mini-btn.danger {
-		/* P3-12: --danger never existed; converge on the app's single danger
-		   red (#d4a099 — same as .card-menu button.danger / TrashPanel). */
-		color: #d4a099;
+		color: var(--danger);
 	}
 	.confirm-actions {
 		display: flex;
@@ -878,14 +1006,15 @@
 	}
 	.theme-option::after {
 		content: ''; position: absolute; inset: 0;
-		background: linear-gradient(135deg, rgba(255, 255, 255, 0.4) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.1) 100%);
+		/* 与 .icon-btn::after 同一套主题派生 sheen——纯白渐变在暗主题下是奶雾。 */
+		background: linear-gradient(135deg, color-mix(in srgb, var(--text) 10%, transparent) 0%, transparent 50%, color-mix(in srgb, var(--text) 4%, transparent) 100%);
 		opacity: 0; transition: opacity 0.3s ease;
 		pointer-events: none;
 	}
 	.theme-option:hover {
 		border-color: var(--text-faded);
 		transform: translateY(-2px);
-		box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08), inset 0 1px 1px rgba(255, 255, 255, 0.2);
+		box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08), inset 0 1px 1px color-mix(in srgb, var(--text) 20%, transparent);
 	}
 	.theme-option:hover::after {
 		opacity: 1;

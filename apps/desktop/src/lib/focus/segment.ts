@@ -31,7 +31,8 @@ function getSentenceSegmenter(): Intl.Segmenter | null {
 		sentenceSegmenter = null;
 		if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
 			try {
-				sentenceSegmenter = new Intl.Segmenter(undefined, { granularity: 'sentence' });
+				// Pin the locale: Focus 分句是锁定行为，随系统语言漂移不可复现。
+				sentenceSegmenter = new Intl.Segmenter('zh', { granularity: 'sentence' });
 			} catch {
 				sentenceSegmenter = null;
 			}

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	addHeadingIds,
 	extractToc,
+	mayContainMath,
 	renderMarkdown,
 	renderMarkdownDocument,
 	stripYamlFrontMatterForRender
@@ -27,6 +28,37 @@ describe('renderMarkdown', () => {
 
 		expect(html).toContain('href="#user-content-fn-1"');
 		expect(html).toContain('id="user-content-fn-1"');
+	});
+
+	it('keeps the footnote section label sr-only and localized', async () => {
+		const html = await renderMarkdown('hello[^1]\n\n[^1]: the note text');
+
+		// remark-rehype emits <h2 class="sr-only">脚注</h2> — sanitize must
+		// keep the class so the label stays out of the visual flow.
+		expect(html).toContain('sr-only');
+		expect(html).toContain('脚注');
+		expect(html).not.toContain('>Footnotes<');
+	});
+
+	it('namespaces document-supplied ids instead of letting them clobber anchors', async () => {
+		const html = await renderMarkdown(
+			'hello[^1]\n\n<div id="user-content-fn-1">fake note</div>\n\n[^1]: the note text'
+		);
+
+		// Footnote machinery ids keep the user-content- pair intact…
+		expect(html).toContain('href="#user-content-fn-1"');
+		expect(html).toContain('id="user-content-fn-1"');
+		// …while the injected duplicate gets renamed out of the way.
+		expect(html).not.toContain('<div id="user-content-fn-1"');
+	});
+
+	it('rewrites in-document anchors when their target id is namespaced', async () => {
+		const html = await renderMarkdown(
+			'<a id="sec">anchor</a>\n\n[jump](#sec)'
+		);
+
+		expect(html).toContain('id="md-sec"');
+		expect(html).toContain('href="#md-sec"');
 	});
 
 	it('renders math via KaTeX when the document contains $…$', async () => {
@@ -126,7 +158,9 @@ describe('renderMarkdown', () => {
 		expect(firstOriginal).toBeGreaterThan(secondTranslation);
 		expect(secondOriginal).toBeGreaterThan(firstOriginal);
 		expect(html).toContain('class="podcast-translation" data-bilingual-id="podcast-0"');
-		expect(html).toContain('class="podcast-original" lang="en" tabindex="0" data-bilingual-id="podcast-0"');
+		// 原文块是键盘可聚焦的展开控件：tabindex + role + aria-expanded。
+		expect(html).toContain('class="podcast-original" lang="en" tabindex="0" role="button" aria-expanded="false"');
+		expect(html).toContain('data-bilingual-id="podcast-0"');
 	});
 
 	it('preserves source position data on highlighted code blocks', async () => {
@@ -190,5 +224,25 @@ describe('renderMarkdown', () => {
 			{ level: 1, text: 'Title', id: 'title' },
 			{ level: 2, text: '子标题', id: '子标题' }
 		]);
+	});
+});
+
+describe('mayContainMath', () => {
+	it('detects inline and display math', () => {
+		expect(mayContainMath('计算 $x^2$ 的值')).toBe(true);
+		expect(mayContainMath('$$\nx^2\n$$')).toBe(true);
+	});
+
+	it('does not trip on currency prices', () => {
+		expect(mayContainMath('苹果 $5 一斤，香蕉 $10 两把')).toBe(false);
+		expect(mayContainMath('价格是 $5')).toBe(false);
+		expect(mayContainMath('$ a $ 两侧有空格')).toBe(false);
+	});
+
+	it('keeps currency literal in rendered output', async () => {
+		const html = await renderMarkdown('苹果 $5 一斤，香蕉 $10 两把');
+		expect(html).not.toContain('katex');
+		expect(html).toContain('$5');
+		expect(html).toContain('$10');
 	});
 });

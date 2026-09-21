@@ -2,6 +2,7 @@
 	import { tick } from "svelte";
 	import { tocOpen } from "$lib/stores/app";
 	import type { TocItem } from "$lib/render/markdown";
+	import { cycleFocusWithin } from "$lib/a11y/focusTrap";
 
 	export let items: TocItem[] = [];
 	export let activeId: string = "";
@@ -9,9 +10,11 @@
 
 	let inputEl: HTMLInputElement | null = null;
 	let listEl: HTMLElement | null = null;
+	let paletteEl: HTMLElement | null = null;
 	let query = "";
 	let selectedIndex = 0;
 	let wasOpen = false;
+	let restoreFocusEl: HTMLElement | null = null;
 
 	// P2-5: cap the rendered rows — TopN books can produce ~5000 headings.
 	// A ~200-row sliding window follows the selection; the remainder shows
@@ -25,10 +28,15 @@
 			)
 		: items;
 
-	// On open: clear filter, select current section, focus the input.
+	// On open: clear filter, select current section, focus the input. On
+	// close: hand focus back to the control that opened the palette.
 	$: if ($tocOpen !== wasOpen) {
 		wasOpen = $tocOpen;
 		if ($tocOpen) {
+			restoreFocusEl =
+				document.activeElement instanceof HTMLElement
+					? document.activeElement
+					: null;
 			query = "";
 			const activeIdx = items.findIndex((item) => item.id === activeId);
 			selectedIndex = activeIdx >= 0 ? activeIdx : 0;
@@ -40,6 +48,9 @@
 				inputEl?.focus();
 				scrollSelectedIntoView();
 			});
+		} else {
+			restoreFocusEl?.focus();
+			restoreFocusEl = null;
 		}
 	}
 
@@ -94,6 +105,13 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === "Escape") {
+			e.preventDefault();
+			e.stopPropagation();
+			$tocOpen = false;
+			return;
+		}
+		if (paletteEl && cycleFocusWithin(paletteEl, e)) return;
 		if (e.key === "ArrowDown") {
 			e.preventDefault();
 			selectedIndex = Math.min(selectedIndex + 1, filtered.length - 1);
@@ -102,6 +120,12 @@
 			e.preventDefault();
 			selectedIndex = Math.max(selectedIndex - 1, 0);
 			scrollSelectedIntoView();
+		} else if (e.key === "PageDown") {
+			e.preventDefault();
+			pageWindow(1);
+		} else if (e.key === "PageUp") {
+			e.preventDefault();
+			pageWindow(-1);
 		} else if (e.key === "Enter") {
 			e.preventDefault();
 			const item = filtered[selectedIndex];
@@ -118,22 +142,36 @@
 		on:click={() => ($tocOpen = false)}
 		role="presentation"
 	>
-		<div class="toc-palette" on:click|stopPropagation role="presentation">
+		<!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+		<div
+			id="toc-panel"
+			class="toc-palette"
+			role="dialog"
+			tabindex="-1"
+			aria-modal="true"
+			aria-label="目录"
+			bind:this={paletteEl}
+			on:click|stopPropagation
+			on:keydown={handleKeydown}
+		>
 			<div class="toc-input-row">
-				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="2">
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="2" aria-hidden="true">
 					<path d="M4 6h16M4 12h12M4 18h8" />
 				</svg>
 				<input
 					bind:this={inputEl}
 					bind:value={query}
-					on:keydown={handleKeydown}
 					placeholder="跳转到标题..."
 					aria-label="跳转到标题"
+					aria-controls="toc-list"
+					aria-activedescendant={filtered[selectedIndex]
+						? `toc-option-${selectedIndex}`
+						: undefined}
 					class="toc-input"
 				/>
-				<span class="toc-count">{filtered.length}</span>
+				<span class="toc-count" aria-live="polite">{filtered.length}</span>
 			</div>
-			<div class="toc-list" bind:this={listEl}>
+			<div class="toc-list" id="toc-list" role="listbox" aria-label="章节标题" bind:this={listEl}>
 				{#if hiddenBefore > 0}
 					<button
 						type="button"
@@ -146,15 +184,20 @@
 				{#each visibleItems as item, i (item.id)}
 					{@const realIndex = windowStart + i}
 					<button
+						id="toc-option-{realIndex}"
 						class="toc-item toc-level-{item.level}"
 						class:selected={realIndex === selectedIndex}
 						class:current={item.id === activeId}
+						role="option"
+						tabindex="-1"
+						aria-selected={realIndex === selectedIndex}
+						aria-current={item.id === activeId ? "true" : undefined}
 						on:click={() => jump(item.id)}
 						on:mouseenter={() => (selectedIndex = realIndex)}
 					>
 						<span class="toc-text">{item.text}</span>
 						{#if item.id === activeId}
-							<span class="toc-current-dot"></span>
+							<span class="toc-current-dot" aria-hidden="true"></span>
 						{/if}
 					</button>
 				{:else}
@@ -199,13 +242,15 @@
 		background: var(--bg-secondary);
 		border: 1px solid var(--hr);
 		border-radius: 16px;
-		box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.1);
+		/* 顶部高光从 --text 派生而非固定白色（与 SearchBar 同一处理）。 */
+		box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3), inset 0 1px 1px color-mix(in srgb, var(--text) 10%, transparent);
 		overflow: hidden;
 		animation: scaleIn 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 	}
 	:global(.is-light-theme) .toc-palette {
-		box-shadow: 0 16px 48px rgba(0, 0, 0, 0.15), inset 0 1px 1px rgba(255, 255, 255, 0.8);
-		background: rgba(255, 255, 255, 0.92);
+		box-shadow: 0 16px 48px rgba(0, 0, 0, 0.15);
+		/* 浮层底色跟随主题纸面而非纯白——暮光等暖色主题下不突兀。 */
+		background: color-mix(in srgb, var(--bg) 92%, transparent);
 	}
 
 	.toc-input-row {
@@ -224,6 +269,11 @@
 		color: var(--text);
 		font-size: 17px;
 		outline: none;
+	}
+	.toc-input:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: 4px;
+		border-radius: 4px;
 	}
 	.toc-input::placeholder {
 		color: var(--text-faded);
@@ -258,6 +308,10 @@
 	}
 	.toc-item.current {
 		color: var(--link);
+	}
+	.toc-item:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: -2px;
 	}
 	.toc-text {
 		flex: 1;
@@ -302,6 +356,10 @@
 	.toc-overflow:hover {
 		background: var(--bg);
 		color: var(--text-secondary);
+	}
+	.toc-overflow:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: -2px;
 	}
 
 	@keyframes fadeIn {

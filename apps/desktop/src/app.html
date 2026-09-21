@@ -5,7 +5,58 @@
     <link rel="icon" type="image/svg+xml" href="%sveltekit.assets%/favicon.svg" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>沉浸阅读</title>
+    <!--
+      Pre-hydration theme fallback: the Svelte store applies the full token set
+      from themes.ts, but until the bundle executes the page would otherwise
+      paint unthemed. Seed the critical surface colors from the persisted
+      'mmbook-theme' choice so the first paint already matches the theme.
+      Keep this map aligned with themes.ts (bg/text only — the store
+      overwrites everything on boot, so drift here is cosmetic at worst).
+    -->
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #faf8f5;
+        --bg-secondary: #f0ebe3;
+        --text: #222222;
+        --text-secondary: #5a5a5a;
+        --heading: #141414;
+        --link: #3f6499;
+        --hr: #d0cbc1;
+        --line: var(--hr);
+        --on-accent: #ffffff;
+        --danger: #a03528;
+        background: var(--bg);
+        color: var(--text);
+      }
+      html,
+      body {
+        background: var(--bg);
+      }
+    </style>
+    <script>
+      try {
+        var bootThemes = {
+          'suzhi-light': ['#faf8f5', '#222222', 'light'],
+          'suzhi-dark': ['#1e1e1c', '#e2ddd4', 'dark'],
+          'moshi-light': ['#ffffff', '#151515', 'light'],
+          'moshi-dark': ['#141414', '#d2d2d2', 'dark'],
+          'muguang-light': ['#fdf6ec', '#342a22', 'light'],
+          'muguang-dark': ['#1c1914', '#d6cbb8', 'dark'],
+        };
+        var boot = bootThemes[localStorage.getItem('mmbook-theme')];
+        if (boot) {
+          var rootStyle = document.documentElement.style;
+          rootStyle.setProperty('--bg', boot[0]);
+          rootStyle.setProperty('--text', boot[1]);
+          rootStyle.colorScheme = boot[2];
+        }
+      } catch (e) {
+        /* localStorage unavailable — the :root fallback still applies */
+      }
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

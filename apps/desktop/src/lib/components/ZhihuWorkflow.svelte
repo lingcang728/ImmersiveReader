@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
+	import { invokeCommand as invoke } from '$lib/ipc';
+	import { describeError } from '$lib/errors';
 	import type { TaskSnapshot } from '$lib/tasks/sync';
 	import WorkflowDialogShell from './WorkflowDialogShell.svelte';
 
@@ -9,6 +10,7 @@
 
 	interface LoginStatus {
 		loggedIn: boolean;
+		lastError?: string | null;
 	}
 
 	interface CreateRequest {
@@ -35,6 +37,7 @@
 	let loginStatus: LoginStatus | null = null;
 	let createdTaskId = '';
 	let busy = false;
+	let clearingLogin = false;
 	let errorText = '';
 	let noticeText = '';
 
@@ -100,7 +103,7 @@
 			errorText = '';
 		} catch (error) {
 			loginStatus = null;
-			errorText = '无法读取登录状态：' + String(error);
+			errorText = '无法读取登录状态：' + describeError(error);
 		}
 	}
 
@@ -110,7 +113,30 @@
 			noticeText = '已打开受管知乎登录流程；完成后点击刷新。';
 			errorText = '';
 		} catch (error) {
-			errorText = '无法启动登录流程：' + String(error);
+			errorText = '无法启动登录流程：' + describeError(error);
+		}
+	}
+
+	// 06-F-01: 退出登录 —— 清除 DPAPI Cookie、浏览器档案与缓存，并尽力使
+	// 知乎服务端会话失效。正在抓取时边车会拒绝执行。
+	async function clearLogin() {
+		if (
+			!window.confirm(
+				'退出知乎登录将删除本机保存的登录凭据和浏览器档案。若正在抓取，任务会失败。确定退出？'
+			)
+		) {
+			return;
+		}
+		clearingLogin = true;
+		try {
+			await invoke('clear_zhihu_login');
+			noticeText = '已退出知乎登录，本机登录数据已清除。';
+			errorText = '';
+			await refreshLoginStatus();
+		} catch (error) {
+			errorText = '退出登录失败：' + describeError(error);
+		} finally {
+			clearingLogin = false;
 		}
 	}
 
@@ -118,6 +144,11 @@
 		const normalized = peopleId.trim();
 		if (!normalized) {
 			errorText = '请输入知乎答主 ID。';
+			return;
+		}
+		// 与 zhihu.rs / server.ts 的 ^[a-zA-Z0-9_-]{1,80}$ 兜底一致的前端预检。
+		if (!/^[a-zA-Z0-9_-]{1,80}$/.test(normalized)) {
+			errorText = '答主 ID 只能包含字母、数字、下划线和连字符（最长 80 字符）。';
 			return;
 		}
 		if (topN !== '' && (!Number.isInteger(Number(topN)) || Number(topN) < 1 || Number(topN) > 5000)) {
@@ -139,7 +170,7 @@
 			noticeText = '任务已加入统一队列；可从这里或书架任务栏开始。';
 			onRefreshTasks();
 		} catch (error) {
-			errorText = '创建任务失败：' + String(error);
+			errorText = '创建任务失败：' + describeError(error);
 		} finally {
 			busy = false;
 		}
@@ -156,7 +187,7 @@
 <WorkflowDialogShell
 	titleId="zhihu-title"
 	descriptionId="zhihu-description"
-	eyebrow="ZHIHU WORKFLOW"
+	eyebrow="知乎工作流"
 	title="归档知乎"
 	description="任务、登录态和抓取进度都留在沉浸阅读的统一队列中。"
 	maxWidth="650px"
@@ -175,10 +206,21 @@
 			{#if loginStatus && !loginStatus.loggedIn}
 				<span class="status-hint">请先完成知乎登录后再开始抓取</span>
 			{/if}
+			{#if loginStatus?.lastError}
+				<span class="status-hint">上次登录失败：{describeError(loginStatus.lastError)}</span>
+			{/if}
 		</div>
 		<div class="login-actions">
 			<button type="button" class="wf-quiet" on:click={() => void refreshLoginStatus()}>刷新</button>
 			<button type="button" class="wf-quiet" on:click={() => void startLogin()}>开始登录</button>
+			{#if loginStatus?.loggedIn}
+				<button
+					type="button"
+					class="wf-quiet"
+					disabled={clearingLogin}
+					on:click={() => void clearLogin()}>{clearingLogin ? '正在退出…' : '退出登录'}</button
+				>
+			{/if}
 		</div>
 	</section>
 
@@ -259,7 +301,7 @@
 				<div class="result-card wf-card">
 					<strong>结果页</strong>
 					<span>{createdTask.progress.label ?? '任务已结束'}</span>
-					{#if createdTask.errorMessage}<small class="wf-msg-error">{createdTask.errorMessage}</small>{/if}
+					{#if createdTask.errorMessage}<small class="wf-msg-error">{describeError(createdTask.errorMessage)}</small>{/if}
 				</div>
 			{/if}
 		</section>

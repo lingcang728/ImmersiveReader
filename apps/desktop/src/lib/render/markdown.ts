@@ -33,12 +33,22 @@ const sanitizeSchema = {
 			['className', 'podcast-original'],
 			['lang', 'en'],
 			['dataBilingualId', /^[\w-]+$/],
-			['tabIndex']
+			['tabIndex'],
+			// 双语原文块是可聚焦的展开/收起控件（见 markPodcastOriginal）。
+			['role', 'button'],
+			['ariaExpanded', 'true', 'false'],
+			['ariaLabel']
 		],
 		p: [
 			...((defaultSchema.attributes?.p as any[]) ?? []),
 			['className', 'podcast-translation'],
 			['dataBilingualId', /^[\w-]+$/]
+		],
+		// remark-rehype 给脚注区 <h2 id="footnote-label"> 加 sr-only；
+		// 白名单放行，否则中文界面会冒出一个英文大标题。
+		h2: [
+			...((defaultSchema.attributes?.h2 as any[]) ?? []),
+			['className', 'sr-only']
 		]
 	}
 };
@@ -385,7 +395,12 @@ function markPodcastOriginal(node: any, bilingualId?: string) {
 	classes.add('podcast-original');
 	node.properties.className = [...classes];
 	node.properties.lang = 'en';
+	// 可聚焦的展开/收起控件：点击、Enter、Space 都会切 is-revealed
+	//（+page.svelte 的 togglePodcastOriginal 同步 aria-expanded）。
 	node.properties.tabIndex = 0;
+	node.properties.role = 'button';
+	node.properties.ariaExpanded = 'false';
+	node.properties.ariaLabel = '显示英文原文';
 	if (bilingualId) node.properties.dataBilingualId = bilingualId;
 }
 
@@ -552,9 +567,107 @@ function rehypeDocumentMetadata() {
 		const toc: TocItem[] = file?.data?.toc ?? [];
 		const seenIds = new Map<string, number>();
 
-		function walk(node: any) {
+		// Sanitize runs with clobberPrefix '' (it can't rewrite hrefs, so a
+		// prefix there would break footnote links) — meaning document-supplied
+		// ids/names pass through verbatim. A crafted `id="user-content-fn-1"`
+		// could then hijack footnote jumps or collide with generated heading
+		// ids. Rename non-footnote document ids here instead and fix up the
+		// matching `#fragment` references ourselves. `user-content-*` is the
+		// remark-rehype footnote prefix: those id↔href pairs are already
+		// consistent and must stay untouched.
+		// `user-content-*` is remark-rehype's footnote id prefix; GFM only ever
+		// puts those ids on footnote refs/backs (<sup>/<a>), footnote items
+		// (<li>) inside the footnotes <section>, and the section itself. The
+		// same id on anything else is a document-supplied duplicate
+		// (footnote-jump hijack) and gets renamed like any other document id.
+		const footnoteIdTags = new Set(['a', 'sup', 'li', 'section']);
+		const isFootnotesSection = (node: any) =>
+			node.tagName === 'section' &&
+			(node.properties?.dataFootnotes !== undefined ||
+				(Array.isArray(node.properties?.className)
+					? node.properties.className
+					: String(node.properties?.className ?? '').split(' ')
+				).includes('footnotes'));
+		const isFootnoteMachinery = (node: any, inside: boolean) =>
+			node.tagName === 'sup' || (inside && footnoteIdTags.has(node.tagName));
+
+		// Pass 1: which `user-content-*` ids genuinely belong to footnote
+		// machinery — they keep their names so the ref↔target pair survives —
+		// and every id/name the document declares (an href can point forward).
+		const keptFootnoteIds = new Set<string>();
+		const declaredIds = new Set<string>();
+		(function scan(node: any, inFootnotes: boolean) {
+			if (node.type === 'element') {
+				const inside = inFootnotes || isFootnotesSection(node);
+				for (const key of ['id', 'name'] as const) {
+					const value = node.properties?.[key];
+					if (typeof value !== 'string' || value === '') continue;
+					declaredIds.add(value);
+					if (
+						key === 'id' &&
+						value.startsWith('user-content-') &&
+						isFootnoteMachinery(node, inside)
+					) {
+						keptFootnoteIds.add(value);
+					}
+				}
+				for (const child of node.children ?? []) scan(child, inside);
+				return;
+			}
+			for (const child of node.children ?? []) scan(child, inFootnotes);
+		})(tree, false);
+
+		// Every declared id/name that no footnote element keeps is renamed to a
+		// `md-` name; `#fragment` references are rewritten through this map so
+		// in-document anchors keep working while footnote hrefs stay pointed at
+		// the kept machinery ids.
+		const renamedIds = new Map<string, string>();
+		for (const id of declaredIds) {
+			if (!keptFootnoteIds.has(id)) renamedIds.set(id, `md-${id}`);
+		}
+
+		function walk(node: any, inFootnotes: boolean) {
 			if (node.type === 'element') {
 				if (!node.properties) node.properties = {};
+				const inside = inFootnotes || isFootnotesSection(node);
+
+				for (const key of ['id', 'name'] as const) {
+					const value = node.properties[key];
+					if (typeof value !== 'string' || value === '') continue;
+					const keep =
+						key === 'id' &&
+						keptFootnoteIds.has(value) &&
+						isFootnoteMachinery(node, inside);
+					if (keep) continue;
+					// A `user-content-*` id that machinery keeps elsewhere isn't in
+					// renamedIds (its hrefs must stay) — rename this duplicate
+					// anyway so it stops competing for the fragment.
+					node.properties[key] = renamedIds.get(value) ?? `md-${value}`;
+				}
+				const href = node.properties.href;
+				if (typeof href === 'string' && href.startsWith('#')) {
+					const target = href.slice(1);
+					const renamed =
+						renamedIds.get(target) ??
+						(() => {
+							try {
+								return renamedIds.get(decodeURIComponent(target));
+							} catch {
+								return undefined;
+							}
+						})();
+					if (renamed) node.properties.href = `#${renamed}`;
+				}
+				// idref attributes (footnote aria-describedby → footnote-label)
+				// must move with a renamed target or the a11y link dangles.
+				for (const key of ['ariaDescribedBy', 'ariaLabelledBy'] as const) {
+					const value = node.properties[key];
+					if (Array.isArray(value)) {
+						node.properties[key] = value.map(
+							(id: any) => renamedIds.get(id) ?? id
+						);
+					}
+				}
 
 				if (node.position && blockTags.has(node.tagName)) {
 					node.properties.dataSourceStart = node.position.start.line;
@@ -577,10 +690,14 @@ function rehypeDocumentMetadata() {
 				}
 			}
 			if (node.children) {
-				for (const child of node.children) walk(child);
+				const inside =
+					node.type === 'element'
+						? inFootnotes || isFootnotesSection(node)
+						: inFootnotes;
+				for (const child of node.children) walk(child, inside);
 			}
 		}
-		walk(tree);
+		walk(tree, false);
 	};
 }
 
@@ -633,7 +750,7 @@ function baseMarkdownProcessor() {
 		baseProcessor = unified()
 			.use(remarkParse)
 			.use(remarkGfm)
-			.use(remarkRehype, { allowDangerousHtml: true })
+			.use(remarkRehype, { allowDangerousHtml: true, footnoteLabel: '脚注' })
 			.use(rehypeRaw)
 			.use(rehypeSanitize, sanitizeSchema)
 			.use(rehypeNormalizePodcastBilingual)
@@ -656,7 +773,7 @@ function mathMarkdownProcessor(): Promise<any> {
 					.use(remarkParse)
 					.use(remarkGfm)
 					.use(remarkMath)
-					.use(remarkRehype, { allowDangerousHtml: true })
+					.use(remarkRehype, { allowDangerousHtml: true, footnoteLabel: '脚注' })
 					.use(rehypeRaw)
 					.use(rehypeSanitize, sanitizeSchema)
 					.use(rehypeNormalizePodcastBilingual)
@@ -673,12 +790,20 @@ function mathMarkdownProcessor(): Promise<any> {
 	return mathProcessorPromise;
 }
 
+// Gate the lazy math pipeline on the same shape remark-math requires: an
+// opening `$` not followed by whitespace and a closing `$` not preceded by
+// whitespace and not followed by a digit. "$5 和 $10" is currency, not
+// math — it must not even pay the remark-math/KaTeX import cost.
+export function mayContainMath(source: string): boolean {
+	return /\$(?!\s)[^\n$]*[^\s$]\$(?!\d)|\$\$/.test(source);
+}
+
 export async function renderMarkdownDocument(source: string): Promise<RenderedMarkdownDocument> {
 	const toc: TocItem[] = [];
 	const frontMatterBlock = splitFrontMatter(source);
 	const renderSource = frontMatterBlock ? blankFrontMatterBlock(frontMatterBlock) : source;
 
-	const pipeline = /\$[^\s$]/.test(renderSource)
+	const pipeline = mayContainMath(renderSource)
 		? ((await mathMarkdownProcessor()) ?? baseMarkdownProcessor())
 		: baseMarkdownProcessor();
 

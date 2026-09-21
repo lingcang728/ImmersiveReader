@@ -129,15 +129,26 @@ function pathFromFileUrl(src: string): string | null {
 	}
 }
 
+// P2-3: remote http(s) images in archived/user markdown are a tracking
+// surface — opening a chapter fires a real request to that host. Render a
+// transparent pixel instead; the reader still shows the figure slot without
+// any outbound traffic.
+const BLOCKED_REMOTE_PIXEL =
+	'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
 export function resolveMarkdownImageSrc(
 	src: string,
 	markdownPath: string,
 	convertFileSrc: FileSrcConverter
 ): string {
 	const decodedSrc = decodeHtmlAttribute(src).trim();
-	if (!decodedSrc || decodedSrc.startsWith('#') || decodedSrc.startsWith('//')) return src;
-	if (/^(https?|data|blob|asset):/i.test(decodedSrc)) return src;
+	if (!decodedSrc || decodedSrc.startsWith('#')) return src;
 	if (/^https?:\/\/asset\.localhost\//i.test(decodedSrc)) return src;
+	// `//host/…` is protocol-relative — it resolves to a remote http(s) URL
+	// under the webview's own scheme, so it belongs on the blocked surface too.
+	if (/^https?:/i.test(decodedSrc) || decodedSrc.startsWith('//'))
+		return BLOCKED_REMOTE_PIXEL;
+	if (/^(data|blob|asset):/i.test(decodedSrc)) return src;
 
 	const fileUrlPath = /^file:/i.test(decodedSrc) ? pathFromFileUrl(decodedSrc) : null;
 	if (fileUrlPath) return convertFileSrc(fileUrlPath);
@@ -147,6 +158,11 @@ export function resolveMarkdownImageSrc(
 	if (!path) return src;
 
 	const decodedPath = safeDecodeUriPath(path);
+	// P3-1: relative `../..` escapes are not blocked here on purpose — the
+	// containment boundary lives in the backend asset-scope grant
+	// (grant_markdown_asset_scope only allows the book root recursively), so
+	// ../assets/ siblings inside the book keep working while anything outside
+	// it fails at the asset protocol.
 	const nativePath = isAbsoluteNativePath(decodedPath)
 		? decodedPath
 		: joinNativePath(directoryName(markdownPath), decodedPath);

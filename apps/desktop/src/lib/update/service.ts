@@ -1,4 +1,5 @@
 import { writable } from "svelte/store";
+import { describeError } from "$lib/errors";
 
 export type UpdateStatus = "idle" | "checking" | "available" | "downloading" | "installing" | "failed" | "upToDate";
 
@@ -43,7 +44,7 @@ function patch(value: Partial<UpdateViewState>): void {
 }
 
 function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
+	return describeError(error);
 }
 
 function positiveNumber(value: unknown): number | null {

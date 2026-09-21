@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { findChapterIndexById, type BookDetail, type BookSummary, type LibraryIssue, type TemporaryItem } from '$lib/library/books';
 	import type { TaskEvent, TaskSnapshot } from '$lib/tasks/sync';
 	import TaskQueue from './TaskQueue.svelte';
@@ -100,24 +101,79 @@
 		.filter((task) => task.recoverable)
 		.reduce((sum, task) => sum + task.cacheLeaseBytes, 0);
 
-	function closeMenus() {
+	// Menus are real role="menu" popups: keyboard-opened menus move focus to
+	// the first item; closing restores focus to the trigger instead of
+	// dropping it on <body>.
+	let menuReturnFocus: HTMLElement | null = null;
+
+	function closeMenus(restoreFocus = false) {
+		const hadOpen = acquireOpen || openCardMenu !== null;
 		acquireOpen = false;
 		openCardMenu = null;
+		if (restoreFocus && hadOpen) {
+			menuReturnFocus?.focus();
+		}
+		menuReturnFocus = null;
 	}
 
-	function toggleAcquire() {
+	function rememberMenuTrigger() {
+		menuReturnFocus =
+			document.activeElement instanceof HTMLElement ? document.activeElement : null;
+	}
+
+	function focusFirstMenuItem(selector: string) {
+		void tick().then(() => {
+			document
+				.querySelector<HTMLElement>(`${selector} [role="menuitem"]`)
+				?.focus();
+		});
+	}
+
+	function toggleAcquire(fromKeyboard = false) {
 		openCardMenu = null;
 		acquireOpen = !acquireOpen;
+		if (acquireOpen) {
+			rememberMenuTrigger();
+			if (fromKeyboard) focusFirstMenuItem('.acquire-menu');
+		}
 	}
 
-	function toggleCardMenu(bookId: string) {
+	function toggleCardMenu(bookId: string, fromKeyboard = false) {
 		acquireOpen = false;
-		openCardMenu = openCardMenu === bookId ? null : bookId;
+		const opening = openCardMenu !== bookId;
+		openCardMenu = opening ? bookId : null;
+		if (opening) {
+			rememberMenuTrigger();
+			if (fromKeyboard) focusFirstMenuItem('.card-menu');
+		}
 	}
 
 	function runAcquire(action: () => void) {
 		closeMenus();
 		action();
+	}
+
+	// Menu keyboard contract: ↑/↓ cycle menuitems, Home/End jump to ends.
+	// (Esc is already handled by the svelte:window keydown → closeMenus.)
+	function menuKeydown(event: KeyboardEvent) {
+		const menu = event.currentTarget as HTMLElement;
+		const items = Array.from(
+			menu.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+		);
+		if (!items.length) return;
+		if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+			event.preventDefault();
+			const current = items.indexOf(document.activeElement as HTMLElement);
+			const step = event.key === 'ArrowDown' ? 1 : -1;
+			const next = current < 0 ? 0 : (current + step + items.length) % items.length;
+			items[next].focus();
+		} else if (event.key === 'Home') {
+			event.preventDefault();
+			items[0].focus();
+		} else if (event.key === 'End') {
+			event.preventDefault();
+			items[items.length - 1].focus();
+		}
 	}
 
 	// P2-35: promote the book-detail dialog to a real modal — showModal puts it
@@ -165,9 +221,9 @@
 
 <svelte:window
 	on:keydown={(e) => {
-		if (e.key === 'Escape') closeMenus();
+		if (e.key === 'Escape') closeMenus(true);
 	}}
-	on:click={closeMenus}
+	on:click={() => closeMenus()}
 />
 
 <section class="bookshelf" aria-label="沉浸阅读书架">
@@ -256,32 +312,34 @@
 					class="menu-trigger"
 					aria-haspopup="menu"
 					aria-expanded={acquireOpen}
-					on:click|stopPropagation={toggleAcquire}
+					on:click|stopPropagation={(e) => toggleAcquire(e.detail === 0)}
 				>
 					获取内容
 					<span aria-hidden="true">▾</span>
 				</button>
 				{#if acquireOpen}
-					<div class="acquire-menu" role="group" aria-label="获取内容">
+					<div class="acquire-menu" role="menu" tabindex="-1" aria-label="获取内容" on:keydown={menuKeydown}>
 						<button
 							type="button"
+							role="menuitem"
 							on:click={() => runAcquire(onOpenZhihuWorkflow)}
 						>
 							归档知乎
 						</button>
 						<button
 							type="button"
+							role="menuitem"
 							on:click={() => runAcquire(onOpenPodcastWorkflow)}
 						>
 							转写播客
 						</button>
-						<button type="button" on:click={() => runAcquire(onImport)}>
+						<button type="button" role="menuitem" on:click={() => runAcquire(onImport)}>
 							导入文件夹
 						</button>
-						<button type="button" on:click={() => runAcquire(onOpenFile)}>
+						<button type="button" role="menuitem" on:click={() => runAcquire(onOpenFile)}>
 							临时打开
 						</button>
-						<div class="menu-hint">播客可在这里预检、确认预算并加入统一任务队列。</div>
+						<div class="menu-hint" role="presentation">播客可在这里预检、确认预算并加入统一任务队列。</div>
 					</div>
 				{/if}
 			</div>
@@ -336,10 +394,16 @@
 			<section class="resume" aria-label="继续阅读">
 				<div class="resume-meta">
 					<span class="resume-label">继续阅读</span>
-					<h1>{resumeBook.title}</h1>
+					<h2>{resumeBook.title}</h2>
 					<p>{resumeBook.currentChapterTitle ?? '从第一篇开始'}</p>
 					<div class="progress-row">
-						<span class="thin-bar"
+						<span
+							class="thin-bar"
+							role="progressbar"
+							aria-label="已读进度"
+							aria-valuemin={0}
+							aria-valuemax={100}
+							aria-valuenow={Math.round(resumeBook.progress * 100)}
 							><i style={`width:${Math.round(resumeBook.progress * 100)}%`}></i></span
 						>
 						<span>{Math.round(resumeBook.progress * 100)}%</span>
@@ -349,7 +413,7 @@
 			</section>
 		{:else}
 			<div class="empty-state">
-				<h1>书架还是空的</h1>
+				<h2>书架还是空的</h2>
 				<p>导入一个 Markdown 文件夹，或从知乎归档内容开始。</p>
 				<div>
 					<button class="btn-resume" on:click={onImport}>导入书库</button>
@@ -378,14 +442,15 @@
 									aria-label={`文集操作：${book.title}`}
 									aria-haspopup="menu"
 									aria-expanded={openCardMenu === book.bookId}
-									on:click|stopPropagation={() => toggleCardMenu(book.bookId)}
+									on:click|stopPropagation={(e) => toggleCardMenu(book.bookId, e.detail === 0)}
 								>
 									⋯
 								</button>
 								{#if openCardMenu === book.bookId}
-									<div class="card-menu" role="group" aria-label="文集操作">
+									<div class="card-menu" role="menu" tabindex="-1" aria-label="文集操作" on:keydown={menuKeydown}>
 										<button
 											type="button"
+											role="menuitem"
 											on:click={() => {
 												closeMenus();
 												onRemoveBook(book.bookId, book.title, book.chapterCount);
@@ -395,6 +460,7 @@
 										</button>
 										<button
 											type="button"
+											role="menuitem"
 											class="danger"
 											on:click={() => {
 												closeMenus();
@@ -413,7 +479,13 @@
 							<span>{lastReadLabel(book.lastReadAt)}</span>
 						</div>
 						<div class="progress-row">
-							<span class="thin-bar"
+							<span
+								class="thin-bar"
+								role="progressbar"
+								aria-label={`《${book.title}》已读进度`}
+								aria-valuemin={0}
+								aria-valuemax={100}
+								aria-valuenow={Math.round(book.progress * 100)}
 								><i style={`width:${Math.round(book.progress * 100)}%`}></i></span
 							>
 							<span>{Math.round(book.progress * 100)}%</span>
@@ -422,7 +494,7 @@
 							<span>{book.currentChapterTitle ?? '尚未开卷'}</span>
 							<div>
 								<button class="act-secondary" on:click={() => onOpenDetails(book.bookId)}>详情</button>
-								<button class="act-primary" on:click={() => onOpenBook(book.bookId)}>精读</button>
+								<button class="act-primary" on:click={() => onOpenBook(book.bookId)}>阅读</button>
 								<button class="act-secondary" on:click={() => onFlowBook(book.bookId)}
 									>连读 ↗</button
 								>
@@ -474,7 +546,7 @@
 					<div class="book-detail-heading">
 						<h2 id="book-detail-title">{selectedBookDetail.manifest.title}</h2>
 						<p class="book-detail-summary">
-							{chapters.length} 章 · 进度 {Math.round(selectedBookDetail.progress.position * 100)}% ·
+							{chapters.length} 章 · 本章进度 {Math.round(selectedBookDetail.progress.position * 100)}% ·
 							{lastReadLabel(selectedBookDetail.manifest.updatedAt)}
 						</p>
 					</div>
@@ -548,7 +620,7 @@
 						{#if selectedBookDetail.provenance}
 							<div class="provenance-grid">
 								<div>
-									<span>版本</span>
+									<span>修订</span>
 									<strong>{selectedBookDetail.provenance.revision ?? '—'}</strong>
 								</div>
 								<div>

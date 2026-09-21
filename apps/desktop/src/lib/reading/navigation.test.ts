@@ -33,6 +33,38 @@ describe("reading keyboard navigation", () => {
 			direction: -1,
 			kind: "page"
 		});
+		expect(readingScrollIntentForKey("Home")).toEqual({
+			direction: -1,
+			kind: "edge"
+		});
+		expect(readingScrollIntentForKey("End")).toEqual({
+			direction: 1,
+			kind: "edge"
+		});
+	});
+
+	it("jumps to the chapter edges without crossing the seam", () => {
+		expect(
+			resolveReadingScroll(
+				{ direction: -1, kind: "edge" },
+				{ scrollTop: 500, scrollHeight: 1000, clientHeight: 400 }
+			)
+		).toEqual({ type: "scroll", top: 0 });
+
+		expect(
+			resolveReadingScroll(
+				{ direction: 1, kind: "edge" },
+				{ scrollTop: 0, scrollHeight: 1000, clientHeight: 400 }
+			)
+		).toEqual({ type: "scroll", top: 600 });
+
+		// Already at the edge: still an in-chapter scroll, never a chapter hop.
+		expect(
+			resolveReadingScroll(
+				{ direction: -1, kind: "edge" },
+				{ scrollTop: 0, scrollHeight: 1000, clientHeight: 400 }
+			)
+		).toEqual({ type: "scroll", top: 0 });
 	});
 
 	it("scrolls inside the current chapter before crossing a boundary", () => {

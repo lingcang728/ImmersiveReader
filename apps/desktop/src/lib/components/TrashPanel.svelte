@@ -75,7 +75,7 @@
 			<BackButton label="返回书架" onClick={onClose} />
 			<div>
 				<span>书库</span>
-				<h1>回收站</h1>
+				<h2>回收站</h2>
 			</div>
 		</div>
 		<button type="button" class="refresh" on:click={onRefresh} disabled={loading}>刷新</button>
@@ -83,7 +83,7 @@
 
 	<div class="trash-body">
 		<div class="trash-intro">
-			<p>移出书架的内容保留在 Library\.trash；恢复不会覆盖同名目录。</p>
+			<p>移出书架的内容保留在书库回收站目录中；恢复不会覆盖同名目录。</p>
 			<span>{items.length} 项受管书目</span>
 		</div>
 
@@ -92,7 +92,7 @@
 		{:else if items.length === 0}
 			<div class="trash-state empty">
 				<strong>回收站是空的</strong>
-				<p>旧版留下但没有 trash-entry.json 的目录不会在这里出现，也不会被自动删除。</p>
+				<p>旧版留下但没有回收站记录的目录不会在这里出现，也不会被自动删除。</p>
 			</div>
 		{:else}
 			<div class="trash-list">
@@ -105,7 +105,6 @@
 						</div>
 						<div class="trash-meta">
 							<time datetime={item.deletedAt}>{deletedLabel(item.deletedAt)}</time>
-							<span>revision {item.revision}</span>
 						</div>
 						<div class="trash-actions">
 							<button
@@ -161,10 +160,10 @@
 		font-size: 11px;
 		color: var(--text-faded);
 	}
-	h1 {
+	h2 {
 		margin: 0;
 		font-size: 16px;
-		font-weight: 650;
+		font-weight: 600;
 	}
 	button {
 		font: inherit;
@@ -176,6 +175,14 @@
 		background: var(--bg-secondary);
 		color: var(--text-secondary);
 		padding: 7px 14px;
+	}
+	.refresh:hover {
+		border-color: var(--link);
+		color: var(--text);
+	}
+	.refresh:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: 2px;
 	}
 	.trash-body {
 		overflow: auto;
@@ -210,13 +217,14 @@
 		min-width: 0;
 	}
 	.book-id {
-		font: 10px ui-monospace, "Cascadia Mono", monospace;
+		/* 与正文 code/kbd 同一 mono 栈（P3-24 收敛三套不一致的写法）。 */
+		font: 10px "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
 		color: var(--link);
 	}
 	h2 {
 		margin: 5px 0 3px;
 		font-size: 15px;
-		font-weight: 620;
+		font-weight: 600;
 	}
 	.trash-copy p {
 		margin: 0;
@@ -252,10 +260,20 @@
 		background: color-mix(in srgb, var(--link) 13%, transparent);
 		color: var(--link);
 	}
+	.restore:hover {
+		background: color-mix(in srgb, var(--link) 22%, transparent);
+	}
 	.delete {
-		border: 1px solid rgba(196, 100, 90, 0.4);
+		border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
 		background: transparent;
-		color: #d4a099;
+		color: var(--danger);
+	}
+	.delete:hover {
+		background: color-mix(in srgb, var(--danger) 10%, transparent);
+	}
+	.trash-actions button:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: 2px;
 	}
 	.trash-state {
 		padding: 72px 0;

@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
+	import { invokeCommand as invoke } from '$lib/ipc';
+	import { stableRequestId } from '$lib/requestId';
+	import { describeError } from '$lib/errors';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 	import { open } from '@tauri-apps/plugin-dialog';
 	import type { TaskSnapshot } from '$lib/tasks/sync';
@@ -19,6 +21,7 @@
 	interface PodcastBudgetPreview {
 		estimatedDiskBytes: number;
 		estimatedTranslationTokens: number;
+		estimatedPolishTokens: number;
 		estimatedApiCostUpperCny: number;
 		availableDiskBytes: number;
 		estimateVersion: string;
@@ -134,47 +137,40 @@
 			errorText = '请先拖入或选择音频文件。';
 			return;
 		}
+		// F16: `Number(x) || 0` silently mapped garbage input to "no cap" — an
+		// empty/invalid field must be flagged instead of running an unbounded
+		// estimate that then dies at the spec budget gate.
+		const cap = Number(maxApiCostCny);
+		if (!Number.isFinite(cap) || cap < 0) {
+			errorText = '预算上限需为非负数字（0 表示不设上限）。';
+			return;
+		}
 		busy = true;
 		errorText = '';
 		noticeText = '';
 		try {
 			preview = await invoke<PodcastFilesPreview>('preview_podcast_files', {
 				paths: selectedPaths,
-				options: { translate, polish, maxApiCostCny: Number(maxApiCostCny) || 0 }
+				options: { translate, polish, maxApiCostCny: cap }
 			});
 			budgetConfirmed = false;
 		} catch (error) {
-			errorText = `预检失败：${String(error)}`;
+			errorText = `预检失败：${describeError(error)}`;
 			preview = null;
 		} finally {
 			busy = false;
 		}
 	}
 
-	// P2-9: stable request id derived from the task inputs — SHA-256 of
-	// `taskKind|sorted inputs` rendered as a UUID, the same convention the
-	// +page.svelte commands use. A retry of the same payload replays the
-	// recorded command result instead of creating a second set of tasks.
-	// The material must cover exactly the claimed inputs (previewId +
-	// duplicatePolicy + budgetApproval): the backend input_hash covers the
-	// same fields and rejects a reused key with a different hash.
+	// P2-9: stable request id derived from the task inputs — the same
+	// convention the +page.svelte commands use (shared digest in
+	// $lib/requestId, deterministic even without WebCrypto). A retry of the
+	// same payload replays the recorded command result instead of creating a
+	// second set of tasks. The material must cover exactly the claimed inputs
+	// (previewId + duplicatePolicy + budgetApproval): the backend input_hash
+	// covers the same fields and rejects a reused key with a different hash.
 	async function deriveRequestId(taskKind: string, inputs: readonly string[]): Promise<string> {
-		const material = `${taskKind}|${[...inputs].sort().join('|')}`;
-		try {
-			const digest = await crypto.subtle.digest(
-				'SHA-256',
-				new TextEncoder().encode(material)
-			);
-			const bytes = new Uint8Array(digest.slice(0, 16));
-			bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-			bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
-			const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-			return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-		} catch {
-			// Non-secure context / missing WebCrypto: a random id is still
-			// safe — the backend claim just won't deduplicate.
-			return crypto.randomUUID();
-		}
+		return stableRequestId(taskKind, [...inputs].sort().join('|'));
 	}
 
 	async function addTasks() {
@@ -208,7 +204,7 @@
 				result.tasks.length > 0 ? '任务已加入队列；可逐项开始。' : '已复用书架中的相同播客。';
 			onRefreshTasks();
 		} catch (error) {
-			errorText = `创建任务失败：${String(error)}`;
+			errorText = `创建任务失败：${describeError(error)}`;
 		} finally {
 			busy = false;
 		}
@@ -236,7 +232,7 @@
 				unlisten = cleanup;
 			})
 			.catch((error) => {
-				if (!disposed) errorText = `拖放监听注册失败：${String(error)}`;
+				if (!disposed) errorText = `拖放监听注册失败：${describeError(error)}`;
 			});
 		return () => {
 			disposed = true;
@@ -250,7 +246,7 @@
 <WorkflowDialogShell
 	titleId="podcast-title"
 	descriptionId="podcast-description"
-	eyebrow="PODCAST WORKFLOW"
+	eyebrow="播客工作流"
 	title="转写播客"
 	description="音频先进入受管缓存，预检通过后再加入统一任务队列。"
 	maxWidth="720px"
@@ -264,7 +260,10 @@
 		aria-label={selectedPaths.length > 0 ? '继续添加音频文件' : '拖放或选择音频文件'}
 		on:click={() => void chooseFiles()}
 		on:keydown={(event) => {
-			if (event.key === 'Enter' || event.key === ' ') void chooseFiles();
+			if (event.key === 'Enter' || event.key === ' ') {
+				event.preventDefault();
+				void chooseFiles();
+			}
 		}}
 	>
 		<span class="drop-icon" aria-hidden="true">
@@ -499,7 +498,7 @@
 
 	.drop-title {
 		font-size: 15px;
-		font-weight: 650;
+		font-weight: 600;
 		color: var(--wf-title, var(--heading, var(--text)));
 	}
 

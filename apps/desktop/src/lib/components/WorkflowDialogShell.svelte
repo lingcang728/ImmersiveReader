@@ -97,21 +97,23 @@
 </dialog>
 
 <style>
-	/* Workflow tokens — independent of low-contrast --text-faded */
+	/* Workflow tokens — all derived from the active theme's variables, so
+	   dialogs follow MMbook monochrome + link blue instead of a hardcoded
+	   navy palette. */
 	.workflow-dialog {
-		--wf-panel: color-mix(in srgb, var(--bg-secondary) 88%, #0b1a33 12%);
-		--wf-panel-raised: color-mix(in srgb, var(--bg) 70%, #132844 30%);
+		--wf-panel: var(--bg-secondary);
+		--wf-panel-raised: var(--bg);
 		--wf-title: var(--heading, var(--text));
-		--wf-body: color-mix(in srgb, var(--text) 92%, #9eb6d4 8%);
-		--wf-muted: color-mix(in srgb, #9eb6d4 55%, var(--text) 45%);
-		--wf-label: color-mix(in srgb, #9eb6d4 70%, var(--text) 30%);
-		--wf-border: color-mix(in srgb, var(--link) 66%, var(--hr));
+		--wf-body: var(--text);
+		--wf-muted: var(--text-secondary);
+		--wf-label: color-mix(in srgb, var(--text-secondary) 80%, var(--text));
+		--wf-border: color-mix(in srgb, var(--link) 40%, var(--hr));
 		--wf-accent: var(--link);
 		--wf-accent-hover: var(--link-hover);
-		--wf-input-bg: color-mix(in srgb, var(--bg) 85%, #0d1c32 15%);
+		--wf-input-bg: var(--bg);
 		--wf-focus: var(--link);
-		--wf-shadow: 0 28px 90px rgba(4, 12, 28, 0.48);
-		--wf-scrim: rgba(5, 12, 24, 0.72);
+		--wf-shadow: 0 28px 90px rgba(0, 0, 0, 0.45);
+		--wf-scrim: rgba(0, 0, 0, 0.55);
 
 		width: min(var(--workflow-max-width, 720px), calc(100vw - 32px));
 		max-height: min(760px, 92vh);
@@ -122,18 +124,11 @@
 		color: var(--wf-body);
 	}
 
-	/* Light themes: white/pale-blue surfaces, deep navy text, cobalt accent */
+	/* Light themes only soften the scrim/shadow; every color token comes
+	   from the theme variables above. */
 	:global(.app.is-light-theme) .workflow-dialog {
-		--wf-panel: color-mix(in srgb, #ffffff 92%, #dce8f8 8%);
-		--wf-panel-raised: color-mix(in srgb, #f4f8fd 88%, #ffffff 12%);
-		--wf-title: #0f2444;
-		--wf-body: #1a3358;
-		--wf-muted: #3d5a80;
-		--wf-label: #2f4f78;
-		--wf-border: color-mix(in srgb, var(--link) 66%, #c5d4e8);
-		--wf-input-bg: #ffffff;
-		--wf-shadow: 0 24px 70px rgba(15, 36, 68, 0.16);
-		--wf-scrim: rgba(12, 28, 52, 0.42);
+		--wf-shadow: 0 24px 70px rgba(0, 0, 0, 0.16);
+		--wf-scrim: rgba(0, 0, 0, 0.28);
 	}
 
 	.workflow-dialog::backdrop {
@@ -171,17 +166,17 @@
 		color: var(--wf-accent);
 		font-size: 10px;
 		font-weight: 600;
-		letter-spacing: 0.16em;
-		text-transform: uppercase;
+		/* CJK 字形：只需轻微拉开字距，uppercase 对中文无效。 */
+		letter-spacing: 0.08em;
 	}
 
 	.workflow-title {
 		margin: 8px 0 6px;
 		font-size: 24px;
-		font-weight: 650;
+		font-weight: 600;
 		line-height: 1.2;
 		color: var(--wf-title);
-		letter-spacing: -0.01em;
+		letter-spacing: 0;
 	}
 
 	.workflow-description {
@@ -312,7 +307,7 @@
 	.workflow-panel :global(.wf-primary) {
 		border-color: var(--wf-accent);
 		background: var(--wf-accent);
-		color: #ffffff;
+		color: var(--on-accent);
 	}
 
 	.workflow-panel :global(.wf-quiet:hover),
@@ -343,9 +338,7 @@
 
 	.workflow-panel :global(.wf-msg-error) {
 		margin: 0;
-		/* P3-12: converge on the app's single danger red (#d4a099 — same as
-		   .card-menu button.danger and TrashPanel's delete). */
-		color: #d4a099;
+		color: var(--danger);
 		font-size: 12px;
 		line-height: 1.5;
 	}

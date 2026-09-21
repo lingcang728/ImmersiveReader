@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+	import { emit } from '@tauri-apps/api/event';
 
 	export let visible = true;
 	/** When true, chrome overlays content (immersive reading). */
@@ -11,6 +12,14 @@
 	let maximized = false;
 	let unlistenResize: (() => void) | undefined;
 	let resizeRaf = 0;
+
+	// Window system menu (right-click / Shift+F10): custom chrome has no
+	// native titlebar menu, so we provide the same operations ourselves.
+	let menuOpen = false;
+	let menuX = 0;
+	let menuY = 0;
+	let menuEl: HTMLElement | null = null;
+	let menuRestoreFocus: HTMLElement | null = null;
 
 	async function refreshMaximized() {
 		try {
@@ -56,6 +65,79 @@
 		} catch {
 			/* noop */
 		}
+	}
+
+	function requestAppExit() {
+		// Same event the tray menu emits — the page-level listener runs the
+		// full preserve/cancel flow (flush edits, guard unsaved work).
+		void emit('request-app-exit', { mode: 'preserve' }).catch(() => {});
+	}
+
+	function openSystemMenu(x: number, y: number) {
+		menuRestoreFocus =
+			document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		menuX = Math.max(4, Math.min(x, window.innerWidth - 200));
+		menuY = Math.max(4, Math.min(y, window.innerHeight - 190));
+		menuOpen = true;
+		void tick().then(() => {
+			menuEl?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+		});
+	}
+
+	function closeSystemMenu() {
+		if (!menuOpen) return;
+		menuOpen = false;
+		menuRestoreFocus?.focus();
+		menuRestoreFocus = null;
+	}
+
+	function onTitlebarContextMenu(event: MouseEvent) {
+		const target = event.target as HTMLElement | null;
+		if (target?.closest('button, a, input, [data-no-drag]')) return;
+		event.preventDefault();
+		openSystemMenu(event.clientX, event.clientY);
+	}
+
+	function onChromeKeydown(event: KeyboardEvent) {
+		const isMenuKey =
+			event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey);
+		if (!isMenuKey) return;
+		event.preventDefault();
+		const anchor = (document.activeElement as HTMLElement | null)?.getBoundingClientRect();
+		openSystemMenu(anchor ? anchor.left : 24, anchor ? anchor.bottom + 4 : 36);
+	}
+
+	function onMenuKeydown(event: KeyboardEvent) {
+		const items = menuEl
+			? Array.from(menuEl.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+			: [];
+		if (event.key === 'Escape' || event.key === 'Tab') {
+			event.preventDefault();
+			closeSystemMenu();
+			return;
+		}
+		if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+			event.preventDefault();
+			if (!items.length) return;
+			const current = items.indexOf(document.activeElement as HTMLElement);
+			const step = event.key === 'ArrowDown' ? 1 : -1;
+			const next = current < 0 ? 0 : (current + step + items.length) % items.length;
+			items[next].focus();
+		} else if (event.key === 'Home') {
+			event.preventDefault();
+			items[0]?.focus();
+		} else if (event.key === 'End') {
+			event.preventDefault();
+			items[items.length - 1]?.focus();
+		}
+	}
+
+	function onMenuItem(action: 'minimize' | 'maximize' | 'hide' | 'exit') {
+		closeSystemMenu();
+		if (action === 'minimize') void minimize();
+		else if (action === 'maximize') void toggleMaximize();
+		else if (action === 'hide') void closeWindow();
+		else requestAppExit();
 	}
 
 	async function startDrag(event: MouseEvent) {
@@ -119,6 +201,8 @@
 	inert={!visible || undefined}
 	on:mousedown={startDrag}
 	on:dblclick={onTitlebarDblClick}
+	on:contextmenu={onTitlebarContextMenu}
+	on:keydown={onChromeKeydown}
 >
 	<!-- Drag surface only — brand lives in the app toolbar below. -->
 	<div class="chrome-drag" aria-hidden="true"></div>
@@ -138,7 +222,7 @@
 			type="button"
 			class="chrome-btn"
 			aria-label={maximized ? '还原' : '最大化'}
-			title={maximized ? '还原' : '最大化'}
+			title={maximized ? '还原' : '最大化（Win+方向键可贴靠分屏）'}
 			on:click={() => void toggleMaximize()}
 		>
 			{#if maximized}
@@ -182,6 +266,35 @@
 		</button>
 	</div>
 </header>
+
+{#if menuOpen && visible}
+	<!-- svelte-ignore a11y-click-events-have-key-events -->
+	<!-- svelte-ignore a11y-no-static-element-interactions -->
+	<div class="chrome-menu-backdrop" on:mousedown|preventDefault={closeSystemMenu} on:contextmenu|preventDefault={closeSystemMenu}></div>
+	<div
+		class="chrome-menu"
+		role="menu"
+		tabindex="-1"
+		aria-label="窗口菜单"
+		style="left: {menuX}px; top: {menuY}px;"
+		bind:this={menuEl}
+		on:keydown={onMenuKeydown}
+	>
+		<button type="button" role="menuitem" class="chrome-menu-item" on:click={() => onMenuItem('minimize')}>
+			最小化
+		</button>
+		<button type="button" role="menuitem" class="chrome-menu-item" on:click={() => onMenuItem('maximize')}>
+			{maximized ? '还原' : '最大化'}
+		</button>
+		<button type="button" role="menuitem" class="chrome-menu-item" on:click={() => onMenuItem('hide')}>
+			隐藏到托盘
+		</button>
+		<div class="chrome-menu-sep" role="separator"></div>
+		<button type="button" role="menuitem" class="chrome-menu-item" on:click={() => onMenuItem('exit')}>
+			退出
+		</button>
+	</div>
+{/if}
 
 <style>
 	.window-chrome {
@@ -269,5 +382,52 @@
 	.chrome-btn-close:hover {
 		background: #c42b1c;
 		color: #fff;
+	}
+
+	.chrome-menu-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 998;
+	}
+
+	.chrome-menu {
+		position: fixed;
+		z-index: 999;
+		min-width: 180px;
+		padding: 5px;
+		border: 1px solid var(--hr);
+		border-radius: 8px;
+		background: var(--bg-secondary);
+		box-shadow: 0 10px 32px rgba(0, 0, 0, 0.3);
+		display: flex;
+		flex-direction: column;
+	}
+
+	.chrome-menu-item {
+		display: block;
+		width: 100%;
+		border: 0;
+		border-radius: 5px;
+		background: transparent;
+		color: var(--text);
+		font-size: 12.5px;
+		padding: 7px 12px;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.chrome-menu-item:hover {
+		background: color-mix(in srgb, var(--text) 9%, transparent);
+	}
+
+	.chrome-menu-item:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: -2px;
+	}
+
+	.chrome-menu-sep {
+		height: 1px;
+		margin: 4px 8px;
+		background: var(--hr);
 	}
 </style>

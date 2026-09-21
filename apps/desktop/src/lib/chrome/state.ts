@@ -25,7 +25,6 @@ export interface ChromeState {
 	shouldCancelHide: boolean;
 }
 
-export const CHROME_HEIGHT_PX = 36;
 export const CHROME_TOP_EDGE_PX = 10;
 export const CHROME_HIDE_DELAY_MS = 350;
 export const CHROME_ANIMATION_MS = 200;
@@ -254,12 +253,32 @@ export type FlowSetLayoutModeMessage = {
 	contentMaxWidth: number;
 };
 
+/** iframe → parent: reader scripts finished binding the message listener —
+ * the shell re-sends font scale / layout mode so no early post is lost. */
+export type FlowReaderReadyMessage = {
+	source: typeof FLOW_READING_MESSAGE_SOURCE;
+	version: typeof FLOW_READING_MESSAGE_VERSION;
+	type: 'reader-ready';
+};
+
+/** Parent → iframe: apply the active app theme (vars already translated to
+ * the reader template's token names by theme/themes.ts flowThemeVars). */
+export type FlowSetThemeMessage = {
+	source: typeof FLOW_READING_MESSAGE_SOURCE;
+	version: typeof FLOW_READING_MESSAGE_VERSION;
+	type: 'set-theme';
+	scheme: 'light' | 'dark';
+	vars: Record<string, string>;
+};
+
 export type FlowBridgeMessage =
 	| FlowReadingActivityMessage
 	| FlowSetFontScaleMessage
 	| FlowFontScaleChangeMessage
 	| FlowSetLayoutModeMessage
-	| FlowKeyDownMessage;
+	| FlowKeyDownMessage
+	| FlowReaderReadyMessage
+	| FlowSetThemeMessage;
 
 /** Wide column cap when the desktop window is maximized or fullscreen. */
 export const WIDE_LAYOUT_MAX_WIDTH_PX = 1120;
@@ -300,6 +319,19 @@ export function createFlowSetLayoutModeMessage(
 		type: 'set-layout-mode',
 		wide,
 		contentMaxWidth: Math.max(480, Math.round(contentMaxWidth))
+	};
+}
+
+export function createFlowSetThemeMessage(
+	scheme: 'light' | 'dark',
+	vars: Record<string, string>
+): FlowSetThemeMessage {
+	return {
+		source: FLOW_READING_MESSAGE_SOURCE,
+		version: FLOW_READING_MESSAGE_VERSION,
+		type: 'set-theme',
+		scheme,
+		vars
 	};
 }
 
@@ -346,11 +378,18 @@ export function isFlowKeyDownMessage(data: unknown): data is FlowKeyDownMessage 
 	return data.key === 'Escape' || data.key === 'F10';
 }
 
-/** Accept only local reader origins for the flow iframe message bridge. */
+export function isFlowReaderReadyMessage(data: unknown): data is FlowReaderReadyMessage {
+	return isFlowEnvelope(data) && data.type === 'reader-ready';
+}
+
+/** Accept only local reader origins for the flow iframe message bridge.
+ *  'null' (file:// / opaque origins) is never legitimate here — the bridge
+ *  iframe is always served over http://127.0.0.1 by the reader server. */
 export function isAllowedFlowMessageOrigin(origin: string): boolean {
-	return (
-		origin === 'null' ||
-		origin.startsWith('http://127.0.0.1') ||
-		origin.startsWith('http://localhost')
-	);
+	try {
+		const host = new URL(origin).hostname;
+		return host === '127.0.0.1' || host === 'localhost';
+	} catch {
+		return false;
+	}
 }

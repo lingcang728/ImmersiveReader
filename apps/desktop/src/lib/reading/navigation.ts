@@ -1,4 +1,4 @@
-export type ReadingScrollKind = "line" | "page";
+export type ReadingScrollKind = "line" | "page" | "edge";
 
 export interface ReadingScrollIntent {
 	direction: -1 | 1;
@@ -61,6 +61,10 @@ export function readingScrollIntentForKey(
 		case " ":
 		case "Spacebar":
 			return { direction: shiftKey ? -1 : 1, kind: "page" };
+		case "Home":
+			return { direction: -1, kind: "edge" };
+		case "End":
+			return { direction: 1, kind: "edge" };
 		default:
 			return null;
 	}
@@ -75,6 +79,16 @@ export function resolveReadingScroll(
 	}
 ): ReadingScrollResolution {
 	const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+
+	// Home/End: absolute edge jumps inside the current chapter. They never
+	// cross the chapter seam — pressing Home twice does not page backwards.
+	if (intent.kind === "edge") {
+		return {
+			type: "scroll",
+			top: intent.direction === -1 ? 0 : maxScrollTop
+		};
+	}
+
 	const currentScrollTop = Math.max(0, Math.min(maxScrollTop, viewport.scrollTop));
 	const distance =
 		intent.kind === "line"

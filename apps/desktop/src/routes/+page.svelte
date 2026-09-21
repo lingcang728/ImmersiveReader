@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount, tick } from "svelte";
-	import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-	import { listen } from "@tauri-apps/api/event";
+	import { convertFileSrc } from "@tauri-apps/api/core";
+	import { invokeCommand as invoke, listenManaged } from "$lib/ipc";
+	import { stableRequestId } from "$lib/requestId";
 	import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 	import { open } from "@tauri-apps/plugin-dialog";
 	import { openUrl } from "@tauri-apps/plugin-opener";
 	import { checkForDesktopUpdate } from "$lib/update/service";
+	import { describeError, reportError } from "$lib/errors";
 	import {
 		getMarkdownSourceBlock,
 		normalizeMarkdownEditText,
@@ -21,6 +23,7 @@
 		snapshotState,
 		taskList,
 		type AcquisitionSnapshot,
+		type LifecycleState,
 		type TaskEvent,
 		type TaskSnapshot,
 		type TaskSyncState
@@ -47,6 +50,7 @@
 		readingFontFamily,
 		autoFocusMode,
 	} from "$lib/stores/app";
+	import { flowThemeVars } from "$lib/theme/themes";
 	import SearchBar from "$lib/components/SearchBar.svelte";
 	import TocPanel from "$lib/components/TocPanel.svelte";
 	import SettingsPanel from "$lib/components/SettingsPanel.svelte";
@@ -77,10 +81,12 @@
 		createChromeState,
 		createFlowSetFontScaleMessage,
 		createFlowSetLayoutModeMessage,
+		createFlowSetThemeMessage,
 		deriveChromeSurface,
 		isAllowedFlowMessageOrigin,
 		isFlowFontScaleChangeMessage,
 		isFlowKeyDownMessage,
+		isFlowReaderReadyMessage,
 		isFlowReadingActivityMessage,
 		isImmersiveSurface,
 		isOverlaySurface,
@@ -215,6 +221,9 @@
 		block: HTMLElement;
 		occurrence: number;
 	};
+	// A one-character query on a large document would otherwise materialize
+	// tens of thousands of match records per keystroke — cap and say so.
+	const MAX_SEARCH_MATCHES = 5000;
 	let searchMatches: SearchMatch[] = [];
 	let currentMatchIndex = -1;
 	let currentSearchMark: HTMLElement | null = null;
@@ -270,10 +279,15 @@
 	let markdownWorkerFailed = false;
 	let markdownWorkerTransportFailures = 0;
 	const MARKDOWN_WORKER_MAX_TRANSPORT_FAILURES = 3;
+	// A render that never answers would leave isLoading stuck forever —
+	// generous bound for huge documents, then treat as transport failure
+	// (worker gets recycled and the render falls back to the main thread).
+	const MARKDOWN_WORKER_TIMEOUT_MS = 30_000;
 	let nextRenderRequestId = 1;
 	const pendingMarkdownRenders = new Map<number, {
 		resolve: (result: RenderedMarkdownDocument) => void;
 		reject: (error: Error) => void;
+		speculative: boolean;
 	}>();
 	let pendingArticleLinkOpenTimer: ReturnType<typeof setTimeout> | null = null;
 	let pendingArticleLinkOpenUrl = "";
@@ -366,24 +380,71 @@
 
 	$: acquisitionTasks = taskList(taskSyncState);
 
-	async function refreshAcquisitionSnapshot(): Promise<void> {
+	// Backend event replays can fire in bursts — one in-flight snapshot is
+	// shared by all callers instead of stacking one IPC per event.
+	let acquisitionSnapshotInFlight: Promise<void> | null = null;
+	function refreshAcquisitionSnapshot(): Promise<void> {
+		if (acquisitionSnapshotInFlight) return acquisitionSnapshotInFlight;
 		const nonce = ++taskRefreshNonce;
-		try {
-			const snapshot = await invoke<AcquisitionSnapshot>("get_acquisition_snapshot", {
-				kind: null
-			});
-			if (nonce !== taskRefreshNonce) return;
-			taskSyncState = snapshotState(snapshot.tasks);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			showAppNotice(`无法同步任务队列：${message}`);
+		acquisitionSnapshotInFlight = (async () => {
+			try {
+				const snapshot = await invoke<AcquisitionSnapshot>("get_acquisition_snapshot", {
+					kind: null
+				});
+				if (nonce !== taskRefreshNonce) return;
+				taskSyncState = snapshotState(snapshot.tasks);
+			} catch (error) {
+				noticeError("无法同步任务队列", error);
+			} finally {
+				acquisitionSnapshotInFlight = null;
+			}
+		})();
+		return acquisitionSnapshotInFlight;
+	}
+
+	// 02-F5: `acquisition://task-event` is the fast path, but a dropped emit
+	// leaves a row showing a stale state until the next manual refresh. While
+	// any task is non-terminal, re-poll the snapshot on a slow cadence — the
+	// interval only exists while something is still moving, and teardown in
+	// onMount's cleanup clears it with the rest.
+	const ACTIVE_LIFECYCLE_STATES: ReadonlySet<LifecycleState> = new Set([
+		"queued",
+		"starting",
+		"running",
+		"pausing",
+		"paused",
+		"stopping",
+	]);
+	let taskPollTimer: ReturnType<typeof setInterval> | null = null;
+	$: {
+		const hasActiveTask = acquisitionTasks.some((task) =>
+			ACTIVE_LIFECYCLE_STATES.has(task.lifecycleState)
+		);
+		if (hasActiveTask && taskPollTimer === null) {
+			taskPollTimer = setInterval(() => {
+				void refreshAcquisitionSnapshot();
+			}, 15_000);
+		} else if (!hasActiveTask && taskPollTimer !== null) {
+			clearInterval(taskPollTimer);
+			taskPollTimer = null;
 		}
+	}
+
+	// Terminal task events each triggered a full library refresh (4 invokes);
+	// coalesce a burst into a single refresh after 300ms quiet.
+	let libraryRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+	function scheduleLibraryRefresh() {
+		if (libraryRefreshTimer) return;
+		libraryRefreshTimer = setTimeout(() => {
+			libraryRefreshTimer = null;
+			void refreshLibrary();
+		}, 300);
 	}
 
 	function receiveTaskEvent(event: TaskEvent): void {
 		taskEventLog = [event, ...taskEventLog.filter((entry) => !(entry.taskId === event.taskId && entry.sequence === event.sequence))].slice(0, 60);
 		if (taskEventPublishesToLibrary(event)) {
-			void refreshLibrary();
+			scheduleLibraryRefresh();
 		}
 		const result = applyTaskEvent(taskSyncState, event);
 		if (result.kind === "refresh") {
@@ -396,13 +457,25 @@
 		}
 	}
 
+	// postMessage target: the reader session URL's exact origin instead of "*".
+	function flowMessageTargetOrigin(): string {
+		try {
+			return flowReaderSession ? new URL(flowReaderSession.url).origin : "*";
+		} catch {
+			return "*";
+		}
+	}
+
 	function postFlowFontScale(scale: number) {
 		const win = flowIframeEl?.contentWindow;
 		if (!win || !flowReaderSession) return;
 		if (lastPostedFontScale === scale) return;
 		lastPostedFontScale = scale;
 		try {
-			win.postMessage(createFlowSetFontScaleMessage(scale), "*");
+			win.postMessage(
+				createFlowSetFontScaleMessage(scale),
+				flowMessageTargetOrigin(),
+			);
 		} catch {
 			// iframe may be mid-navigation — the load handler re-sends on arrival
 			lastPostedFontScale = null;
@@ -431,10 +504,31 @@
 					wide,
 					wide ? WIDE_LAYOUT_MAX_WIDTH_PX : $readingWidth,
 				),
-				"*",
+				flowMessageTargetOrigin(),
 			);
 		} catch {
 			// iframe may be mid-navigation
+		}
+	}
+
+	// 连读 iframe 跟随应用主题：模板暴露自己的 token 名，由
+	// flowThemeVars 翻译后整包推过去（含 color-scheme）。
+	let lastPostedThemeName: string | null = null;
+	function postFlowTheme() {
+		const win = flowIframeEl?.contentWindow;
+		if (!win || !flowReaderSession) return;
+		if (lastPostedThemeName === $currentTheme.name) return;
+		lastPostedThemeName = $currentTheme.name;
+		try {
+			win.postMessage(
+				createFlowSetThemeMessage(
+					$currentTheme.scheme,
+					flowThemeVars($currentTheme),
+				),
+				flowMessageTargetOrigin(),
+			);
+		} catch {
+			lastPostedThemeName = null;
 		}
 	}
 
@@ -483,9 +577,11 @@
 			flowSyncTarget = { session: flowReaderSession, iframe: flowIframeEl };
 			lastPostedFontScale = null;
 			lastPostedLayoutWide = null;
+			lastPostedThemeName = null;
 		}
 		postFlowFontScale($fontScale);
 		postFlowLayoutMode(windowMaximized);
+		postFlowTheme();
 	} else {
 		flowSyncTarget = null;
 	}
@@ -561,8 +657,10 @@
 	}
 
 	// Any typography change (zoom, line height, width, font) reflows the whole
-	// document. Re-anchor by reading progress — computed before the change —
-	// and re-align focus mode on the same unit.
+	// document. Re-anchor on the block under the viewport anchor line — the
+	// same viewport-anchor mechanism focus mode uses (raw scroll progress
+	// drifts when block heights change) — and re-align focus mode on the
+	// same unit.
 	let lastTypographySignature: string | null = null;
 	let typographyReflowFrame: number | null = null;
 	$: {
@@ -577,11 +675,17 @@
 
 	function reflowAfterTypographyChange() {
 		if (!contentEl || typographyReflowFrame !== null) return;
+		const anchor = captureViewportAnchor();
 		const progress = readingProgress;
 		typographyReflowFrame = requestAnimationFrame(() => {
 			typographyReflowFrame = null;
 			if (!contentEl) return;
-			contentEl.scrollTop = progress * Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
+			if (anchor && anchor.element.isConnected) {
+				restoreViewportAnchor(anchor);
+			} else {
+				contentEl.scrollTop =
+					progress * Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
+			}
 			invalidateFocusMetrics();
 			if ($focusMode) {
 				rebuildFocusMetrics();
@@ -711,6 +815,22 @@
 
 	function hideFootnotePreview() {
 		footnotePreviewHtml = "";
+	}
+
+	// Shared 200ms hide delay: gives pointer/keyboard users time to move onto
+	// the preview card itself without it vanishing underneath them.
+	function cancelFootnoteHide() {
+		if (!footnoteHideTimer) return;
+		clearTimeout(footnoteHideTimer);
+		footnoteHideTimer = null;
+	}
+
+	function scheduleFootnoteHide() {
+		cancelFootnoteHide();
+		footnoteHideTimer = setTimeout(() => {
+			footnoteHideTimer = null;
+			hideFootnotePreview();
+		}, 200);
 	}
 
 	// ===== Image lightbox =====
@@ -923,6 +1043,8 @@
 	const FOCUS_PROGRAMMATIC_SCROLL_SETTLE_MS = 180;
 	const ARTICLE_LINK_OPEN_DELAY_MS = 240;
 	let focusEdgeSpace = 0;
+	// Accumulator for Ctrl+wheel / pinch zoom gestures (see handleWheel).
+	let ctrlWheelDelta = 0;
 	let focusWheelDelta = 0;
 	let focusWheelResetTimer: ReturnType<typeof setTimeout> | null = null;
 	// Wheel ticks can cross the FOCUS_WHEEL_STEP threshold several times per
@@ -958,6 +1080,22 @@
 	function rejectPendingMarkdownRenders(error: Error) {
 		pendingMarkdownRenders.forEach(({ reject }) => reject(error));
 		pendingMarkdownRenders.clear();
+	}
+
+	// F4: worker renders run FIFO and cannot be cancelled once posted — a
+	// stale in-flight render (superseded navigation, obsolete chapter preload)
+	// would head-of-line block the next document. Recycle the worker; it is
+	// lazily rebuilt by the next renderMarkdownForUi call. Losers rethrow this
+	// sentinel instead of falling back to a main-thread render of a document
+	// nobody will show.
+	const RENDER_SUPERSEDED = new Error("markdown render superseded");
+
+	function dropStaleMarkdownRenders() {
+		if (pendingMarkdownRenders.size === 0) return;
+		const staleWorker = markdownWorker;
+		markdownWorker = null;
+		rejectPendingMarkdownRenders(RENDER_SUPERSEDED);
+		staleWorker?.terminate();
 	}
 
 	function noteMarkdownWorkerTransportFailure() {
@@ -1010,8 +1148,27 @@
 		return markdownWorker;
 	}
 
-	async function renderMarkdownForUi(source: string): Promise<RenderedMarkdownDocument> {
-		const worker = getMarkdownWorker();
+	async function renderMarkdownForUi(
+		source: string,
+		options: { speculative?: boolean } = {},
+	): Promise<RenderedMarkdownDocument> {
+		let worker = getMarkdownWorker();
+		if (worker && !options.speculative && pendingMarkdownRenders.size > 0) {
+			// A queued speculative preload must not head-of-line block a
+			// user-facing render (open/edit): when every pending job is
+			// speculative, recycle the worker so this render starts now.
+			let allSpeculative = true;
+			for (const pending of pendingMarkdownRenders.values()) {
+				if (!pending.speculative) {
+					allSpeculative = false;
+					break;
+				}
+			}
+			if (allSpeculative) {
+				dropStaleMarkdownRenders();
+				worker = getMarkdownWorker();
+			}
+		}
 		if (worker) {
 			const id = nextRenderRequestId++;
 			// A synchronous postMessage throw must not leave a dead pending
@@ -1020,18 +1177,39 @@
 			let postFailed = false;
 			try {
 				const rendered = await new Promise<RenderedMarkdownDocument>((resolve, reject) => {
-					pendingMarkdownRenders.set(id, { resolve, reject });
+					const timer = setTimeout(() => {
+						// Entry stays in the map so the catch below classifies this
+						// as a transport failure (orphanedRequest found), not a
+						// document error — a wedged worker must be recycled.
+						reject(new Error("Markdown 渲染超时"));
+					}, MARKDOWN_WORKER_TIMEOUT_MS);
+					pendingMarkdownRenders.set(id, {
+						speculative: options.speculative === true,
+						resolve: (result) => {
+							clearTimeout(timer);
+							resolve(result);
+						},
+						reject: (error) => {
+							clearTimeout(timer);
+							reject(error);
+						},
+					});
 					try {
 						worker.postMessage({ id, source });
 					} catch (postErr) {
 						postFailed = true;
 						pendingMarkdownRenders.delete(id);
+						clearTimeout(timer);
 						reject(postErr instanceof Error ? postErr : new Error(String(postErr)));
 					}
 				});
 				markdownWorkerTransportFailures = 0;
 				return rendered;
 			} catch (err) {
+				// Superseded renders rethrow instead of falling back to the
+				// main thread — the caller's load-token check discards the
+				// result anyway, so rendering inline only stalls the UI.
+				if (err === RENDER_SUPERSEDED) throw err;
 				const orphanedRequest = pendingMarkdownRenders.delete(id);
 				if (!orphanedRequest && !postFailed && markdownWorker === worker) {
 					// Document-level failure: the worker answered {id,error}, so it
@@ -1072,7 +1250,20 @@
 	$: ensureKatexCss($renderedHtml);
 
 	let mermaidModule: any = null;
+	let domPurifyModule: typeof import("dompurify").default | null = null;
 	let nextMermaidId = 1;
+
+	// Mermaid's strict mode already sanitizes internally, but this output is
+	// the one DOM sink that bypasses the rehype-sanitize pipeline — a mermaid
+	// bypass would become a main-WebView XSS primitive, so the SVG goes
+	// through our own DOMPurify pass (svg-only profile) before innerHTML.
+	function sanitizeMermaidSvg(svg: string): string {
+		return domPurifyModule
+			? domPurifyModule.sanitize(svg, {
+					USE_PROFILES: { svg: true, svgFilters: true },
+				})
+			: svg;
+	}
 
 	function getMermaidTheme() {
 		return isLightTheme ? "neutral" : "dark";
@@ -1088,6 +1279,9 @@
 			if (!mermaidModule) {
 				mermaidModule = (await import("mermaid")).default;
 			}
+			if (!domPurifyModule) {
+				domPurifyModule = (await import("dompurify")).default;
+			}
 		} catch (err) {
 			console.warn("Mermaid unavailable:", err);
 			return;
@@ -1099,13 +1293,16 @@
 			securityLevel: "strict"
 		});
 		let replaced = false;
-		for (const code of codes) {
+		// mermaid.render is main-thread CPU work — serial awaits on a
+		// diagram-heavy document stall the page; a small pool bounds it.
+		const renderOne = async (code: Element) => {
 			const pre = code.closest("pre");
-			if (!pre || !pre.isConnected) continue;
+			if (!pre || !pre.isConnected) return;
 			const src = code.textContent ?? "";
 			const renderId = `mmbook-mermaid-${nextMermaidId++}`;
 			try {
 				const { svg } = await mermaidModule.render(renderId, src);
+				if (!pre.isConnected) return;
 				const container = document.createElement("div");
 				container.className = "mermaid-diagram";
 				container.dataset.mermaidSource = src;
@@ -1113,14 +1310,26 @@
 				const end = pre.getAttribute("data-source-end");
 				if (start) container.setAttribute("data-source-start", start);
 				if (end) container.setAttribute("data-source-end", end);
-				container.innerHTML = svg;
+				container.innerHTML = sanitizeMermaidSvg(svg);
 				pre.replaceWith(container);
 				replaced = true;
 			} catch (err) {
 				console.warn("Mermaid render failed:", err);
 				document.getElementById(`d${renderId}`)?.remove();
 			}
-		}
+		};
+		const MERMAID_RENDER_CONCURRENCY = 3;
+		let cursor = 0;
+		await Promise.all(
+			Array.from(
+				{ length: Math.min(MERMAID_RENDER_CONCURRENCY, codes.length) },
+				async () => {
+					while (cursor < codes.length) {
+						await renderOne(codes[cursor++]);
+					}
+				},
+			),
+		);
 
 		if (replaced) {
 			if ($focusMode || $searchQuery.trim()) {
@@ -1133,13 +1342,20 @@
 	}
 
 	// Mermaid bakes theme colors into the SVG — re-render on theme switch.
-	let lastMermaidThemeName = "";
-	$: if ($currentTheme.name !== lastMermaidThemeName) {
-		lastMermaidThemeName = $currentTheme.name;
-		void rethemeMermaidDiagrams();
+	// The trigger keys on the effective mermaid theme (light/dark), not the
+	// theme name: two dark themes share the same diagram colors and must not
+	// re-render. The generation counter guards concurrency — a retheme that
+	// is still awaiting mermaid.render when the theme flips again must not
+	// overwrite containers with stale-theme SVG.
+	let mermaidGeneration = 0;
+	let lastMermaidIsLight: boolean | null = null;
+	$: if (isLightTheme !== lastMermaidIsLight) {
+		lastMermaidIsLight = isLightTheme;
+		mermaidGeneration += 1;
+		void rethemeMermaidDiagrams(mermaidGeneration);
 	}
 
-	async function rethemeMermaidDiagrams() {
+	async function rethemeMermaidDiagrams(generation: number) {
 		if (!mermaidModule) return;
 		const article = getArticleElement();
 		const containers = article
@@ -1152,12 +1368,14 @@
 			securityLevel: "strict"
 		});
 		for (const container of containers) {
+			if (generation !== mermaidGeneration) return;
 			const src = container.dataset.mermaidSource ?? "";
-			if (!src) continue;
+			if (!src || !container.isConnected) continue;
 			const renderId = `mmbook-mermaid-${nextMermaidId++}`;
 			try {
 				const { svg } = await mermaidModule.render(renderId, src);
-				container.innerHTML = svg;
+				if (generation !== mermaidGeneration || !container.isConnected) continue;
+				container.innerHTML = sanitizeMermaidSvg(svg);
 			} catch {
 				document.getElementById(`d${renderId}`)?.remove();
 			}
@@ -1184,6 +1402,65 @@
 		pendingArticleLinkOpenUrl = "";
 	}
 
+	// Relative links resolve against the current file's directory. Absolute
+	// (drive-letter / leading-slash) targets pass through as-is — the backend
+	// command still gates what may actually be read.
+	function resolveRelativeArticleLink(
+		rawHref: string,
+	): { path: string; anchor: string } | null {
+		const hashIdx = rawHref.indexOf("#");
+		const anchorRaw = hashIdx >= 0 ? rawHref.slice(hashIdx + 1) : "";
+		const rel = (hashIdx >= 0 ? rawHref.slice(0, hashIdx) : rawHref).split("?")[0];
+		if (!rel) return null;
+		let decoded: string;
+		try {
+			decoded = decodeURIComponent(rel);
+		} catch {
+			decoded = rel;
+		}
+		let anchor = "";
+		try {
+			anchor = decodeURIComponent(anchorRaw);
+		} catch {
+			anchor = anchorRaw;
+		}
+		const normalized = decoded.replace(/\\/g, "/");
+		if (/^[a-zA-Z]:\//.test(normalized) || normalized.startsWith("/")) {
+			return { path: normalized, anchor };
+		}
+		const base = $currentFilePath;
+		if (!base) return null;
+		const baseDir = base.replace(/\\/g, "/").replace(/\/[^/]*$/, "");
+		const parts = baseDir.split("/");
+		for (const seg of normalized.split("/")) {
+			if (seg === "" || seg === ".") continue;
+			if (seg === "..") {
+				if (parts.length <= 1) return null;
+				parts.pop();
+			} else {
+				parts.push(seg);
+			}
+		}
+		return { path: parts.join("/"), anchor };
+	}
+
+	async function openRelativeArticleLink(rawHref: string) {
+		const resolved = resolveRelativeArticleLink(rawHref);
+		if (!resolved || !/\.(md|markdown)$/i.test(resolved.path)) {
+			showAppNotice("仅支持打开 Markdown 文件链接");
+			return;
+		}
+		try {
+			// Doubles as an existence + allowed-path check via the backend.
+			await invoke<number>("get_file_mtime", { path: resolved.path });
+		} catch {
+			showAppNotice("链接的目标文件不存在或不可读");
+			return;
+		}
+		const opened = await openFile(resolved.path, { bookChapter: !!activeBook });
+		if (opened && resolved.anchor) scrollToHeading(resolved.anchor);
+	}
+
 	function handleArticleLinkClick(event: MouseEvent, link: HTMLAnchorElement): boolean {
 		const rawHref = link.getAttribute("href");
 
@@ -1193,12 +1470,25 @@
 			event.preventDefault();
 			event.stopPropagation();
 			hideFootnotePreview();
-			scrollToHeading(decodeURIComponent(rawHref.slice(1)));
+			try {
+				scrollToHeading(decodeURIComponent(rawHref.slice(1)));
+			} catch {
+				scrollToHeading(rawHref.slice(1));
+			}
 			return true;
 		}
 
 		const externalUrl = getExternalUrlToOpen(rawHref);
-		if (!externalUrl) return false;
+		if (!externalUrl) {
+			// 相对路径与非 http(s) 协议链接绝不能走默认导航——WebView 会去
+			// 加载 tauri.localhost 下的地址，把整个应用页面换掉。Markdown
+			// 链接按当前文件目录解析后在阅读器内打开，其余提示不支持。
+			event.preventDefault();
+			event.stopPropagation();
+			hideFootnotePreview();
+			if (rawHref) void openRelativeArticleLink(rawHref);
+			return true;
+		}
 
 		event.preventDefault();
 		event.stopPropagation();
@@ -1266,6 +1556,12 @@
 		}, 5000);
 	}
 
+	// User-facing failure notice: raw backend codes go to the console, the
+	// notice shows the localized description from lib/errors.ts.
+	function noticeError(prefix: string, error: unknown) {
+		showAppNotice(`${prefix}：${reportError(prefix, error)}`);
+	}
+
 	// Close the Ctrl+F overlay so it can never sit above a modal layer.
 	function closeSearchOverlay() {
 		if (!$searchOpen) return;
@@ -1274,32 +1570,11 @@
 		clearSearchHighlights();
 	}
 
-	// Derive a request id from the operation inputs instead of minting a fresh
-	// UUID per click: retrying the same action reproduces the same id, so the
-	// backend's idempotent command claim dedupes retries rather than spawning
-	// duplicate tasks. SHA-256 of the parts, folded into UUID layout.
-	async function stableRequestId(
-		...parts: readonly (string | number | null | undefined)[]
-	): Promise<string> {
-		const input = parts.map((part) => String(part ?? "")).join("\n");
-		try {
-			const digest = await crypto.subtle.digest(
-				"SHA-256",
-				new TextEncoder().encode(input)
-			);
-			const bytes = new Uint8Array(digest);
-			bytes[6] = (bytes[6] & 0x0f) | 0x40; // UUID version 4 layout
-			bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant bits
-			const hex = Array.from(bytes.subarray(0, 16), (b) =>
-				b.toString(16).padStart(2, "0")
-			).join("");
-			return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-		} catch {
-			// No crypto.subtle (non-secure context): still a valid request id,
-			// just not retry-stable.
-			return crypto.randomUUID();
-		}
-	}
+	// Request ids derive from the operation inputs (see $lib/requestId):
+	// retrying the same action reproduces the same id, so the backend's
+	// idempotent command claim dedupes retries rather than spawning
+	// duplicate tasks — including the no-WebCrypto fallback, which used to
+	// mint a random id per call and silently disable the dedupe.
 
 	// Overlapping refreshes (task-event bursts interleave with explicit calls)
 	// resolved out of order used to make the bookshelf flash a stale list.
@@ -1325,14 +1600,17 @@
 			if (nonce !== libraryRefreshNonce) return;
 			appSettings = settings;
 			libraryBooks = scan.books;
-			libraryIssues = scan.issues;
+			libraryIssues = scan.issues.map((issue) => ({
+				...issue,
+				message: describeError(issue.message),
+			}));
 			libraryWritable = scan.writable;
 			temporaryItems = nextTemporaryItems;
 			if (nextTrashItems !== null) trashItems = nextTrashItems;
 		} catch (error) {
 			if (nonce !== libraryRefreshNonce) return;
 			libraryBooks = [];
-			libraryIssues = [{ path: appSettings?.libraryRoot ?? "书库", message: String(error) }];
+			libraryIssues = [{ path: appSettings?.libraryRoot ?? "书库", message: reportError("书库扫描", error) }];
 			libraryWritable = false;
 		} finally {
 			if (nonce === libraryRefreshNonce) {
@@ -1353,7 +1631,7 @@
 			await refreshLibrary();
 			await openLibraryBook(manifest.bookId);
 		} catch (error) {
-			showAppNotice(`导入失败：${String(error)}`);
+			noticeError("导入失败", error);
 		} finally {
 			importFolderBusy = false;
 		}
@@ -1370,13 +1648,13 @@
 			await refreshLibrary();
 			showAppNotice("书库位置已更新");
 		} catch (error) {
-			showAppNotice(`无法更新书库：${String(error)}`);
+			noticeError("无法更新书库", error);
 		}
 	}
 
 	async function removeLibraryBook(bookId: string, title: string, chapterCount: number) {
 		const ok = await confirmAction(
-			`将《${title}》移出书架？\n\n${chapterCount} 篇内容会移到书库 .trash，可手动恢复，不会立刻永久删除。`,
+			`将《${title}》移出书架？\n\n${chapterCount} 篇内容会移入回收站，可手动恢复，不会立刻永久删除。`,
 			"移出书架"
 		);
 		if (!ok) return;
@@ -1389,7 +1667,7 @@
 			}
 			showAppNotice(message);
 		} catch (error) {
-			showAppNotice(`移出失败：${String(error)}`);
+			noticeError("移出失败", error);
 		}
 	}
 
@@ -1411,7 +1689,7 @@
 			}
 			showAppNotice(message);
 		} catch (error) {
-			showAppNotice(`删除失败：${String(error)}`);
+			noticeError("删除失败", error);
 		}
 	}
 
@@ -1430,7 +1708,7 @@
 				{ bookId }
 			);
 		} catch (error) {
-			showAppNotice(`无法启动连读：${String(error)}`);
+			noticeError("无法启动连读", error);
 		} finally {
 			flowReaderStarting = false;
 		}
@@ -1438,10 +1716,12 @@
 
 	async function startPodcastTask(taskId: string) {
 		try {
-			await invoke("start_podcast_task", { taskId });
-			showAppNotice("播客任务已启动");
+			// Backend returns false when the worker slot is taken and the task
+			// stays Queued — "已启动" would lie about a task that is not running.
+			const started = await invoke<boolean>("start_podcast_task", { taskId });
+			showAppNotice(started ? "播客任务已启动" : "播客任务已排队，等待空闲槽位");
 		} catch (error) {
-			showAppNotice(`无法启动播客任务：${String(error)}`);
+			noticeError("无法启动播客任务", error);
 		}
 	}
 
@@ -1451,7 +1731,7 @@
 			showAppNotice("知乎任务已启动");
 			await refreshAcquisitionSnapshot();
 		} catch (error) {
-			showAppNotice(`无法启动知乎任务：${String(error)}`);
+			noticeError("无法启动知乎任务", error);
 		}
 	}
 
@@ -1472,7 +1752,7 @@
 			showAppNotice(action === "pause" ? "知乎任务已暂停" : action === "resume" ? "知乎任务已恢复" : "知乎任务已取消");
 			await refreshAcquisitionSnapshot();
 		} catch (error) {
-			showAppNotice(`知乎任务控制失败：${String(error)}`);
+			noticeError("知乎任务控制失败", error);
 		}
 	}
 
@@ -1490,16 +1770,19 @@
 			if (snapshot.outcome === "success") {
 				showAppNotice("发布成功，文稿已保存到 书库/播客");
 			} else {
-				showAppNotice("已重新开始转写");
+				// Same task id = in-place resume reusing the checkpoint; a new
+				// id means a full re-run on a cloned task.
+				showAppNotice(
+					snapshot.id === taskId ? "已从上次进度续跑" : "已重新开始转写"
+				);
 			}
 			await refreshAcquisitionSnapshot();
 		} catch (error) {
-			const message = String(error);
 			// Never let a retry error look like a silent crash — surface it clearly.
 			showAppNotice(
-				message.includes("INPUT_MISSING") || message.includes("TASK_CONTRACT_MISSING")
+				String(error).includes("INPUT_MISSING") || String(error).includes("TASK_CONTRACT_MISSING")
 					? "无法重试：原音频或任务信息已丢失，请重新添加音频。"
-					: `无法重试播客任务：${message}`
+					: `无法重试播客任务：${reportError("重试播客任务", error)}`
 			);
 			await refreshAcquisitionSnapshot();
 		}
@@ -1511,11 +1794,11 @@
 			await refreshLibrary();
 			await openLibraryBook(detail.manifest.bookId);
 		} catch (error) {
-			const message = String(error);
+			const description = reportError("打开播客结果", error);
 			showAppNotice(
-				message.includes("Book not found") || message.includes("书架中找不到")
-					? `无法打开播客：书架中还没有这本书。若转写刚完成，请点「重试」或重新打开。详情：${message}`
-					: `无法打开播客结果：${message}`
+				String(error).includes("Book not found") || String(error).includes("书架中找不到")
+					? "无法打开播客：书架中还没有这本书。若转写刚完成，请点「重试」或重新打开。"
+					: `无法打开播客结果：${description}`
 			);
 		}
 	}
@@ -1525,11 +1808,8 @@
 		action: "pause" | "resume" | "cancel" | "cancel_and_discard",
 		expectedRevision: number
 	) {
-		if (
-			action === "cancel_and_discard" &&
-			!(await confirmAction("取消并丢弃该播客任务及缓存？", "取消并丢弃", true))
-		)
-			return;
+		// TaskRow already confirms discard in its own dialog — a second
+		// confirmAction here made every discard ask twice.
 		try {
 			await invoke("control_podcast_task", {
 				taskId,
@@ -1537,9 +1817,14 @@
 				expectedRevision,
 				requestId: await stableRequestId("control_podcast_task", taskId, action, expectedRevision)
 			});
-			showAppNotice(action === "pause" ? "任务已暂停" : action === "resume" ? "任务已恢复" : "任务已取消");
+			showAppNotice(
+				action === "pause" ? "任务已暂停"
+				: action === "resume" ? "任务已恢复"
+				: action === "cancel_and_discard" ? "任务缓存已丢弃"
+				: "任务已取消"
+			);
 		} catch (error) {
-			showAppNotice(`任务控制失败：${String(error)}`);
+			noticeError("任务控制失败", error);
 		}
 	}
 
@@ -1548,8 +1833,7 @@
 		try {
 			trashItems = await invoke<TrashItem[]>("list_trash");
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			showAppNotice(`无法读取回收站：${message}`);
+			noticeError("无法读取回收站", error);
 		} finally {
 			trashLoading = false;
 		}
@@ -1570,8 +1854,7 @@
 			await Promise.all([refreshTrash(), refreshLibrary()]);
 			showAppNotice(`已恢复《${item.title}》`);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			showAppNotice(`恢复失败：${message}`);
+			noticeError("恢复失败", error);
 		}
 	}
 
@@ -1595,8 +1878,7 @@
 			await refreshTrash();
 			showAppNotice(`已永久删除 ${result.deletedItems} 个项目`);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			showAppNotice(`永久删除失败：${message}`);
+			noticeError("永久删除失败", error);
 		}
 	}
 
@@ -1607,7 +1889,7 @@
 		try {
 			await invoke("close_reader_session", { sessionId: session.sessionId });
 		} catch (error) {
-			showAppNotice(`无法关闭连读会话：${String(error)}`);
+			noticeError("无法关闭连读会话", error);
 		}
 	}
 
@@ -1621,14 +1903,14 @@
 		try {
 			selectedBookDetail = await invoke<BookDetail>("open_book", { bookId });
 		} catch (error) {
-			showAppNotice(`无法读取书目详情：${String(error)}`);
+			noticeError("无法读取书目详情", error);
 		}
 	}
 
 	function openBookSource(source: string, sourceId?: string | null) {
 		if (source !== "zhihu" || !sourceId) return;
 		const url = getExternalUrlToOpen(`https://www.zhihu.com/people/${encodeURIComponent(sourceId)}`);
-		if (url) void openUrl(url).catch((error) => showAppNotice(`无法打开来源链接：${String(error)}`));
+		if (url) void openUrl(url).catch((error) => noticeError("无法打开来源链接", error));
 	}
 
 	// chapterIndex comes from a detail-dialog chapter click: open that chapter
@@ -1637,6 +1919,18 @@
 		if ((await requestNavigationGuard("切换书目")) === "cancel") return;
 		try {
 			const detail = await invoke<BookDetail>("open_book", { bookId });
+			// F12: an unacked crash shadow may hold progress the backend never
+			// confirmed. Adopt it only when its `updated` stamp beats the on-disk
+			// record — the flow reader can write the same record via HTTP, so a
+			// stale shadow must never regress a newer save.
+			const shadow = readProgressShadow(`book:${bookId}`);
+			if (shadow && !shadow.acked && shadow.bookProgress) {
+				const shadowed = shadow.bookProgress as { updated?: string };
+				const diskStamp = typeof detail.progress?.updated === "string" ? detail.progress.updated : "";
+				if (typeof shadowed.updated === "string" && shadowed.updated > diskStamp) {
+					detail.progress = { ...detail.progress, ...(shadow.bookProgress as typeof detail.progress) };
+				}
+			}
 			const index =
 				chapterIndex !== undefined &&
 				chapterIndex >= 0 &&
@@ -1663,7 +1957,7 @@
 			tocItems = chapterTocItems(detail.manifest.chapters);
 			updateWindowTitle(`${detail.manifest.title} · ${chapter.title}`);
 		} catch (error) {
-			showAppNotice(`无法打开文集：${String(error)}`);
+			noticeError("无法打开文集", error);
 		}
 	}
 
@@ -1675,7 +1969,14 @@
 		const completed = forceComplete || readingProgress >= 0.999 || (isLast && readingProgress >= 0.95);
 		const progress = nextReadingState(activeBook.progress, chapter.id, readingProgress, completed);
 		activeBook = { ...activeBook, progress };
+		const shadowKey = `book:${activeBook.manifest.bookId}`;
+		stageProgressShadow(shadowKey, {
+			scrollPosition: contentEl?.scrollTop,
+			progressRatio: readingProgress,
+			bookProgress: progress,
+		});
 		await invoke("save_book_progress", { bookId: activeBook.manifest.bookId, progress });
+		ackProgressShadow(shadowKey);
 	}
 
 	function preloadNextBookChapter(): Promise<void> {
@@ -1694,7 +1995,7 @@
 			try {
 				const path = await invoke<string>("get_book_chapter_path", { bookId, chapterId: chapter.id });
 				const result = await invoke<{ content: string; encoding: string }>("read_markdown_file", { path });
-				const rendered = await renderMarkdownForUi(result.content);
+				const rendered = await renderMarkdownForUi(result.content, { speculative: true });
 				if (activeBook?.manifest.bookId === bookId && activeChapterIndex + 1 === index) {
 					preloadedChapter = { bookId, index, path, result, rendered };
 				}
@@ -1769,7 +2070,10 @@
 				let progress = nextReadingState(activeBook.progress, previous.id, readingProgress, completePrevious);
 				progress = { ...progress, current: chapter.id, position, updated: new Date().toISOString() };
 				activeBook = { ...activeBook, progress };
+				const shadowKey = `book:${activeBook.manifest.bookId}`;
+				stageProgressShadow(shadowKey, { bookProgress: progress });
 				await invoke("save_book_progress", { bookId: activeBook.manifest.bookId, progress });
+				ackProgressShadow(shadowKey);
 			}
 			const cached = preloadedChapter?.bookId === activeBook.manifest.bookId && preloadedChapter.index === index
 				? preloadedChapter
@@ -1863,6 +2167,12 @@
 	async function returnToBookshelf() {
 		if ((await requestNavigationGuard("返回书架")) === "cancel") return;
 		await flushSaveState();
+		// Invalidate any in-flight openFile/worker render before tearing the
+		// surface down — otherwise a slow render can repopulate the reader
+		// after the bookshelf is already shown.
+		navigationGeneration += 1;
+		currentLoadToken = "";
+		dropStaleMarkdownRenders();
 		resetReaderSurfaceForBookshelf();
 		activeBook = null;
 		trashOpen = false;
@@ -1998,6 +2308,13 @@
 	// the reflow, and scroll it back to the anchor line afterwards.
 	type ViewportAnchor = { element: HTMLElement; ratio: number };
 	let pendingExitAnchor: ViewportAnchor | null = null;
+	// Right after open-restore the anchor is remembered so images that finish
+	// loading afterwards (and reflow content above it) can be re-anchored
+	// instead of silently drifting. Cleared on the first user scroll intent
+	// or after a short settle window.
+	let openAnchor: ViewportAnchor | null = null;
+	let openAnchorDeadline = 0;
+	const OPEN_ANCHOR_SETTLE_MS = 4000;
 
 	function captureViewportAnchor(): ViewportAnchor | null {
 		const article = getArticleElement();
@@ -2058,6 +2375,8 @@
 		const initialFileTimer = setTimeout(checkInitialFile, 200);
 
 		const handleKeydown = (e: KeyboardEvent) => {
+			// Keyboard scrolling is user scroll intent too.
+			if (openAnchor && isReadingActivityKey(e.key)) openAnchor = null;
 			// While a modal layer is open it owns the keyboard: global shortcuts
 			// (Space, arrows, Ctrl+…) must not act on the surface beneath. The
 			// workflow dialogs are native <dialog> and close on Esc by themselves;
@@ -2102,6 +2421,9 @@
 
 			if (isModKey(e) && e.key === "f") {
 				e.preventDefault();
+				// 搜索只作用于精读界面：没有打开的文章时 Ctrl+F 不弹出
+				// 一个永远 0 结果的空搜索层。
+				if (!showMarkdownContext) return;
 				$searchOpen = !$searchOpen;
 				if (!$searchOpen) {
 					$searchQuery = "";
@@ -2158,6 +2480,8 @@
 
 			if (isModKey(e) && e.key === "t") {
 				e.preventDefault();
+				// 目录同样需要已渲染的文章；书架/连读界面下不做任何事。
+				if (!showMarkdownContext) return;
 				$tocOpen = !$tocOpen;
 				return;
 			}
@@ -2195,6 +2519,17 @@
 					}
 					return;
 				}
+				// Home/End in focus mode: jump to the chapter edges. The scroll
+				// event then re-anchors the spotlight on the nearest unit.
+				if (e.key === "Home" || e.key === "End") {
+					e.preventDefault();
+					if (chapterNavigationKeyLatch.isLatched(e.key)) return;
+					handleReadingScrollIntent(
+						{ direction: e.key === "Home" ? -1 : 1, kind: "edge" },
+						e.key,
+					);
+					return;
+				}
 			}
 
 			if (
@@ -2217,6 +2552,27 @@
 					handleReadingScrollIntent(intent, e.key);
 					return;
 				}
+			}
+
+			// 键盘编辑入口：E / F2 编辑当前阅读位置的段落（专注模式下取
+			// 聚光灯所在块），Esc 取消，双击仍然是鼠标路径。
+			if (
+				$currentFilePath &&
+				!flowReaderSession &&
+				!editingParagraph &&
+				!$searchOpen &&
+				!$tocOpen &&
+				!$settingsOpen &&
+				!lightboxSrc &&
+				!e.ctrlKey &&
+				!e.metaKey &&
+				!e.altKey &&
+				!isTextInputTarget(e.target) &&
+				(e.key === "e" || e.key === "E" || e.key === "F2")
+			) {
+				e.preventDefault();
+				startEditAtReadingPosition();
+				return;
 			}
 
 			if ($searchOpen && e.key === "Enter") {
@@ -2274,6 +2630,11 @@
 				const scrollHeight = contentEl.scrollHeight - contentEl.clientHeight;
 				readingProgress = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
 				if (activeBook && readingProgress >= 0.84) void preloadNextBookChapter();
+				// Keep the TOC "current section" highlight tracking while it is
+				// open — scrollTop is not a reactive dependency of the $: block.
+				if ($tocOpen && !activeBook) {
+					tocActiveId = getCurrentHeading()?.id ?? "";
+				}
 				if ($currentFilePath) noteReadingActivity();
 
 				if ($currentFilePath && $focusMode) {
@@ -2308,16 +2669,23 @@
 		};
 
 		const handleWheel = (e: WheelEvent) => {
+			// User scrolled — stop re-anchoring the just-opened document.
+			openAnchor = null;
 			if (!$currentFilePath && !flowReaderSession) return;
 
 			// Ctrl+wheel (and touchpad pinch on Windows) zooms the reader font.
+			// Pinch gestures emit a burst of tiny deltaY events — accumulate
+			// them so one gesture produces one scale step, not ten.
 			if (e.ctrlKey) {
 				e.preventDefault();
-				if (Math.abs(e.deltaY) > 0.01) {
-					adjustFontScale(e.deltaY < 0 ? 1 : -1);
+				ctrlWheelDelta += e.deltaY;
+				if (Math.abs(ctrlWheelDelta) >= 50) {
+					adjustFontScale(ctrlWheelDelta < 0 ? 1 : -1);
+					ctrlWheelDelta = 0;
 				}
 				return;
 			}
+			ctrlWheelDelta = 0;
 			if ($currentFilePath || flowReaderSession) {
 				scheduleReadingActivity();
 			}
@@ -2416,6 +2784,24 @@
 			selectionRevealedOriginals = Array.from(originals);
 		};
 
+		const togglePodcastOriginal = (original: HTMLElement) => {
+			const bilingualId = original.dataset.bilingualId;
+			const originals = bilingualId
+				? Array.from(contentEl.querySelectorAll("blockquote.podcast-original")).filter(
+					(node) => (node as HTMLElement).dataset.bilingualId === bilingualId,
+				  )
+				: [original];
+			const reveal = !original.classList.contains("is-revealed");
+			originals.forEach((node) => {
+				node.classList.toggle("is-revealed", reveal);
+				// blockquote 是 role="button" 的展开控件（见 markdown.ts
+				// markPodcastOriginal），同步 aria-expanded 供读屏器报状态。
+				// 选中译文触发的 is-selection-revealed 是瞬时视觉提示，
+				// 不动 aria-expanded——展开状态只反映用户显式 pin 的操作。
+				node.setAttribute("aria-expanded", reveal ? "true" : "false");
+			});
+		};
+
 		const handleContentClick = (e: MouseEvent) => {
 			const target = e.target as HTMLElement | null;
 			if (!target || !contentEl.querySelector(".article")?.contains(target)) return;
@@ -2434,14 +2820,7 @@
 
 			const original = target.closest("blockquote.podcast-original") as HTMLElement | null;
 			if (original) {
-				const bilingualId = original.dataset.bilingualId;
-				const originals = bilingualId
-					? Array.from(contentEl.querySelectorAll("blockquote.podcast-original")).filter(
-						(node) => (node as HTMLElement).dataset.bilingualId === bilingualId,
-					  )
-					: [original];
-				const reveal = !original.classList.contains("is-revealed");
-				originals.forEach((node) => node.classList.toggle("is-revealed", reveal));
+				togglePodcastOriginal(original);
 				return;
 			}
 
@@ -2449,8 +2828,26 @@
 			focusBlockFromInteraction(target);
 		};
 
+		// 双语原文块是 tabindex=0 的可聚焦元素：键盘用户用 Enter/Space
+		// 展开/收起，与鼠标点击等价。stopPropagation 防止 Space 被全局
+		// 阅读快捷键解释成向下翻页。
+		const handleContentKeydown = (e: KeyboardEvent) => {
+			if (e.key !== "Enter" && e.key !== " ") return;
+			const target = e.target as HTMLElement | null;
+			if (!target || !contentEl.contains(target)) return;
+			// tabindex 在 blockquote 本身上，只有它聚焦时才切换。
+			const original = target.closest?.("blockquote.podcast-original") as HTMLElement | null;
+			if (!original || original !== target) return;
+			e.preventDefault();
+			e.stopPropagation();
+			togglePodcastOriginal(original);
+		};
+
 		const handleDblClick = (e: MouseEvent) => {
 			cancelPendingArticleLinkOpen();
+			// 双击选词是正常的文本选择手势——非折叠选区说明用户在选择而
+			// 不是想进编辑；此时不动选区、不吞事件，双击只取消链接导航。
+			if (window.getSelection()?.isCollapsed === false) return;
 			e.preventDefault();
 			e.stopPropagation();
 			const target = (e.target as HTMLElement)?.closest("p, h1, h2, h3, h4, h5, h6, li, blockquote, pre");
@@ -2484,11 +2881,11 @@
 		});
 
 		// macOS: file opened via Apple Event (double-click / Open With)
-		const unlistenOpenFile = listen<string>('open-file', (event) => {
+		const unlistenOpenFile = listenManaged<string>('open-file', (event) => {
 			// openFile will handle canceling any active edit
 			openFile(event.payload);
 		});
-		const unlistenTaskEvents = listen<TaskEvent>("acquisition://task-event", (event) => {
+		const unlistenTaskEvents = listenManaged<TaskEvent>("acquisition://task-event", (event) => {
 			receiveTaskEvent(event.payload);
 		});
 		const refreshTasksOnResume = () => {
@@ -2524,10 +2921,7 @@
 		const handleContentMouseOver = (e: MouseEvent) => {
 			const link = getFootnoteLink(e.target);
 			if (link) {
-				if (footnoteHideTimer) {
-					clearTimeout(footnoteHideTimer);
-					footnoteHideTimer = null;
-				}
+				cancelFootnoteHide();
 				showFootnotePreview(link);
 			}
 
@@ -2541,15 +2935,24 @@
 
 		const handleContentMouseOut = (e: MouseEvent) => {
 			if (getFootnoteLink(e.target)) {
-				if (footnoteHideTimer) clearTimeout(footnoteHideTimer);
-				footnoteHideTimer = setTimeout(() => {
-					footnoteHideTimer = null;
-					hideFootnotePreview();
-				}, 200);
+				scheduleFootnoteHide();
 			}
 			if (e.target instanceof HTMLElement && e.target.closest(".article pre")) {
 				scheduleCodeCopyHide();
 			}
+		};
+
+		// 脚注链接可被 Tab 聚焦——预览对键盘用户同样可用（focusin/focusout
+		// 与 mouseover/mouseout 走同一套 200ms 隐藏延时）。
+		const handleContentFocusIn = (e: FocusEvent) => {
+			const link = getFootnoteLink(e.target);
+			if (!link) return;
+			cancelFootnoteHide();
+			showFootnotePreview(link);
+		};
+
+		const handleContentFocusOut = (e: FocusEvent) => {
+			if (getFootnoteLink(e.target)) scheduleFootnoteHide();
 		};
 
 		window.addEventListener("keydown", handleKeydown);
@@ -2560,17 +2963,46 @@
 		contentEl?.addEventListener("scroll", handleScroll);
 		contentEl?.addEventListener("wheel", handleWheel, { passive: false });
 		contentEl?.addEventListener("click", handleContentClick);
+		contentEl?.addEventListener("keydown", handleContentKeydown);
 		document.addEventListener("selectionchange", handlePodcastSelectionChange);
 		contentEl?.addEventListener("dblclick", handleDblClick);
 		contentEl?.addEventListener("mouseover", handleContentMouseOver);
 		contentEl?.addEventListener("mouseout", handleContentMouseOut);
+		contentEl?.addEventListener("focusin", handleContentFocusIn);
+		contentEl?.addEventListener("focusout", handleContentFocusOut);
 		// Images load lazily and reflow the article when they land — capture-phase
 		// load events keep the cached heading offsets honest (focus metrics have
 		// their own invalidation paths).
+		let contentLoadFrame: number | null = null;
 		const handleContentLoad = () => {
 			invalidateHeadingIndex();
+			// An image that just landed reflows the article: focus metrics go
+			// stale and content above the viewport pushes the reading position
+			// down. Coalesce to one correction per frame.
+			if (contentLoadFrame !== null) return;
+			contentLoadFrame = requestAnimationFrame(() => {
+				contentLoadFrame = null;
+				if (openAnchor && Date.now() > openAnchorDeadline) openAnchor = null;
+				if (openAnchor) restoreViewportAnchor(openAnchor);
+				invalidateFocusMetrics();
+				if ($currentFilePath && $focusMode) {
+					rebuildFocusMetrics();
+					const units = getFocusUnits();
+					if (lastFocusedIdx >= 0 && units[lastFocusedIdx]) {
+						focusLockedIndex = lastFocusedIdx;
+						markFocusScrollActive();
+						scrollUnitToFocusPosition(units[lastFocusedIdx], lastFocusedIdx, "auto");
+					}
+					scheduleFocusUpdate(lastFocusedIdx >= 0 ? lastFocusedIdx : undefined);
+				}
+			});
 		};
 		contentEl?.addEventListener("load", handleContentLoad, true);
+		const clearOpenAnchor = () => {
+			openAnchor = null;
+		};
+		contentEl?.addEventListener("pointerdown", clearOpenAnchor);
+		contentEl?.addEventListener("touchstart", clearOpenAnchor, { passive: true });
 		// rebuildFocusMetrics is O(units) synchronous layout; a resize drag
 		// fires continuously, so coalesce to one run per animation frame.
 		let resizeFrame: number | null = null;
@@ -2657,7 +3089,7 @@
 			isClosing = true;
 			void finishExit(mode);
 		};
-		const unlistenExit = listen<{ mode?: string }>("request-app-exit", (event) => {
+		const unlistenExit = listenManaged<{ mode?: string }>("request-app-exit", (event) => {
 			const mode = event.payload?.mode === "cancel_and_discard" ? "cancel_and_discard" : "preserve";
 			void requestExit(mode);
 		});
@@ -2668,12 +3100,33 @@
 		});
 
 		void refreshLibrary();
+		// F6: one-shot notice when control.db was quarantined + rebuilt this
+		// launch — otherwise an empty task list looks like silent data loss.
+		void invoke<boolean>("take_control_db_recovery_notice")
+			.then((recovered) => {
+				if (recovered) {
+					showAppNotice("检测到任务数据库损坏：已隔离损坏文件并重建空库，历史任务记录不可恢复；书目与阅读进度不受影响");
+				}
+			})
+			.catch(() => {});
 
 		const handleFlowReaderMessage = (event: MessageEvent) => {
 			if (!flowReaderSession || !flowIframeEl) return;
 			if (event.source !== flowIframeEl.contentWindow) return;
-			// Local reader sessions are served from 127.0.0.1; accept same-origin and null for file.
+			// Local reader sessions are served from 127.0.0.1/localhost only —
+			// opaque "null" origins are rejected by isAllowedFlowMessageOrigin.
 			if (!isAllowedFlowMessageOrigin(event.origin)) return;
+			// Reader scripts finished binding their listener — re-send both
+			// sync messages in case an earlier post arrived before that.
+			if (isFlowReaderReadyMessage(event.data)) {
+				lastPostedFontScale = null;
+				lastPostedLayoutWide = null;
+				lastPostedThemeName = null;
+				postFlowFontScale($fontScale);
+				postFlowLayoutMode(windowMaximized);
+				postFlowTheme();
+				return;
+			}
 			if (isFlowReadingActivityMessage(event.data)) {
 				noteReadingActivity();
 				return;
@@ -2800,6 +3253,10 @@
 
 		return () => {
 			window.clearInterval(fileWatchTimer);
+			if (taskPollTimer !== null) {
+				clearInterval(taskPollTimer);
+				taskPollTimer = null;
+			}
 			clearTimeout(initialFileTimer);
 			if (workerPrewarmIdleId !== null) cancelIdleCallback(workerPrewarmIdleId);
 			if (workerPrewarmTimer) clearTimeout(workerPrewarmTimer);
@@ -2818,10 +3275,14 @@
 				editOrbitFrame = null;
 			}
 			cancelChapterBoundaryRestore();
+			if (libraryRefreshTimer) {
+				clearTimeout(libraryRefreshTimer);
+				libraryRefreshTimer = null;
+			}
 			unlistenDrop.then(fn => fn());
-			unlistenOpenFile.then(fn => fn());
-			unlistenTaskEvents.then(fn => fn());
-			unlistenExit.then(fn => fn());
+			unlistenOpenFile();
+			unlistenTaskEvents();
+			unlistenExit();
 			unlistenClose.then(fn => fn());
 			window.removeEventListener("focus", refreshTasksOnResume);
 			document.removeEventListener("visibilitychange", refreshTasksOnResume);
@@ -2834,11 +3295,20 @@
 			contentEl?.removeEventListener("scroll", handleScroll);
 			contentEl?.removeEventListener("wheel", handleWheel);
 			contentEl?.removeEventListener("click", handleContentClick);
+			contentEl?.removeEventListener("keydown", handleContentKeydown);
 			document.removeEventListener("selectionchange", handlePodcastSelectionChange);
 			contentEl?.removeEventListener("dblclick", handleDblClick);
 			contentEl?.removeEventListener("mouseover", handleContentMouseOver);
 			contentEl?.removeEventListener("mouseout", handleContentMouseOut);
+			contentEl?.removeEventListener("focusin", handleContentFocusIn);
+			contentEl?.removeEventListener("focusout", handleContentFocusOut);
 			contentEl?.removeEventListener("load", handleContentLoad, true);
+			contentEl?.removeEventListener("pointerdown", clearOpenAnchor);
+			contentEl?.removeEventListener("touchstart", clearOpenAnchor);
+			if (contentLoadFrame !== null) {
+				cancelAnimationFrame(contentLoadFrame);
+				contentLoadFrame = null;
+			}
 			if (footnoteHideTimer) {
 				clearTimeout(footnoteHideTimer);
 			}
@@ -2957,9 +3427,11 @@
 			options.expectedNavigationGeneration !== undefined &&
 			options.expectedNavigationGeneration !== navigationGeneration
 		) return false;
-		const loadGeneration = ++navigationGeneration;
+		// Bump the generation only after the guard resolves — bumping before the
+		// await meant "cancel" still invalidated any in-flight load, killing it
+		// silently mid-flight (its token check fails, no UI feedback).
 		if ((await requestNavigationGuard("打开另一篇 Markdown")) === "cancel") return false;
-		if (navigationGeneration !== loadGeneration) return false;
+		const loadGeneration = ++navigationGeneration;
 
 		// Opening a Markdown file always replaces the 连读 surface: an OS
 		// open-file event or drag-and-drop can arrive while a flow session is
@@ -2989,6 +3461,9 @@
 		// Race condition protection: invalidate previous loads
 		const loadToken = `${loadGeneration}:${path}`;
 		currentLoadToken = loadToken;
+		// F4: drop any stale in-flight worker render (superseded navigation,
+		// obsolete chapter preload) so this document does not queue behind it.
+		dropStaleMarkdownRenders();
 
 		// Keep the current chapter visible while an adjacent chapter is prepared.
 		// The DOM swaps only when the next Markdown is ready, avoiding a spinner
@@ -3050,15 +3525,29 @@
 			wrapArticleTables();
 
 			if (options.restoreRatio === undefined && !options.restoreBoundary) {
+				const shadow = readProgressShadow(`file:${path}`);
 				try {
 					const state: { scroll_position: number; bookmarks: number[]; progress?: number } =
 						await invoke("load_reading_state", { path });
 					if (currentLoadToken !== loadToken) return false;
-					scrollRestore = typeof state.progress === "number" && state.progress > 0
-						? { kind: "ratio", value: state.progress }
-						: { kind: "absolute", value: state.scroll_position };
+					// F12: an unacked shadow is newer than the last state the
+					// backend confirmed — prefer it over the on-disk record.
+					const effective = shadow && !shadow.acked
+						? {
+							scroll_position: shadow.scrollPosition ?? state.scroll_position,
+							progress: shadow.progressRatio ?? state.progress,
+						}
+						: state;
+					scrollRestore = typeof effective.progress === "number" && effective.progress > 0
+						? { kind: "ratio", value: effective.progress }
+						: { kind: "absolute", value: effective.scroll_position };
 				} catch {
-					// No saved state, start from top
+					// No saved state — the crash shadow is better than top-of-file.
+					if (shadow && (shadow.progressRatio || shadow.scrollPosition)) {
+						scrollRestore = shadow.progressRatio && shadow.progressRatio > 0
+							? { kind: "ratio", value: shadow.progressRatio }
+							: { kind: "absolute", value: shadow.scrollPosition ?? 0 };
+					}
 				}
 			}
 
@@ -3069,7 +3558,7 @@
 		} catch (err) {
 			if (currentLoadToken !== loadToken) return false;
 			console.error("Failed to open file:", err);
-			fileError = `无法打开文件：${err instanceof Error ? err.message : String(err)}`;
+			fileError = `无法打开文件：${describeError(err)}`;
 			if (contentEl) contentEl.scrollTop = 0;
 			if (!options.suppressFailureNotice) {
 				showAppNotice("无法打开文件，请检查路径或权限");
@@ -3093,6 +3582,11 @@
 						contentEl.style.scrollBehavior = previousScrollBehavior;
 						readingProgress = maxScrollTop > 0 ? targetScrollTop / maxScrollTop : 0;
 					}
+					// Images that finish loading after this point reflow content
+					// above the restored position — keep the anchor block so the
+					// load handler can re-anchor until the user scrolls.
+					openAnchor = captureViewportAnchor();
+					openAnchorDeadline = Date.now() + OPEN_ANCHOR_SETTLE_MS;
 					if ($searchQuery.trim()) {
 						performSearch();
 					} else if (!$focusMode) {
@@ -3114,6 +3608,24 @@
 			}
 		}
 		return loadSucceeded && currentLoadToken === loadToken;
+	}
+
+	// Keyboard entry for paragraph editing (E / F2 / toolbar button): picks the
+	// block under the reading position — the focused unit in focus mode, else
+	// the unit nearest the viewport anchor line.
+	function startEditAtReadingPosition() {
+		if (editingParagraph || !$currentFilePath) return;
+		const units = getFocusUnits();
+		if (units.length === 0) return;
+		const idx = lastFocusedIdx >= 0 ? lastFocusedIdx : getClosestFocusIndex(units);
+		const unit = units[idx];
+		if (!unit) return;
+		// Table rows and grouped members carry no source range themselves —
+		// fall back to the enclosing block (same rule as the dblclick path).
+		const target =
+			unit.find((member) => member.dataset.sourceStart !== undefined) ??
+			(unit[0]?.closest("[data-source-start]") as HTMLElement | null);
+		if (target instanceof HTMLElement) startEdit(target);
 	}
 
 	function startEdit(el: HTMLElement) {
@@ -3453,7 +3965,7 @@
 				fileError = "";
 			} catch (err) {
 				console.error('Failed to save:', err);
-				fileError = `保存失败：${err instanceof Error ? err.message : String(err)}`;
+				fileError = `保存失败：${describeError(err)}`;
 				$markdownSource = oldMarkdownSource;
 				// Keep the draft: the block stays in edit mode with the typed text
 				// intact — Enter/blur retries the save, Esc still discards it.
@@ -3491,15 +4003,79 @@
 		}
 	}
 
+	// F12: crash shadow — every progress write is mirrored to localStorage
+	// *before* the IPC call, tagged `acked` only after the backend save
+	// resolves. A crash or wedged backend between the two leaves an unacked
+	// shadow that the next open prefers over the stale on-disk state, so a
+	// process kill can no longer silently drop the last reading position.
+	type ProgressShadow = {
+		savedAt: string;
+		acked: boolean;
+		scrollPosition?: number;
+		progressRatio?: number;
+		bookProgress?: unknown;
+	};
+	const PROGRESS_SHADOW_KEY = "ir-progress-shadow";
+	const PROGRESS_SHADOW_LIMIT = 40;
+
+	function readProgressShadows(): Record<string, ProgressShadow> {
+		try {
+			const raw = localStorage.getItem(PROGRESS_SHADOW_KEY);
+			if (!raw) return {};
+			const parsed = JSON.parse(raw);
+			return parsed && typeof parsed === "object" ? parsed : {};
+		} catch {
+			return {};
+		}
+	}
+
+	function writeProgressShadows(shadows: Record<string, ProgressShadow>) {
+		try {
+			const entries = Object.entries(shadows);
+			if (entries.length > PROGRESS_SHADOW_LIMIT) {
+				entries.sort((a, b) => b[1].savedAt.localeCompare(a[1].savedAt));
+				shadows = Object.fromEntries(entries.slice(0, PROGRESS_SHADOW_LIMIT));
+			}
+			localStorage.setItem(PROGRESS_SHADOW_KEY, JSON.stringify(shadows));
+		} catch {
+			// Quota/full storage: the shadow is a bonus layer, never a blocker.
+		}
+	}
+
+	function stageProgressShadow(key: string, shadow: Omit<ProgressShadow, "savedAt" | "acked">) {
+		const shadows = readProgressShadows();
+		shadows[key] = { ...shadow, savedAt: new Date().toISOString(), acked: false };
+		writeProgressShadows(shadows);
+	}
+
+	function ackProgressShadow(key: string) {
+		const shadows = readProgressShadows();
+		const entry = shadows[key];
+		if (!entry || entry.acked) return;
+		shadows[key] = { ...entry, acked: true };
+		writeProgressShadows(shadows);
+	}
+
+	function readProgressShadow(key: string): ProgressShadow | null {
+		return readProgressShadows()[key] ?? null;
+	}
+
 	// saveState fires every few seconds while scrolling — surface a failure once
 	// (not per tick) so a dead backend can't silently drop reading progress.
 	let saveStateFailureNotified = false;
 	async function saveState() {
 		if (!$currentFilePath || !contentEl) return;
+		const shadowKey = activeBook
+			? `book:${activeBook.manifest.bookId}`
+			: `file:${$currentFilePath}`;
 		try {
 			if (activeBook) {
 				await persistActiveBookProgress();
 			} else {
+				stageProgressShadow(shadowKey, {
+					scrollPosition: contentEl.scrollTop,
+					progressRatio: readingProgress,
+				});
 				await invoke("save_reading_state", {
 					path: $currentFilePath,
 					state: {
@@ -3509,6 +4085,7 @@
 					},
 				});
 			}
+			ackProgressShadow(shadowKey);
 			saveStateFailureNotified = false;
 		} catch (e) {
 			console.error("Failed to save state:", e);
@@ -3606,12 +4183,30 @@
 	// Layout work is strictly two-phase: every DOM mutation happens before a
 	// single batched measurement pass. Interleaving getClientRects reads with
 	// these inserts would force a synchronous reflow per sentence.
+	// Text nodes inside inline code / KaTeX spans can contain `!`/`?`/`。`
+	// that are not prose terminators (e.g. `n!`, formulas). Splitting there
+	// produces ghost sentence boundaries the DOM can't even honor — a
+	// boundary inside an inline element is never split — so the grouping
+	// math skews. Mask those subtrees with same-length placeholders so
+	// offsets still line up with textContent.
+	function maskedSegmentationText(root: HTMLElement): string {
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		let text = "";
+		let node: Node | null;
+		while ((node = walker.nextNode())) {
+			const data = (node as Text).data;
+			const parent = (node as Text).parentElement;
+			text += parent?.closest("code, .katex") ? "x".repeat(data.length) : data;
+		}
+		return text;
+	}
+
 	function segmentLongParagraph(p: HTMLElement, lineHeight: number): HTMLElement[] {
 		if (p.dataset.focusSegmented === "true") {
 			return Array.from(p.querySelectorAll(":scope > .focus-seg")) as HTMLElement[];
 		}
 
-		const text = p.textContent ?? "";
+		const text = maskedSegmentationText(p);
 		const sentences = splitSentences(text);
 		if (sentences.length < 2) return [];
 
@@ -3741,8 +4336,15 @@
 			}
 		};
 
-		for (const atom of atoms) {
-			const height = atom.offsetHeight;
+		// Measure every atom before any segmentation write: the loop below
+		// wraps long paragraphs in span pairs, so reading offsetHeight on
+		// demand forced one synchronous reflow per long paragraph. Heights are
+		// position-independent, so batching the reads is behavior-identical.
+		const atomHeights = atoms.map((atom) => atom.offsetHeight);
+
+		for (let atomIndex = 0; atomIndex < atoms.length; atomIndex++) {
+			const atom = atoms[atomIndex];
+			const height = atomHeights[atomIndex];
 
 			// Long top-level paragraphs advance sentence group by sentence group.
 			// Focus mode only: outside it, content-visibility skips offscreen layout
@@ -4051,7 +4653,11 @@
 		rebuildFocusMetrics();
 	}
 
-	function scrollUnitToFocusPosition(unit: FocusUnit, focusIndex: number) {
+	function scrollUnitToFocusPosition(
+		unit: FocusUnit,
+		focusIndex: number,
+		forceBehavior?: ScrollBehavior,
+	) {
 		if (!contentEl || unit.length === 0) return;
 		const contentRect = contentEl.getBoundingClientRect();
 		const blockRect = getUnitBoundingRect(unit);
@@ -4073,7 +4679,9 @@
 		lockProgrammaticFocusScroll(focusIndex, nextScrollTop);
 		contentEl.scrollTo({
 			top: nextScrollTop,
-			behavior: getJumpBehavior(Math.abs(nextScrollTop - contentEl.scrollTop)),
+			behavior:
+				forceBehavior ??
+				getJumpBehavior(Math.abs(nextScrollTop - contentEl.scrollTop)),
 		});
 	}
 
@@ -4371,9 +4979,11 @@
 			navigateBookChapterFromKey(key, resolution.direction, resolution.offsetPx);
 			return;
 		}
+		// Locked behavior: long jumps (e.g. Home/End across a long chapter)
+		// cut instantly; only short distances smooth-scroll.
 		contentEl.scrollTo({
 			top: resolution.top,
-			behavior: prefersReducedMotion() ? "instant" : "smooth",
+			behavior: getJumpBehavior(Math.abs(resolution.top - contentEl.scrollTop)),
 		});
 	}
 
@@ -4455,7 +5065,7 @@
 	}
 
 	async function exitFocusMode(): Promise<boolean> {
-		if ((await requestNavigationGuard("退出精读模式")) === "cancel") return false;
+		if ((await requestNavigationGuard("退出沉浸模式")) === "cancel") return false;
 		// Capture while the focus-mode layout is still in effect; restored by
 		// toggleFocusMode after the exit reflow.
 		pendingExitAnchor = captureViewportAnchor();
@@ -4528,11 +5138,12 @@
 			const node = walker.currentNode as Text;
 			const text = node.textContent?.toLowerCase() || "";
 			let idx = text.indexOf(query);
-			while (idx !== -1) {
+			while (idx !== -1 && blockMatches.length < MAX_SEARCH_MATCHES) {
 				blockMatches.push({ block, occurrence });
 				occurrence += 1;
 				idx = text.indexOf(query, idx + query.length);
 			}
+			if (blockMatches.length >= MAX_SEARCH_MATCHES) break;
 		}
 		if (occurrence > 0) {
 			searchMatchBlocks.add(block);
@@ -4570,14 +5181,23 @@
 		const query = $searchQuery.trim().toLowerCase();
 		if (!query || !contentEl) return;
 
-		const article = contentEl.querySelector(".article");
+		const article = getArticleElement();
 		if (!article) return;
 
 		searchMatches = [];
-		for (const unit of getFocusUnits()) {
-			for (const member of unit) {
-				collectMatchesInBlock(member, query, searchMatches);
-			}
+		// Focus mode needs unit membership (data-focus-block/index) to
+		// re-anchor the spotlight on the match's unit — those units are
+		// already built and cached while focus is on. Outside focus mode a
+		// search is a pure text scan: iterate the block atoms directly so
+		// each keystroke doesn't pay a full focus-index pass (attribute
+		// writes + per-unit rect reads) for nothing.
+		const blocks = $focusMode ? getFocusUnits().flat() : collectFocusAtoms(article);
+		for (const block of blocks) {
+			collectMatchesInBlock(block, query, searchMatches);
+			if (searchMatches.length >= MAX_SEARCH_MATCHES) break;
+		}
+		if (searchMatches.length >= MAX_SEARCH_MATCHES) {
+			showAppNotice(`匹配过多，仅列出前 ${MAX_SEARCH_MATCHES} 条`);
 		}
 
 		lastFocusRenderSignature = "";
@@ -4601,10 +5221,24 @@
 		const contentRect = contentEl.getBoundingClientRect();
 		const scrollTop = contentEl.scrollTop;
 		const total = Math.max(1, contentEl.scrollHeight);
+		// In focus mode the enclosing unit's metrics were just measured —
+		// reuse them instead of a rect read per matched block. data-focus-index
+		// only exists on focus-mode unit members; anything else falls back to
+		// a direct rect read.
+		const metrics =
+			$focusMode && focusMetricsValid && focusBlockMetrics.length === focusUnits.length
+				? focusBlockMetrics
+				: null;
 		const positions: number[] = [];
 		searchMatchBlocks.forEach((block) => {
-			const rect = block.getBoundingClientRect();
-			positions.push((scrollTop + rect.top - contentRect.top) / total);
+			const index = metrics ? Number(block.dataset.focusIndex) : NaN;
+			const metric = metrics && Number.isInteger(index) ? metrics[index] : null;
+			if (metric) {
+				positions.push(metric.top / total);
+			} else {
+				const rect = block.getBoundingClientRect();
+				positions.push((scrollTop + rect.top - contentRect.top) / total);
+			}
 		});
 		searchTickPositions = positions.sort((a, b) => a - b);
 	}
@@ -4833,6 +5467,11 @@
 	{#if $currentFilePath && !flowReaderSession}
 		<div
 			class="progress-line"
+			role="progressbar"
+			aria-label="本章阅读进度"
+			aria-valuemin={0}
+			aria-valuemax={100}
+			aria-valuenow={Math.round(readingProgress * 100)}
 			style="width: {readingProgress * 100}%"
 		></div>
 	{/if}
@@ -4897,11 +5536,30 @@
 					</button>
 					<button
 						class="icon-btn"
+						on:click={startEditAtReadingPosition}
+						title="编辑当前段落 (E)"
+						aria-label="编辑当前段落"
+					>
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.5"
+						>
+							<path d="M12 20h9" />
+							<path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+						</svg>
+					</button>
+					<button
+						class="icon-btn"
 						class:active={$tocOpen}
 						on:click={() => ($tocOpen = !$tocOpen)}
 						title="目录 ({modLabel}T)"
 						aria-label="目录"
-						aria-pressed={$tocOpen}
+						aria-expanded={$tocOpen}
+						aria-controls="toc-panel"
 					>
 						<svg
 							width="18"
@@ -4920,7 +5578,8 @@
 						on:click={() => ($searchOpen = !$searchOpen)}
 						title="搜索 ({modLabel}F)"
 						aria-label="搜索"
-						aria-pressed={$searchOpen}
+						aria-expanded={$searchOpen}
+						aria-controls="search-panel"
 					>
 						<svg
 							width="18"
@@ -4940,7 +5599,8 @@
 						on:click={() => ($settingsOpen = !$settingsOpen)}
 						title="设置 ({modLabel},)"
 						aria-label="设置"
-						aria-pressed={$settingsOpen}
+						aria-expanded={$settingsOpen}
+						aria-controls="settings-panel"
 					>
 						<svg
 							width="18"
@@ -4954,6 +5614,27 @@
 							<path
 								d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"
 							/>
+						</svg>
+					</button>
+					<button
+						class="icon-btn"
+						class:active={firstOpenHintVisible}
+						on:click={() => (firstOpenHintVisible = !firstOpenHintVisible)}
+						title="快捷键"
+						aria-label="快捷键"
+						aria-pressed={firstOpenHintVisible}
+					>
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.5"
+						>
+							<circle cx="12" cy="12" r="9" />
+							<path d="M9.2 9a2.8 2.8 0 0 1 5.5.7c0 1.8-2.7 2.2-2.7 3.8" />
+							<path d="M12 17h.01" stroke-linecap="round" />
 						</svg>
 					</button>
 				</div>
@@ -5033,13 +5714,15 @@
 					bind:this={flowIframeEl}
 					title="连续阅读器"
 					src={flowReaderSession.url}
-					sandbox="allow-same-origin allow-scripts allow-forms"
+					sandbox="allow-same-origin allow-scripts"
 					on:load={() => {
-						// Frame (re)loaded: force both messages to re-send.
+						// Frame (re)loaded: force all sync messages to re-send.
 						lastPostedFontScale = null;
 						lastPostedLayoutWide = null;
+						lastPostedThemeName = null;
 						postFlowFontScale($fontScale);
 						postFlowLayoutMode(windowMaximized);
+						postFlowTheme();
 					}}
 				></iframe>
 			</section>
@@ -5187,7 +5870,7 @@
 
 	{#if firstOpenHintVisible && !editingParagraph && !$focusMode}
 		<div class="first-hint">
-			<span>{modLabel}T 目录 · {modLabel}F 搜索 · F11 专注 · 双击编辑 · {modLabel}滚轮 字号</span>
+			<span>{modLabel}T 目录 · {modLabel}F 搜索 · F11 专注 · E 编辑段落 · {modLabel}滚轮 字号</span>
 			<button
 				class="first-hint-close"
 				on:click={() => (firstOpenHintVisible = false)}
@@ -5236,9 +5919,15 @@
 		</button>
 	{/if}
 
-	<!-- Footnote hover preview -->
+	<!-- Footnote hover/focus preview — hoverable so readers can move onto it -->
 	{#if footnotePreviewHtml}
-		<div class="footnote-preview" style={footnotePreviewStyle}>
+		<div
+			class="footnote-preview"
+			role="tooltip"
+			style={footnotePreviewStyle}
+			on:mouseenter={cancelFootnoteHide}
+			on:mouseleave={scheduleFootnoteHide}
+		>
 			{@html footnotePreviewHtml}
 		</div>
 	{/if}
@@ -5413,7 +6102,8 @@
 		background: var(--link);
 		opacity: 0.3;
 		z-index: 80;
-		transition: width 0.1s linear;
+		/* No width transition — scroll fires continuously and a transition
+		   would lag behind the thumb anyway. */
 		pointer-events: none; /* pure indicator — never cover window controls */
 	}
 
@@ -5439,12 +6129,10 @@
 		padding: 28px 16px;
 		border-top: 1px solid var(--hr);
 		color: var(--text-secondary);
-		font-family: var(--font-body);
 	}
 
 	.book-seam small {
 		color: var(--text-faded);
-		font-family: var(--font-ui);
 		font-size: 11px;
 		letter-spacing: 0.12em;
 	}
@@ -5490,7 +6178,7 @@
 
 	.flow-context-bar strong {
 		font-size: 13px;
-		font-weight: 650;
+		font-weight: 600;
 	}
 
 	.flow-context-bar span {
@@ -5555,6 +6243,10 @@
 		background: var(--bg-secondary);
 		border-color: var(--hr);
 	}
+	.icon-btn:focus-visible {
+		outline: 2px solid var(--link);
+		outline-offset: 2px;
+	}
 
 	/* ========== Main content ========== */
 	/* Flow chrome lives in the overlay stack; iframe fills the workspace. */
@@ -5584,12 +6276,14 @@
 		position: relative;
 		z-index: 20;
 		animation: contentFadeIn 0.3s ease;
-		overflow-wrap: anywhere;
+		/* CJK 排版：break-word 仍能断超长 URL/代码，但不像 anywhere 那样把
+		   句号逗号挤到行首；line-break: strict 启用中文避头尾规则。 */
+		overflow-wrap: break-word;
+		line-break: strict;
+		hanging-punctuation: allow-end;
 	}
-	/* Maximized / fullscreen: responsive wide column up to ~1120px. */
-	.app.layout-wide .article {
-		max-width: min(1120px, 100%);
-	}
+	/* Maximized / fullscreen keeps the user's chosen column width
+	   (--article-max-width) — the earlier fixed 1120px cap ignored it. */
 
 	.app:not(.focus-mode) :global(.article > *) {
 		content-visibility: auto;
@@ -5605,10 +6299,10 @@
 		margin: 16px auto 0;
 		max-width: 760px;
 		padding: 10px 14px;
-		border: 1px solid var(--hr);
+		border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
 		border-radius: 8px;
 		background: var(--bg-secondary);
-		color: var(--text-secondary);
+		color: var(--danger);
 		font-size: 13px;
 		line-height: 1.5;
 		overflow-wrap: anywhere;
@@ -5641,7 +6335,8 @@
 		color: var(--heading);
 		margin: 2em 0 0.8em;
 		line-height: 1.3;
-		letter-spacing: -0.02em;
+		/* 负字距会让 CJK 字形在大字号标题下笔画粘连，正文标题不收紧。 */
+		letter-spacing: 0;
 	}
 	:global(.article h1:first-child) {
 		margin-top: 0;
@@ -5662,13 +6357,24 @@
 		margin: 1.5em 0 0.5em;
 		line-height: 1.4;
 	}
-	:global(.article h4),
-	:global(.article h5),
-	:global(.article h6) {
-		font-size: 1.05em;
+	:global(.article h4) {
+		font-size: 1.1em;
 		font-weight: 600;
 		color: var(--heading);
 		margin: 1.2em 0 0.4em;
+	}
+	:global(.article h5) {
+		font-size: 1em;
+		font-weight: 600;
+		color: var(--heading);
+		margin: 1.1em 0 0.35em;
+	}
+	:global(.article h6) {
+		font-size: 0.92em;
+		font-weight: 600;
+		color: var(--text-secondary);
+		letter-spacing: 0.02em;
+		margin: 1em 0 0.3em;
 	}
 
 	:global(.article p) {
@@ -5699,6 +6405,75 @@
 		font-style: italic;
 	}
 
+	/* remark-rehype 脚注区标题（「脚注」）保留在无障碍树中但不占版面。 */
+	:global(.article .sr-only) {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
+	/* 裸露元素兜底：sanitize 放行但上方没有专门规则的标签。 */
+	:global(.article del) {
+		color: var(--text-faded);
+	}
+	:global(.article ins) {
+		text-decoration: underline;
+		text-decoration-style: dotted;
+		text-underline-offset: 0.2em;
+	}
+	:global(.article sub),
+	:global(.article sup) {
+		font-size: 0.75em;
+		line-height: 0;
+	}
+	:global(.article kbd) {
+		font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas",
+			monospace;
+		font-size: 0.85em;
+		padding: 0.1em 0.4em;
+		border: 1px solid var(--hr);
+		border-bottom-width: 2px;
+		border-radius: 4px;
+		background: var(--bg-secondary);
+	}
+	:global(.article mark) {
+		background: var(--search-highlight);
+		color: inherit;
+		border-radius: 2px;
+		padding: 1px 0;
+	}
+	:global(.article figure) {
+		margin: 1.5em 0;
+	}
+	:global(.article figcaption) {
+		margin-top: 0.5em;
+		text-align: center;
+		font-size: 0.85em;
+		color: var(--text-secondary);
+	}
+	:global(.article details) {
+		margin: 0.8em 0;
+		padding: 0.6em 1em;
+		border: 1px solid var(--hr);
+		border-radius: 8px;
+		background: var(--bg-secondary);
+	}
+	:global(.article summary) {
+		cursor: pointer;
+		font-weight: 600;
+	}
+	:global(.article abbr[title]) {
+		text-decoration: underline dotted;
+		text-underline-offset: 0.2em;
+		cursor: help;
+	}
+
 	:global(.article blockquote) {
 		margin: 1.2em 0;
 		padding: 0.8em 1.2em;
@@ -5715,7 +6490,7 @@
 	:global(.article blockquote.podcast-original) {
 		margin: 0.35em 0 1.1em;
 		padding: 0.35em 0 0.35em 0.9em;
-		border-left: 2px solid color-mix(in srgb, var(--line) 80%, transparent);
+		border-left: 2px solid color-mix(in srgb, var(--line, var(--hr)) 80%, transparent);
 		background: transparent;
 		color: var(--text-secondary);
 		opacity: 0.82;
@@ -5761,6 +6536,14 @@
 		padding: 1em 1.2em;
 		border-radius: 8px;
 		overflow-x: auto;
+	}
+	/* Dual-theme Shiki output carries light inline colors + --shiki-dark*
+	 * vars; switch to the dark vars when the active theme maps to a dark
+	 * Shiki theme (stamped on <html data-shiki> by applyTheme). */
+	:global(html[data-shiki='github-dark'] .article .shiki),
+	:global(html[data-shiki='github-dark'] .article .shiki span) {
+		color: var(--shiki-dark) !important;
+		background-color: var(--shiki-dark-bg) !important;
 	}
 
 	:global(.article ul),
@@ -5900,8 +6683,10 @@
 		color: var(--text-secondary);
 		font-size: 13px;
 		line-height: 1.6;
+		/* 长脚注在预览内滚动而不是撑出视口（预览可悬停，不会一闪即逝）。 */
+		max-height: min(320px, 60vh);
+		overflow-y: auto;
 		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
-		pointer-events: none;
 		animation: fadeIn 0.15s ease;
 	}
 	.footnote-preview :global(p) {
@@ -6419,17 +7204,18 @@
 		flex-wrap: wrap;
 	}
 	/* Danger variant of the shell's primary action (confirm-delete flows).
-	   #d4a099 is a light fill — white text would fail contrast, so the
-	   label uses a dark tone of the same red. */
+	   The fill is the theme's --danger; --on-accent keeps the label readable
+	   whether the danger tone is a light fill (dark themes) or a deep red
+	   (light themes). */
 	:global(.wf-primary.wf-danger) {
-		border-color: #d4a099;
-		background: #d4a099;
-		color: #33110b;
+		border-color: var(--danger);
+		background: var(--danger);
+		color: var(--on-accent);
 	}
 	:global(.wf-primary.wf-danger:hover) {
-		border-color: #c48b84;
-		background: #c48b84;
-		color: #33110b;
+		border-color: color-mix(in srgb, var(--danger) 82%, var(--text));
+		background: color-mix(in srgb, var(--danger) 82%, var(--text));
+		color: var(--on-accent);
 	}
 
 	/* Reduced motion: drop non-essential animation/transitions on UI chrome.

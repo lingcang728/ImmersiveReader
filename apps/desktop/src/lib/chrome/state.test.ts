@@ -8,6 +8,7 @@ import {
 	deriveChromeSurface,
 	isAllowedFlowMessageOrigin,
 	isFlowFontScaleChangeMessage,
+	isFlowReaderReadyMessage,
 	isFlowReadingActivityMessage,
 	isFlowSetFontScaleMessage,
 	isFlowSetLayoutModeMessage,
@@ -321,7 +322,7 @@ describe('chrome state machine', () => {
 		).toBe(false);
 		expect(isAllowedFlowMessageOrigin('http://127.0.0.1:1420')).toBe(true);
 		expect(isAllowedFlowMessageOrigin('http://localhost:1420')).toBe(true);
-		expect(isAllowedFlowMessageOrigin('null')).toBe(true);
+		expect(isAllowedFlowMessageOrigin('null')).toBe(false);
 		expect(isAllowedFlowMessageOrigin('https://evil.example')).toBe(false);
 	});
 
@@ -345,6 +346,30 @@ describe('chrome state machine', () => {
 			})
 		).toBe(false);
 		expect(createFlowSetLayoutModeMessage(false, 760).contentMaxWidth).toBe(760);
+	});
+
+	it('validates the reader-ready handshake message', () => {
+		expect(
+			isFlowReaderReadyMessage({
+				source: 'immersive-reader-flow',
+				version: 1,
+				type: 'reader-ready'
+			})
+		).toBe(true);
+		expect(
+			isFlowReaderReadyMessage({
+				source: 'immersive-reader-flow',
+				version: 1,
+				type: 'reading-activity'
+			})
+		).toBe(false);
+		expect(
+			isFlowReaderReadyMessage({
+				source: 'other',
+				version: 1,
+				type: 'reader-ready'
+			})
+		).toBe(false);
 	});
 });
 

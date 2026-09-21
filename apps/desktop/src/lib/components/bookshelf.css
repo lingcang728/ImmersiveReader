@@ -270,7 +270,7 @@
 .bs-page-title {
 	margin: 0;
 	font-size: 22px;
-	font-weight: 650;
+	font-weight: 600;
 	letter-spacing: 0.04em;
 	color: var(--fg-strong);
 	line-height: 1.2;
@@ -311,23 +311,23 @@
 	align-items: center;
 	justify-content: space-between;
 	gap: 16px;
-	border-color: rgba(196, 100, 90, 0.45);
-	color: #d4a099;
+	border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+	color: var(--danger);
 }
 
 .recover-action {
 	flex: none;
-	border: 1px solid rgba(196, 100, 90, 0.5);
+	border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent);
 	border-radius: var(--radius-sm);
 	background: transparent;
-	color: #efb0a4;
+	color: var(--danger);
 	padding: 7px 12px;
 	cursor: pointer;
 	font: 13px inherit;
 }
 
 .recover-action:hover {
-	background: rgba(196, 100, 90, 0.1);
+	background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .state-banner.warning {
@@ -340,7 +340,8 @@
 
 .state-banner p {
 	margin: 10px 0 0;
-	word-break: break-all;
+	/* break-all 会把中文句子也逐字断开；anywhere 只在必要时断长串。 */
+	overflow-wrap: anywhere;
 }
 
 .task-queue {
@@ -376,7 +377,7 @@
 
 .task-queue-header strong {
 	font-size: 13px;
-	font-weight: 650;
+	font-weight: 600;
 	color: var(--fg-strong);
 }
 
@@ -429,6 +430,12 @@
 	outline: none;
 }
 
+.task-queue-dismiss:focus-visible,
+.task-queue-expand:focus-visible {
+	outline: 2px solid var(--link, var(--accent));
+	outline-offset: 1px;
+}
+
 .task-queue-expand:hover,
 .task-queue-expand:focus-visible {
 	color: var(--link, var(--accent));
@@ -466,7 +473,7 @@
 
 .task-kind {
 	font-size: 11px;
-	font-weight: 650;
+	font-weight: 600;
 	color: var(--link, var(--accent));
 }
 
@@ -779,7 +786,7 @@
 	border: 0;
 	border-radius: var(--radius-sm);
 	background: var(--link, var(--accent));
-	color: #fff;
+	color: var(--on-accent);
 	padding: 8px 14px;
 	font-size: 13px;
 	font-weight: 600;
@@ -997,7 +1004,7 @@
 	display: flex;
 	align-items: center;
 	gap: 12px;
-	font: 12px ui-monospace, "Cascadia Code", monospace;
+	font: 12px ui-monospace, "Cascadia Mono", monospace;
 	color: var(--fg-muted);
 	margin-top: 8px;
 }
@@ -1191,7 +1198,7 @@
 }
 
 .card-menu button.danger {
-	color: #d4a099;
+	color: var(--danger);
 }
 
 .book-card h3 {

@@ -40,9 +40,14 @@ describe('taskEventPublishesToLibrary', () => {
 		expect(taskEventPublishesToLibrary(event({ outcome: 'partial_success' }))).toBe(true);
 	});
 
-	it('does not refresh before the Zhihu publish is terminal', () => {
+	it('refreshes when a podcast task publishes successfully', () => {
+		expect(taskEventPublishesToLibrary(event({ kind: 'podcast', outcome: 'success' }))).toBe(true);
+		expect(taskEventPublishesToLibrary(event({ kind: 'podcast', outcome: 'partial_success' }))).toBe(true);
+	});
+
+	it('does not refresh before the publish is terminal', () => {
 		expect(taskEventPublishesToLibrary(event({ lifecycleState: 'running', outcome: 'none' }))).toBe(false);
 		expect(taskEventPublishesToLibrary(event({ outcome: 'failed' }))).toBe(false);
-		expect(taskEventPublishesToLibrary(event({ kind: 'podcast' }))).toBe(false);
+		expect(taskEventPublishesToLibrary(event({ kind: 'podcast', outcome: 'cancelled' }))).toBe(false);
 	});
 });
