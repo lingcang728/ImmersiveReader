@@ -1,0 +1,29 @@
+{
+  "bundle": {
+    "name": "runtime-bundle.zip",
+    "size": 6905275600,
+    "sha256": "4d218a3afa1e7baaaba78fae1eafc90742862e545e65e8f21b9ed72249a599a3"
+  },
+  "parts": [
+    {
+      "name": "runtime-bundle.zip.001",
+      "size": 1879048192,
+      "sha256": "237cf442383cc84aad0b8bb30fe258caeb688dc726a04e4e1f544f1a0c08350e"
+    },
+    {
+      "name": "runtime-bundle.zip.002",
+      "size": 1879048192,
+      "sha256": "dabe5685e692145e6d59448dd9bf164311b1f9a6e808897c775be9b179932647"
+    },
+    {
+      "name": "runtime-bundle.zip.003",
+      "size": 1879048192,
+      "sha256": "946712fe0a6cc4e2dc05e88862549786b4f5c1ef6077066712c8d928f70a2115"
+    },
+    {
+      "name": "runtime-bundle.zip.004",
+      "size": 1268131024,
+      "sha256": "d2c78110365102e96e8ee5a98b2e4034e2f6492100379976999505032a08b846"
+    }
+  ]
+}

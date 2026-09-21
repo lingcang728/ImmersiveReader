@@ -41,6 +41,40 @@ function Get-PodcastPython {
     return $py
 }
 
+function Test-ReparsePoint {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    return ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+}
+
+function Assert-NotReparsePoint {
+    # Junction/symlink roots break recursive-delete and mirror-copy safety: PS
+    # 5.1 Remove-Item -Recurse follows junctions into the TARGET tree, and
+    # robocopy /MIR can mirror-delete the target's contents.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Label = $Path
+    )
+    if (Test-ReparsePoint -Path $Path) {
+        throw "路径是 Junction/Symlink，拒绝在其上递归操作：$Label"
+    }
+}
+
+function Remove-DirectoryTree {
+    # Recursively delete a directory, but never follow a reparse point: on PS
+    # 5.1 `Remove-Item -Recurse` on a junction deletes the linked target's
+    # contents. A reparse point gets its link removed only; real directories
+    # get the normal recursive delete.
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        [IO.Directory]::Delete($item.FullName, $false)
+        return
+    }
+    Remove-Item -LiteralPath $Path -Recurse -Force
+}
+
 function Get-FileSha256Hex {
     param([Parameter(Mandatory)][string]$Path)
     # Get-FileHash is the fast path, but some Windows PowerShell 5.1 images

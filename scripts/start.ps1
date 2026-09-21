@@ -1,6 +1,9 @@
 param(
     [ValidateSet('desktop', 'verify')]
-    [string]$Action = 'desktop'
+    [string]$Action = 'desktop',
+    # Also hash-verify the managed runtime against runtime\manifest.json before
+    # dev boot — manifest presence alone cannot catch a corrupted vendored file.
+    [switch]$VerifyRuntime
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -16,6 +19,9 @@ switch ($Action) {
         $manifestPath = Join-Path $root 'runtime\manifest.json'
         if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
             throw "受管运行时未就绪：缺少 $manifestPath。请先运行 scripts\prepare-runtime.ps1 或恢复 runtime\ 目录后再启动。"
+        }
+        if ($VerifyRuntime) {
+            & (Join-Path $PSScriptRoot 'verify-runtime.ps1') -RuntimeRoot (Join-Path $root 'runtime')
         }
         $portBusy = @(Get-NetTCPConnection -LocalPort 1420 -State Listen -ErrorAction SilentlyContinue)
         if ($portBusy.Count -gt 0) {

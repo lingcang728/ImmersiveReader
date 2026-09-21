@@ -46,7 +46,10 @@ $receipt = [ordered]@{
     profileRoot = $profileRoot
     browserCache = $browserCache
     database = $dbPath
-    externalNetworkRun = $false
+    # This script only provisions directories — the acquisition run happens
+    # afterwards and records its own receipt. null = "not yet run", never a
+    # claimed false.
+    externalNetworkRun = $null
 }
 
 $receiptPath = Join-Path $localRoot 'qa-receipt.json'

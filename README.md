@@ -2,7 +2,7 @@
 
 沉浸阅读是一个面向 Windows 长文阅读的本地系统，将知乎归档、播客转写和 Markdown 精读统一到同一座书库中。
 
-当前发布版本：1.2.0。
+当前发布版本：1.2.1。
 
 ## 使用
 
@@ -37,4 +37,4 @@ C:\Users\<用户名>\Documents\沉浸阅读\Library
 
 ## 开发与验证
 
-开发、测试、生产安装和发布说明见 [CONTRIBUTING.md](CONTRIBUTING.md)、[DESIGN.md](DESIGN.md) 和 [docs/release/1.2.0/RELEASE_NOTES.md](docs/release/1.2.0/RELEASE_NOTES.md)。
+开发、测试、生产安装和发布说明见 [CONTRIBUTING.md](CONTRIBUTING.md)、[DESIGN.md](DESIGN.md) 和 [docs/release/1.2.1/RELEASE_NOTES.md](docs/release/1.2.1/RELEASE_NOTES.md)。

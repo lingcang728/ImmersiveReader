@@ -13,7 +13,7 @@
 
 ## 放置位置
 
-安装后应用默认在 `<安装目录>\沉浸阅读.exe`（NSIS 默认如 `C:\Program Files\ImmersiveReader\`）。运行时的期望位置是 **`runtime` 与 exe 同级**，即 `<安装目录>\runtime\`；校验锚点是 `<安装目录>\runtime\manifest.json` 存在。目录不存在时手动创建即可。
+安装后应用主程序为 `<安装目录>\immersive-reader.exe`（NSIS 默认如 `C:\Program Files\ImmersiveReader\`）。运行时的期望位置是 **`runtime` 与 exe 同级**，即 `<安装目录>\runtime\`；校验锚点是 `<安装目录>\runtime\manifest.json` 存在。目录不存在时手动创建即可。
 
 ## 获取与安装步骤
 
@@ -40,6 +40,7 @@
 ## 校验
 
 - 开发/维护机：`powershell -File scripts\verify-runtime.ps1 -RuntimeRoot "<安装目录>\runtime"`——按 `runtime\manifest.json`（schemaVersion 2）逐文件校验存在性、字节数与 SHA-256，与发布链 `prepare-runtime.ps1` 写出的清单一致。
+- 发布维护机还可以用 `scripts\verify-runtime-bundle.ps1` 对已下载的分卷做端到端校验：逐分卷比对 `runtime-parts.json` 的名字/大小/SHA-256、拼合后校验整包哈希、解压并复跑 manifest 校验，最后对 zhihu / podcast / contracts / reader 模板做源码同源性比对。
 - 终端用户无需脚本：运行时缺失/不完整时，应用内工具状态与错误信息会直接给出期望目录与本说明；工具状态变为 running 即说明就位。
 
 ## 高级：自定义位置

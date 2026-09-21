@@ -108,9 +108,7 @@ function Reset-AppDestination {
     if (-not $fullDestination.StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)) {
         throw "拒绝清理受管运行时外的应用目录：$fullDestination"
     }
-    if (Test-Path -LiteralPath $fullDestination) {
-        Remove-Item -LiteralPath $fullDestination -Recurse -Force
-    }
+    Remove-DirectoryTree -Path $fullDestination
 }
 
 function Assert-RuntimeNotInUse {
@@ -188,6 +186,96 @@ function Assert-PythonRuntime {
     Write-Output "[runtime] $Label $line"
 }
 
+function Get-ExeVersionLine {
+    # Best-effort version string: run the tool's version flag, else fall back
+    # to the PE product version so provenance never blocks on a missing flag.
+    param(
+        [Parameter(Mandatory)][string]$Exe,
+        [string]$VersionArg = '--version'
+    )
+    $line = [string](& $Exe $VersionArg 2>&1 | Select-Object -First 1)
+    if ([string]::IsNullOrWhiteSpace($line) -or $LASTEXITCODE -ne 0) {
+        $line = [string](Get-Item -LiteralPath $Exe).VersionInfo.ProductVersion
+    }
+    $global:LASTEXITCODE = 0
+    return $line.Trim()
+}
+
+function Get-RuntimeComponents {
+    # Provenance record for manifest.json: which exact binaries went in, where
+    # they came from, and their versions — a path/bytes/sha256 manifest alone
+    # can never answer "what version is inside this runtime".
+    param(
+        [Parameter(Mandatory)][string]$NodeSourceExe,
+        [Parameter(Mandatory)][string]$PythonSourceExe,
+        [Parameter(Mandatory)][string]$FfmpegSourceExe,
+        [Parameter(Mandatory)][string]$FfprobeSourceExe,
+        [Parameter(Mandatory)][string]$ChromiumSourceExe,
+        [Parameter(Mandatory)][string]$ModelsSource
+    )
+    $components = [ordered]@{}
+    foreach ($spec in @(
+        @{ key = 'node'; exe = $NodeSourceExe; arg = '--version' },
+        @{ key = 'python'; exe = $PythonSourceExe; arg = '--version' },
+        @{ key = 'ffmpeg'; exe = $FfmpegSourceExe; arg = '-version' },
+        @{ key = 'ffprobe'; exe = $FfprobeSourceExe; arg = '-version' }
+    )) {
+        $components[$spec.key] = [ordered]@{
+            source = [string]$spec.exe
+            version = Get-ExeVersionLine -Exe $spec.exe -VersionArg $spec.arg
+            sha256 = (Get-FileSha256Hex -Path $spec.exe)
+        }
+    }
+    # Never spawn msedge.exe for a version query — the PE product version is
+    # equally authoritative and cannot flash a browser window.
+    $components['chromium'] = [ordered]@{
+        source = [string]$ChromiumSourceExe
+        version = [string](Get-Item -LiteralPath $ChromiumSourceExe).VersionInfo.ProductVersion
+        sha256 = (Get-FileSha256Hex -Path $ChromiumSourceExe)
+    }
+    $modelFiles = @(Get-ChildItem -LiteralPath $ModelsSource -File -Recurse -ErrorAction SilentlyContinue)
+    $components['models'] = [ordered]@{
+        source = [string]$ModelsSource
+        files = $modelFiles.Count
+        bytes = [long](($modelFiles | Measure-Object Length -Sum).Sum)
+    }
+    return $components
+}
+
+function Assert-PreservedRuntimeEntries {
+    # -RefreshApps rewrites manifest.json to describe the NEW state — which
+    # would bless a corrupted vendored binary into a green manifest. Before
+    # touching anything, verify the entries RefreshApps does not regenerate
+    # (vendored node/chromium/python/ffmpeg/models) against the old manifest.
+    param([Parameter(Mandatory)][string]$RuntimeRoot)
+
+    $manifestPath = Join-Path $RuntimeRoot 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        Write-Warning '[runtime] 现有 manifest.json 缺失，无法做 RefreshApps 前置完整性校验。'
+        return
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $refreshedRoots = @('zhihu/app/', 'podcast/app/', 'packages/contracts/')
+    $checked = 0
+    foreach ($entry in @($manifest.entries)) {
+        $relative = [string]$entry.path
+        if ($refreshedRoots | Where-Object { $relative.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) {
+            continue
+        }
+        $path = Join-Path $RuntimeRoot ($relative -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "RefreshApps 前置校验：受管文件缺失：$relative"
+        }
+        $item = Get-Item -LiteralPath $path
+        if ([int64]$item.Length -ne [int64]$entry.bytes -or
+            (Get-FileSha256Hex -Path $path) -ine [string]$entry.sha256) {
+            throw "RefreshApps 前置校验：受管文件已损坏或被改写：$relative（先修复 runtime，再刷新应用代码）"
+        }
+        $checked += 1
+    }
+    Write-Output "[runtime] preserved entries verified against existing manifest: $checked"
+}
+
 function Get-CriticalRuntimeFiles {
     param([Parameter(Mandatory)][string]$RuntimeRoot)
 
@@ -222,7 +310,12 @@ function Get-CriticalRuntimeFiles {
 }
 
 function Write-CriticalRuntimeManifest {
-    param([Parameter(Mandatory)][string]$RuntimeRoot)
+    param(
+        [Parameter(Mandatory)][string]$RuntimeRoot,
+        # Component provenance (version/source/sha256 per vendored tool) —
+        # additive field; verify-runtime.ps1 only requires schemaVersion >= 2.
+        $Components = $null
+    )
 
     $fullRuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $entries = @(Get-CriticalRuntimeFiles -RuntimeRoot $fullRuntimeRoot | ForEach-Object {
@@ -241,6 +334,9 @@ function Write-CriticalRuntimeManifest {
         generatedAt = (Get-Date).ToUniversalTime().ToString('o')
         entryCount = $entries.Count
         entries = $entries
+    }
+    if ($null -ne $Components) {
+        $manifest['components'] = $Components
     }
     $manifestPath = Join-Path $fullRuntimeRoot 'manifest.json'
     $temporaryPath = "$manifestPath.tmp"
@@ -270,6 +366,10 @@ if ($RefreshApps) {
     Assert-PythonRuntime -PythonExe (Join-Path $runtime 'podcast\python\python.exe') -Label 'vendored'
     Assert-MediaTool -Exe (Join-Path $runtime 'podcast\ffmpeg\ffmpeg.exe') -Label 'vendored ffmpeg'
     Assert-RuntimeNotInUse
+    # The manifest is about to be rewritten to the post-refresh state — prove
+    # the parts RefreshApps keeps (binaries, models) are still intact first,
+    # or a corrupted runtime would be blessed by its own new manifest.
+    Assert-PreservedRuntimeEntries -RuntimeRoot $runtime
     $zhihuApp = Join-Path $runtime 'zhihu\app'
     $podcastApp = Join-Path $runtime 'podcast\app'
     $contractsRuntime = Join-Path $runtime 'packages\contracts'
@@ -285,7 +385,14 @@ if ($RefreshApps) {
         -ExcludeFiles @('config.json', '*.log', '*.pyc')
     Copy-Tree -Source $contractsSource -Destination $contractsRuntime `
         -ExcludeDirectories @('.git', 'node_modules')
-    Write-CriticalRuntimeManifest -RuntimeRoot $runtime
+    $refreshComponents = Get-RuntimeComponents `
+        -NodeSourceExe (Join-Path $runtime 'zhihu\node\node.exe') `
+        -PythonSourceExe (Join-Path $runtime 'podcast\python\python.exe') `
+        -FfmpegSourceExe (Join-Path $runtime 'podcast\ffmpeg\ffmpeg.exe') `
+        -FfprobeSourceExe (Join-Path $runtime 'podcast\ffmpeg\ffprobe.exe') `
+        -ChromiumSourceExe (Join-Path $runtime 'zhihu\chromium\msedge.exe') `
+        -ModelsSource (Join-Path $runtime 'podcast\models')
+    Write-CriticalRuntimeManifest -RuntimeRoot $runtime -Components $refreshComponents
     Write-Output '[runtime] application code refreshed without rebuilding large assets'
     exit 0
 }
@@ -342,13 +449,12 @@ if (-not $fullRuntime.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCas
     -not $fullPreviousRuntime.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "拒绝清理工作区外的运行时目录：$fullRuntime"
 }
+foreach ($runtimeDir in @($fullRuntime, $fullStagingRuntime, $fullPreviousRuntime)) {
+    Assert-NotReparsePoint -Path $runtimeDir -Label "runtime 目录"
+}
 Assert-RuntimeNotInUse
-if (Test-Path -LiteralPath $fullStagingRuntime) {
-    Remove-Item -LiteralPath $fullStagingRuntime -Recurse -Force
-}
-if (Test-Path -LiteralPath $fullPreviousRuntime) {
-    Remove-Item -LiteralPath $fullPreviousRuntime -Recurse -Force
-}
+Remove-DirectoryTree -Path $fullStagingRuntime
+Remove-DirectoryTree -Path $fullPreviousRuntime
 
 $zhihuRuntime = Join-Path $stagingRuntime 'zhihu'
 $podcastRuntime = Join-Path $stagingRuntime 'podcast'
@@ -383,7 +489,13 @@ Assert-PythonRuntime -PythonExe (Join-Path $stagingRuntime 'podcast\python\pytho
 Assert-MediaTool -Exe (Join-Path $stagingRuntime 'podcast\ffmpeg\ffmpeg.exe') -Label 'vendored ffmpeg'
 Assert-MediaTool -Exe (Join-Path $stagingRuntime 'podcast\ffmpeg\ffprobe.exe') -Label 'vendored ffprobe'
 
-Write-CriticalRuntimeManifest -RuntimeRoot $stagingRuntime
+Write-CriticalRuntimeManifest -RuntimeRoot $stagingRuntime -Components (Get-RuntimeComponents `
+    -NodeSourceExe $node `
+    -PythonSourceExe (Join-Path $PythonRoot 'python.exe') `
+    -FfmpegSourceExe $ffmpeg `
+    -FfprobeSourceExe $ffprobe `
+    -ChromiumSourceExe (Join-Path $EdgeRoot 'msedge.exe') `
+    -ModelsSource $podcastModels)
 
 # Swap staging in only after it is fully built and manifest-verified: move the
 # old runtime aside first so a failed swap can be rolled back, then delete the
@@ -405,7 +517,9 @@ try {
 }
 if (Test-Path -LiteralPath $fullPreviousRuntime) {
     try {
-        Remove-Item -LiteralPath $fullPreviousRuntime -Recurse -Force -ErrorAction Stop
+        # Remove-DirectoryTree refuses to follow a reparse point — it removes
+        # only the link, never the junction target's contents.
+        Remove-DirectoryTree -Path $fullPreviousRuntime
     } catch {
         Write-Warning "旧运行时目录清理失败（可手动删除）：$fullPreviousRuntime — $($_.Exception.Message)"
     }

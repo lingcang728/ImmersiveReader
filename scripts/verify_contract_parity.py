@@ -21,6 +21,17 @@ the schema + Rust legs only — the TS library has no parser for them, and the
 Rust readers are intentionally more tolerant than the schemas (all-Option
 fields, no ``deny_unknown_fields``) so old journals still load; only fixtures
 where every leg's verdict agrees are listed.
+
+Cross-process task contracts (01-F5) are covered the same way:
+
+  - ``task-event`` — the ``acquisition://task-event`` wire shape; the Rust
+    leg deserializes ``crate::tasks::TaskEvent``.
+  - ``worker-fatal`` — the podcast worker's terminal fatal NDJSON line. On
+    top of the fixture table, ``run_worker_fatal_producer_leg`` imports the
+    real emitter (``transcribe_task._exit_fatal_payload``) and validates its
+    payloads against the schema, so a producer that drifts fails here even
+    when no fixture changed.
+
 Exit code is non-zero on any disagreement.
 """
 
@@ -126,6 +137,45 @@ def run_ts_verdicts(entries: list[dict]) -> dict[str, str]:
     raise RuntimeError("TS validator leg failed: " + "; ".join(errors))
 
 
+def run_worker_fatal_producer_leg() -> list[str]:
+    """Validate the real fatal-line emitter against worker-fatal.schema.json.
+
+    Fixtures alone cannot keep a *producer* honest — this leg imports the
+    podcast worker's fatal builder and validates what it would actually
+    print (the exit-code table and the unknown-code fallback).
+    ``transcribe_task`` is import-safe: its heavy pipeline imports live
+    inside ``main()``.
+    """
+    scripts_dir = ROOT / "tools" / "podcast-transcriber" / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    try:
+        import transcribe_task
+    except Exception as error:  # report, don't crash the gate
+        return [f"worker-fatal producer leg: transcribe_task import failed: {error}"]
+    check = validator(SCHEMA_ROOT / "worker-fatal.schema.json")
+    summary = {
+        "results": [
+            {"file": "ep1.mp3", "status": "failed", "error": "decoder exploded"},
+            {"file": "ep2.mp3", "status": "ok"},
+        ],
+        "failures": ["normalize timed out"],
+    }
+    failures: list[str] = []
+    for exit_code in (1, 2, 3, 4, 99):
+        payload = transcribe_task._exit_fatal_payload(
+            exit_code, summary, stage="transcribing"
+        )
+        errors = list(check.iter_errors(payload))
+        if errors:
+            failures.append(
+                "worker-fatal producer leg: "
+                f"_exit_fatal_payload({exit_code}) violates schema: "
+                f"{errors[0].message}"
+            )
+    return failures
+
+
 def run_rust_leg() -> bool:
     """Run the cargo parity tests that consume the same expectation tables."""
     cargo = shutil.which("cargo") or shutil.which("cargo.exe")
@@ -193,6 +243,14 @@ def main() -> int:
             )
         elif fixture in schema_verdicts and schema_verdicts[fixture] != verdict:
             failures.append(f"{fixture}: schema and TS verdicts disagree")
+
+    # Producer leg — the podcast worker's fatal emitter against its schema.
+    # A fixture table can only prove the *spec*; this proves the code that
+    # speaks it still does.
+    producer_failures = run_worker_fatal_producer_leg()
+    failures.extend(producer_failures)
+    if not producer_failures:
+        print("worker-fatal producer leg: _exit_fatal_payload payloads valid")
 
     for entry in [*expectations, *settings_expectations]:
         fixture = entry["fixture"]

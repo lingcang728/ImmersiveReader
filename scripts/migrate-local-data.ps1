@@ -38,21 +38,44 @@ function Test-IncludedArchiveFile {
 }
 
 function Get-SourceFiles {
-    param([Parameter(Mandatory)][string]$Root)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [string[]]$ExcludeDirectories = @()
+    )
     if (-not (Test-Path -LiteralPath $Root)) {
         return @()
     }
-    return @(Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object { Test-IncludedArchiveFile -File $_ })
+    # Match migrate-v3-production-data.ps1: a reparse directory in the source
+    # would be followed and copy the link target — refuse outright instead.
+    $reparse = @(Get-ChildItem -LiteralPath $Root -Directory -Force -Recurse | Where-Object {
+        ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    })
+    if ($reparse.Count -gt 0) {
+        throw "迁移源包含重解析目录，已停止：$($reparse[0].FullName)"
+    }
+    return @(Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object {
+        $file = $_
+        if (-not (Test-IncludedArchiveFile -File $file)) { return $false }
+        if ($ExcludeDirectories.Count -gt 0) {
+            $relative = $file.FullName.Substring($Root.TrimEnd('\').Length).TrimStart('\')
+            # 与 migrate-v3 的 Test-ExcludedRelativePath 一致：任一路径段命中即排除。
+            foreach ($part in ($relative -split '\\')) {
+                if ($part -in $ExcludeDirectories) { return $false }
+            }
+        }
+        return $true
+    })
 }
 
 function Copy-TreeSafely {
     param(
         [Parameter(Mandatory)][string]$Source,
         [Parameter(Mandatory)][string]$Destination,
-        [Parameter(Mandatory)][bool]$Preview
+        [Parameter(Mandatory)][bool]$Preview,
+        [string[]]$ExcludeDirectories = @()
     )
 
-    $files = Get-SourceFiles -Root $Source
+    $files = Get-SourceFiles -Root $Source -ExcludeDirectories $ExcludeDirectories
     $conflicts = [System.Collections.Generic.List[string]]::new()
     $pending = [System.Collections.Generic.List[object]]::new()
     foreach ($file in $files) {
@@ -120,10 +143,24 @@ function Copy-SqliteDatabaseSafely {
     # A plain file copy of a live WAL database can tear: committed rows may still sit
     # in the -wal sidecar. VACUUM INTO reads through a transaction and emits one
     # consistent main-file snapshot (same recipe as migration/sqlite.rs).
+    # It runs against a throwaway COPY of the source (db + -wal/-shm): opening
+    # the live source database — even for VACUUM INTO — can create or replay
+    # -wal/-shm sidecars, mutating the very migration source a dry run must
+    # leave untouched (same guard as Test-SqliteIntegrityViaCopy in the v3 script).
     $snapshot = Join-Path ([IO.Path]::GetTempPath()) ("immersive-zhihu-db-{0}.db" -f [guid]::NewGuid().ToString('N'))
+    $workDir = "$snapshot.src"
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
     try {
+        $sourceCopy = Join-Path $workDir 'source.db'
+        Copy-Item -LiteralPath $Source -Destination $sourceCopy
+        foreach ($suffix in @('-wal', '-shm')) {
+            $sidecar = "$Source$suffix"
+            if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+                Copy-Item -LiteralPath $sidecar -Destination "$sourceCopy$suffix"
+            }
+        }
         $escapedSnapshot = $snapshot.Replace("'", "''")
-        $null = Invoke-SqliteScalar -Sqlite $Sqlite -Database $Source -Sql "VACUUM INTO '$escapedSnapshot';"
+        $null = Invoke-SqliteScalar -Sqlite $Sqlite -Database $sourceCopy -Sql "VACUUM INTO '$escapedSnapshot';"
         if ((Invoke-SqliteScalar -Sqlite $Sqlite -Database $snapshot -Sql 'PRAGMA integrity_check;') -ne 'ok') {
             throw "数据库快照完整性校验失败：$Source"
         }
@@ -143,6 +180,7 @@ function Copy-SqliteDatabaseSafely {
         return 'pending'
     } finally {
         if (Test-Path -LiteralPath $snapshot) { Remove-Item -LiteralPath $snapshot -Force }
+        if (Test-Path -LiteralPath $workDir) { Remove-Item -LiteralPath $workDir -Recurse -Force }
     }
 }
 
@@ -166,7 +204,10 @@ $sqlite = (Get-Command sqlite3.exe -ErrorAction SilentlyContinue | Select-Object
 if (-not $sqlite) { throw '未找到已安装的 sqlite3.exe；按仓库规则不会自动安装第二份。' }
 $dbState = Copy-SqliteDatabaseSafely -Source $sourceDb -Destination $targetDb -Preview $DryRun.IsPresent -Sqlite $sqlite
 if (Test-Path -LiteralPath $sourceProfile) {
-    $reports.Add((Copy-TreeSafely -Source $sourceProfile -Destination $targetProfile -Preview $DryRun.IsPresent))
+    # 与 migrate-v3-production-data.ps1 同一排除清单：浏览器 profile 里的
+    # Cache/Code Cache/GPUCache 等是再生缓存，整树搬运只会把旧垃圾带进新 profile。
+    $excludedProfileDirectories = @('Cache', 'Code Cache', 'GPUCache', 'GrShaderCache', 'ShaderCache')
+    $reports.Add((Copy-TreeSafely -Source $sourceProfile -Destination $targetProfile -Preview $DryRun.IsPresent -ExcludeDirectories $excludedProfileDirectories))
 }
 
 $root = Get-RepoRoot

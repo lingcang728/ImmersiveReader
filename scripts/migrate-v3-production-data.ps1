@@ -1,5 +1,8 @@
 param(
     [switch]$Apply,
+    # Consume a run's rollback/actions.json and undo it in reverse order —
+    # the journal is an executable record, not only documentation.
+    [switch]$Rollback,
     [switch]$Force,
     [string]$LibraryRoot = (Join-Path $env:USERPROFILE 'Documents\沉浸阅读\Library'),
     [string]$LegacyReaderRoot = (Join-Path $env:APPDATA 'mmbook'),
@@ -239,6 +242,8 @@ public static class ImmersiveReaderCredential {
     private static extern bool CredWrite(ref CREDENTIAL credential, UInt32 flags);
     [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CredRead(string target, UInt32 type, UInt32 flags, out IntPtr credential);
+    [DllImport("advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CredDelete(string target, UInt32 type, UInt32 flags);
     [DllImport("advapi32.dll", EntryPoint = "CredFree")]
     private static extern void CredFree(IntPtr credential);
 
@@ -280,6 +285,14 @@ public static class ImmersiveReaderCredential {
             try { return Encoding.UTF8.GetString(blob); }
             finally { Array.Clear(blob, 0, blob.Length); }
         } finally { CredFree(pointer); }
+    }
+
+    public static void Delete(string target) {
+        if (!CredDelete(target, 1, 0)) {
+            int error = Marshal.GetLastWin32Error();
+            if (error == 1168) return; // ERROR_NOT_FOUND — already gone
+            throw new Win32Exception(error);
+        }
     }
 }
 '@
@@ -372,6 +385,76 @@ function Assert-NoLiveImmersiveProcesses {
     throw "检测到正在运行的 ImmersiveReader/知乎/播客进程：$list。请先退出应用（含托盘）与相关工具，或确认风险后加 -Force。"
 }
 
+if ($Apply -and $Rollback) { throw '-Apply 与 -Rollback 互斥：回滚请单独指定 -Rollback -RunId <id>。' }
+
+if ($Rollback) {
+    # Execute a recorded apply journal in reverse order. The journal lives at
+    # <LocalAppRoot>\Data\Migrations\<RunId>\rollback\actions.json and uses
+    # four action types: deleteFile, restoreFile, deleteDirectory,
+    # deleteCredential. Restores are hash-verified; unknown types stop the run.
+    Assert-NoLiveImmersiveProcesses -Force:$Force
+    Initialize-CredentialApi
+    $rollbackDir = Join-Path $LocalAppRoot "Data\Migrations\$RunId\rollback"
+    $journalPath = Join-Path $rollbackDir 'actions.json'
+    if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) {
+        throw "回滚日志不存在：$journalPath（确认 -RunId 与 -LocalAppRoot 指向正确的迁移运行）。"
+    }
+    $journal = Read-JsonObject -Path $journalPath
+    $actions = @($journal.actions)
+    if ($actions.Count -eq 0) {
+        Write-Output '[rollback] journal contains no actions; nothing to undo.'
+        return
+    }
+    $applied = [System.Collections.Generic.List[object]]::new()
+    $failed = [System.Collections.Generic.List[object]]::new()
+    for ($i = $actions.Count - 1; $i -ge 0; $i--) {
+        $action = $actions[$i]
+        try {
+            switch ([string]$action.type) {
+                'deleteFile' {
+                    if (Test-Path -LiteralPath ([string]$action.target)) {
+                        Remove-Item -LiteralPath ([string]$action.target) -Force
+                    }
+                }
+                'deleteDirectory' {
+                    # Reparse-safe delete: a junction removes only the link.
+                    Remove-DirectoryTree -Path ([string]$action.target)
+                }
+                'restoreFile' {
+                    $target = [string]$action.target
+                    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+                    Copy-Item -LiteralPath ([string]$action.source) -Destination $target -Force
+                    if ((Get-Sha256 $action.source) -ne (Get-Sha256 $target)) {
+                        throw "回滚恢复校验失败：$target"
+                    }
+                }
+                'deleteCredential' {
+                    [ImmersiveReaderCredential]::Delete([string]$action.target)
+                }
+                default { throw "未知回滚动作类型：$($action.type)" }
+            }
+            $applied.Add($action)
+            Write-Output "[rollback] $($action.type) -> $($action.target)"
+        } catch {
+            $failed.Add([pscustomobject]@{ action = $action; error = $_.Exception.Message })
+            Write-Warning "[rollback] $($action.type) $($action.target) 失败：$($_.Exception.Message)"
+        }
+    }
+    $rollbackReceipt = [ordered]@{
+        schemaVersion = 1
+        runId = $RunId
+        rolledBackAt = (Get-Date).ToUniversalTime().ToString('o')
+        applied = $applied.Count
+        failed = @($failed)
+    }
+    Write-JsonAtomic -Path (Join-Path $rollbackDir 'applied.json') -Value $rollbackReceipt
+    if ($failed.Count -gt 0) {
+        throw "回滚完成但有 $($failed.Count) 个动作失败——详见 rollback\applied.json，需人工收尾。"
+    }
+    Write-Output "[rollback] applied $($applied.Count) action(s) from $journalPath"
+    return
+}
+
 foreach ($required in @($LibraryRoot, $LegacyReaderRoot, $ReaderRoot, $LegacyPodcastRoot, $LegacyZhihuRoot)) {
     if (-not (Test-Path -LiteralPath $required -PathType Container)) {
         throw "迁移源不存在：$required"
@@ -461,7 +544,7 @@ function Write-RollbackJournal {
     Write-JsonAtomic -Path $script:RollbackJournalPath -Value ([ordered]@{
         schemaVersion = 1
         generatedAt = (Get-Date).ToUniversalTime().ToString('o')
-        note = 'Actions are ordered records for manual/approved rollback. They never restore a plaintext API key.'
+        note = 'Ordered rollback records consumed by -Rollback -RunId <id> (reverse order). They never restore a plaintext API key.'
         actions = @($rollbackActions)
     })
 }
