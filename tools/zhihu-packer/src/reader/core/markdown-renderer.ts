@@ -173,15 +173,22 @@ export async function renderMarkdown(
     for (const image of Array.from(wrapper.querySelectorAll('img'))) {
       const rawSource = image.getAttribute('src');
       if (!rawSource || /^(?:https?:|data:|blob:)/i.test(rawSource)) continue;
-      const decoded = decodeURIComponent(rawSource).replace(/\\/g, '/');
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(rawSource).replace(/\\/g, '/');
+      } catch {
+        decoded = rawSource.replace(/\\/g, '/');
+      }
       const resolved = decoded.startsWith('/')
         ? decoded.replace(/^\/+/, '')
         : resolveRelativePath(relativePath, decoded);
+      // resolveRelativePath 返回 null = .. 越出根目录，不重写为 content URL（服务端亦会 403）
+      if (resolved === null) continue;
       const encoded = resolved.split('/').map((segment) => encodeURIComponent(segment)).join('/');
       image.src = `${servedContentBase.replace(/\/$/, '')}/${encoded}`;
     }
   } else {
-    await resolveLocalImages(articleId, wrapper, relativePath, rootFilesMap);
+    await resolveLocalImages(wrapper, relativePath, rootFilesMap);
   }
 
   // 5. 对正文内的相对路径 markdown 链接跳转进行拦截与解析

@@ -146,7 +146,13 @@ def _verify_recovery(task_root: Path, compatibility: dict[str, str], input_sha25
     if not recovery_path.exists():
         return
     recovery = json.loads(recovery_path.read_text(encoding="utf-8-sig"))
-    saved = recovery.get("compatibility") or {}
+    saved = recovery.get("compatibility")
+    if not saved:
+        # recovery.json predates the compatibility stamp (or a crash landed
+        # between the task.json and compatibility writes): there is nothing to
+        # verify against, so treat the cache like a first run instead of a
+        # permanent INPUT_CHANGED dead end.
+        return
     expected = {"inputSha256": input_sha256, **compatibility}
     for field in COMPATIBILITY_FIELDS:
         if saved.get(field) != expected[field]:
@@ -210,7 +216,10 @@ def load_task_spec(path: Path, environment: dict[str, str] | None = None) -> dic
         if not math.isfinite(estimated_budget) or estimated_budget < 0 or budget_limit_value + 1e-9 < estimated_budget:
             raise TaskSpecError(
                 "BUDGET_CONFIRMATION_REQUIRED",
-                "Budget limit is below the verified estimate",
+                # The UI retries this failure with a user-entered limit —
+                # tell it the floor so an input below the estimate does not
+                # die instantly again with an opaque message.
+                f"Budget limit {budget_limit_value:.2f} CNY is below the verified estimate {estimated_budget:.2f} CNY",
                 required_action="approve_budget",
             )
     _verify_recovery(resolved_spec.parent, compatibility, input_sha256)
@@ -246,7 +255,12 @@ def main() -> int:
     # size, SHA-256) above and is the only file this task may process.
     os.environ["PODCAST_TRANSCRIBER_INPUT_FILE"] = spec["resolvedInputPath"]
     import transcribe_podcasts
-    from deepseek_pricing import PodcastBudgetExceededError, PodcastUpstreamError, classify_upstream_error
+    from deepseek_pricing import (
+        PodcastBudgetExceededError,
+        PodcastSecretMissingError,
+        PodcastUpstreamError,
+        classify_upstream_error,
+    )
 
     options = spec.get("options") or {}
     # Force-apply TaskSpec.options.translate into the runtime translation gate.
@@ -398,7 +412,14 @@ def main() -> int:
         # Classified errors (upstream/local/budget) keep their stable errorCode
         # and any requiredAction for the host UI; anything else carrying a
         # ``code`` attribute (e.g. PromptBudgetError) also passes through.
-        classified = error if isinstance(error, (PodcastBudgetExceededError, PodcastUpstreamError)) else classify_upstream_error(error)
+        classified = (
+            error
+            if isinstance(
+                error,
+                (PodcastBudgetExceededError, PodcastUpstreamError, PodcastSecretMissingError),
+            )
+            else classify_upstream_error(error)
+        )
         if classified is None and getattr(error, "code", None):
             classified = error
         if classified is not None:

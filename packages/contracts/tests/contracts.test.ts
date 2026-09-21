@@ -254,13 +254,21 @@ test("path safety mirrors the shared segment ruleset", () => {
 
 type FixtureExpectation = {
   readonly fixture: string;
-  readonly contract: "manifest" | "reading" | "provenance" | "publish-transaction";
+  readonly contract:
+    | "manifest"
+    | "reading"
+    | "provenance"
+    | "publish-transaction"
+    | "task-event"
+    | "worker-fatal";
   readonly expect: "valid" | "invalid";
 };
 
-// This package only ships manifest/reading validators — provenance and
-// publish-transaction fixtures are verified by the JSON schema (via
-// scripts/verify_contract_parity.py) and the Rust parity suite instead.
+// This package only ships manifest/reading validators — provenance,
+// publish-transaction, task-event and worker-fatal fixtures are verified by
+// the JSON schema (via scripts/verify_contract_parity.py) and the Rust
+// parity suite instead; worker-fatal additionally has a producer leg that
+// validates the podcast worker's real fatal-line emitter.
 const TS_PARITY_CONTRACTS = new Set(["manifest", "reading"]);
 
 // P1-22 parity: the Rust suite (contracts.rs::shared_fixtures_match_*) runs this

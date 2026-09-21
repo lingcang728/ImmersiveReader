@@ -47,6 +47,31 @@ export function calculateSourceId(
 }
 
 /**
+ * articleId 是 FNV-1a 32 位散列——生日悖论下两个不同路径可能撞出同一 ID，
+ * 导致进度恢复跳错文章。撞车时按 relativePath 排序追加确定性序号消歧；
+ * 无碰撞（常态）时 ID 原样保留，不打扰已存储的进度键。
+ */
+export function dedupeArticleIds(articles: ArticleMetadata[]): void {
+  const groups = new Map<string, ArticleMetadata[]>();
+  for (const art of articles) {
+    const group = groups.get(art.articleId);
+    if (group) group.push(art);
+    else groups.set(art.articleId, [art]);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    group.sort((a, b) =>
+      (a.relativePath ?? a.filename ?? '').localeCompare(
+        b.relativePath ?? b.filename ?? ''
+      )
+    );
+    for (let i = 1; i < group.length; i++) {
+      group[i].articleId = `${group[i].articleId}~${i + 1}`;
+    }
+  }
+}
+
+/**
  * 简易安全解析 YAML Front Matter (键值对匹配)
  */
 function parseYaml(yamlStr: string): Record<string, string> {
@@ -107,8 +132,8 @@ export function extractMetadata(
   let author = '本地文档';
   let frontMatter: Record<string, string> = {};
   
-  // 1. 尝试匹配 YAML Front Matter (必须以 --- 开头)
-  const normalizedText = headText.replace(/\r\n/g, '\n');
+  // 1. 尝试匹配 YAML Front Matter (必须以 --- 开头；UTF-8 BOM 先剥离，否则首行判定失败)
+  const normalizedText = headText.replace(/\r\n/g, '\n').replace(/^\uFEFF/, '');
   let bodyText = normalizedText;
   
   if (normalizedText.startsWith('---\n')) {

@@ -31,14 +31,20 @@ export function authorDirectoryName(authorName: string, authorId: string): strin
 
 function resolveArticlePath(
   projectRoot: string,
+  outputRoot: string,
   authorPath: string,
   outputPath: string,
 ): { filePath: string; usedBasenameFallback: boolean } | null {
   const candidates: Array<{ filePath: string; usedBasenameFallback: boolean }> = [
-    {
-      filePath: path.isAbsolute(outputPath) ? outputPath : path.resolve(projectRoot, outputPath),
-      usedBasenameFallback: false,
-    },
+    // output_path 的相对基准是归档输出根（`.incoming/<task>/…`、`作者/x.md`
+    // 都相对它）；旧库也可能存了相对仓库根的 `output/…` 写法，作次候选。
+    // 两个候选都以存在性裁决，顺序只是优先级。
+    ...(path.isAbsolute(outputPath)
+      ? [{ filePath: outputPath, usedBasenameFallback: false }]
+      : [
+          { filePath: path.resolve(outputRoot, outputPath), usedBasenameFallback: false },
+          { filePath: path.resolve(projectRoot, outputPath), usedBasenameFallback: false },
+        ]),
     { filePath: path.join(authorPath, path.basename(outputPath)), usedBasenameFallback: true },
   ];
   return (
@@ -87,7 +93,7 @@ export function generateAuthorManifest(input: GenerateAuthorManifestInput): Mani
   const archivedItems: ArchivedItem[] = [];
   const representedPaths = new Set<string>();
   for (const item of items) {
-    const resolved = resolveArticlePath(projectRoot, authorPath, item.output_path);
+    const resolved = resolveArticlePath(projectRoot, outputRoot, authorPath, item.output_path);
     if (resolved === null) {
       missingItems += 1;
       continue;

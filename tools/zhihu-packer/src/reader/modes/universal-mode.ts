@@ -1,6 +1,6 @@
 import { scanFolder, VirtualFile, readText, isMarkdownFile, isSupportedFile } from '../core/scanner.js';
 import { extractMetadata, ArticleMetadata, calculateSourceId } from '../core/metadata.js';
-import { saveDirectoryHandle, saveSourceFolderName, getDirectoryHandle, verifyHandlePermission, getSourceFolderName } from '../core/storage.js';
+import { saveDirectoryHandle, saveSourceFolderName, getDirectoryHandle, verifyHandlePermission, getSourceFolderName, safeGetItem, safeSetItem } from '../core/storage.js';
 
 type LoadedCallback = (
   filesMap: Map<string, VirtualFile>,
@@ -155,7 +155,7 @@ export function initUniversalMode(
   appContainer.classList.add('hidden');
 
   // A. 处理一键恢复上次阅读按钮
-  const canRestore = localStorage.getItem('last_active_source_can_restore') === 'true';
+  const canRestore = safeGetItem('last_active_source_can_restore') === 'true';
   if (lastActiveSourceId && canRestore) {
     const lastFolderName = getSourceFolderName(lastActiveSourceId);
     if (restoreBtn) {
@@ -215,7 +215,7 @@ export function initUniversalMode(
           // 保存文件夹句柄及别名
           await saveDirectoryHandle(sourceId, handle);
           saveSourceFolderName(sourceId, handle.name);
-          localStorage.setItem('last_active_source_can_restore', 'true');
+          safeSetItem('last_active_source_can_restore', 'true');
 
           landingSection.classList.add('hidden');
           appContainer.classList.remove('hidden');
@@ -254,8 +254,8 @@ export function initUniversalMode(
 
         // input 模式无法保存句柄到 IndexedDB，但可以记住 Source ID 进度
         saveSourceFolderName(sourceId, rootName);
-        localStorage.setItem('last_active_source_id', sourceId);
-        localStorage.setItem('last_active_source_can_restore', 'false');
+        safeSetItem('last_active_source_id', sourceId);
+        safeSetItem('last_active_source_can_restore', 'false');
 
         landingSection.classList.add('hidden');
         appContainer.classList.remove('hidden');
@@ -344,8 +344,8 @@ export function initUniversalMode(
         if (warning) alert(warning);
 
         saveSourceFolderName(sourceId, rootName);
-        localStorage.setItem('last_active_source_id', sourceId);
-        localStorage.setItem('last_active_source_can_restore', 'false');
+        safeSetItem('last_active_source_id', sourceId);
+        safeSetItem('last_active_source_can_restore', 'false');
 
         landingSection.classList.add('hidden');
         appContainer.classList.remove('hidden');

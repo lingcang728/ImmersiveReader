@@ -2,6 +2,31 @@ const DB_NAME = 'markdown-reader-db';
 const STORE_NAME = 'handles-store';
 const DB_VERSION = 1;
 
+// localStorage 可能被禁用或满额——所有读写都经这三个保护壳，静默降级
+export function safeGetItem(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function safeSetItem(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // localStorage 不可用（隐私模式/配额满）——进度静默丢弃
+  }
+}
+
+export function safeRemoveItem(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // 同上
+  }
+}
+
 export interface ReadingProgress {
   sourceId: string;
   articleId: string;
@@ -41,11 +66,16 @@ export async function saveDirectoryHandle(
     const store = transaction.objectStore(STORE_NAME);
     const request = store.put(handle, sourceId);
 
-    request.onerror = () => reject(request.error);
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error || new Error('IndexedDB transaction aborted'));
+    const fail = (err: unknown) => {
+      db.close();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    request.onerror = () => fail(request.error);
+    transaction.onerror = () => fail(transaction.error);
+    transaction.onabort = () => fail(transaction.error || new Error('IndexedDB transaction aborted'));
     transaction.oncomplete = () => {
-      localStorage.setItem('last_active_source_id', sourceId);
+      safeSetItem('last_active_source_id', sourceId);
+      db.close();
       resolve();
     };
   });
@@ -63,8 +93,14 @@ export async function getDirectoryHandle(
       const transaction = db.transaction(STORE_NAME, 'readonly');
       const store = transaction.objectStore(STORE_NAME);
       const request = store.get(sourceId);
-      request.onsuccess = () => resolve(request.result || null);
-      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        db.close();
+        resolve(request.result || null);
+      };
+      request.onerror = () => {
+        db.close();
+        reject(request.error);
+      };
     });
   } catch (err) {
     console.error('从 IndexedDB 读取文件夹句柄失败:', err);
@@ -73,21 +109,48 @@ export async function getDirectoryHandle(
 }
 
 /**
+ * 删除指定 Source 的 FileSystemDirectoryHandle（清理被替换/失效的句柄，防单调增长）
+ */
+export async function deleteDirectoryHandle(sourceId: string): Promise<void> {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, 'readwrite');
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.delete(sourceId);
+      const done = () => {
+        db.close();
+        resolve();
+      };
+      const fail = (err: unknown) => {
+        db.close();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
+      request.onsuccess = done;
+      request.onerror = () => fail(request.error);
+      transaction.onerror = () => fail(transaction.error);
+    });
+  } catch (err) {
+    console.error('从 IndexedDB 删除文件夹句柄失败:', err);
+  }
+}
+
+/**
  * 获取最后一次活动的 Source ID
  */
 export function getLastActiveSourceId(): string | null {
-  return localStorage.getItem('last_active_source_id');
+  return safeGetItem('last_active_source_id');
 }
 
 /**
  * 保存文件夹别名 (比如显示上次恢复的文件夹名称)
  */
 export function saveSourceFolderName(sourceId: string, name: string): void {
-  localStorage.setItem(`source_name_${sourceId}`, name);
+  safeSetItem(`source_name_${sourceId}`, name);
 }
 
 export function getSourceFolderName(sourceId: string): string {
-  return localStorage.getItem(`source_name_${sourceId}`) || '未命名文件夹';
+  return safeGetItem(`source_name_${sourceId}`) || '未命名文件夹';
 }
 
 /**
@@ -132,14 +195,14 @@ export function saveReadingProgress(
     timestamp: Date.now(),
     schemaVersion: 1
   };
-  localStorage.setItem(`progress_${sourceId}`, JSON.stringify(fullProgress));
+  safeSetItem(`progress_${sourceId}`, JSON.stringify(fullProgress));
 }
 
 /**
  * 获取阅读进度
  */
 export function getReadingProgress(sourceId: string): ReadingProgress | null {
-  const raw = localStorage.getItem(`progress_${sourceId}`);
+  const raw = safeGetItem(`progress_${sourceId}`);
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as ReadingProgress;
@@ -156,5 +219,7 @@ export function getReadingProgress(sourceId: string): ReadingProgress | null {
  * 清除指定 Source 的进度
  */
 export function clearReadingProgress(sourceId: string): void {
-  localStorage.removeItem(`progress_${sourceId}`);
+  safeRemoveItem(`progress_${sourceId}`);
+  // 顺带清掉该 Source 缓存的目录句柄——进度都清了，句柄留着只是孤儿
+  void deleteDirectoryHandle(sourceId);
 }

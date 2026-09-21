@@ -47,7 +47,16 @@ function assertSafeTaskId(taskId: string): void {
 
 function writeJsonAtomic(filePath: string, value: unknown): void {
   const tempPath = `${filePath}.tmp-${process.pid}`;
-  fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  // F5: journal durability — writeFileSync only reaches the page cache, so a
+  // power loss between rename and flush could still lose a phase record the
+  // renames already assumed durable. fsync the temp before it is renamed in.
+  const fd = fs.openSync(tempPath, "w");
+  try {
+    fs.writeSync(fd, `${JSON.stringify(value, null, 2)}\n`, 0, "utf8");
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tempPath, filePath);
 }
 
@@ -520,6 +529,38 @@ export function publishTaskStage(
         finalRoot: crashedFinal,
         authorDirectory: path.basename(crashedFinal),
       };
+    }
+    // F5: a stale `old_moved` journal can coexist with a final dir — the new
+    // tree may have landed in the gap between rename and the new_moved write.
+    // Disambiguate by the journal's own hashes: validate → the recorded tree
+    // is on disk, commit it; mismatch → the rollback copy is the trustworthy
+    // world, park the stray final under .incoming so the restore below works.
+    if (
+      crashed.phase === "old_moved" &&
+      fs.existsSync(crashedFinal) &&
+      fs.existsSync(crashedRollback)
+    ) {
+      try {
+        validateMetadata(root, crashed, crashed.finalRelativePath);
+        setPhase(root, crashed, "committed");
+        cleanupPublishArtifacts(root, taskId, authorId);
+        return {
+          transaction: crashed,
+          finalRoot: crashedFinal,
+          authorDirectory: path.basename(crashedFinal),
+        };
+      } catch (validationError) {
+        const stray = path.join(
+          root,
+          ".incoming",
+          `stale-final-${taskId}-${Date.now()}`,
+        );
+        logger.warn(
+          `发布恢复: 最终目录内容与 journal 哈希不符，已挪至 ${stray} 并恢复回滚副本 (${validationError instanceof Error ? validationError.message : validationError})`,
+        );
+        ensureDirectory(path.dirname(stray));
+        fs.renameSync(crashedFinal, stray);
+      }
     }
     if (!fs.existsSync(crashedFinal) && fs.existsSync(crashedRollback)) {
       ensureDirectory(path.dirname(crashedFinal));

@@ -53,10 +53,12 @@ def get_deepseek_semaphore(config: dict[str, Any]) -> Any:
 from deepseek_pricing import (  # noqa: E402
     DEEPSEEK_DEFAULT_MODEL,
     PodcastBudgetExceededError,
+    PodcastSecretMissingError,
     PromptBudgetError,
     normalize_deepseek_model,
     reserve_budget,
     settle_budget,
+    validated_local_service_url,
 )
 from podcast_transcriber import deepseek as _deepseek_client  # noqa: E402
 from podcast_transcriber.common import (  # noqa: E402
@@ -1042,9 +1044,11 @@ def paragraphize(text: str, max_chars: int = 700) -> list[str]:
 
 
 def ollama_generate(prompt: str, model: str, timeout: int = 300, llm_config: dict[str, Any] | None = None) -> str:
-    url = "http://127.0.0.1:11434/api/generate"
-    if llm_config:
-        url = str(llm_config.get("ollama_url", url))
+    # 06-F-03: transcript text goes to this endpoint — config may only point it
+    # at https:// or an http:// loopback service.
+    url = validated_local_service_url(
+        (llm_config or {}).get("ollama_url"), "http://127.0.0.1:11434/api/generate"
+    )
     payload = {
         "model": model,
         "prompt": prompt,
@@ -1151,9 +1155,10 @@ def maybe_polish_text_with_llm(text: str, speaker: str, llm_config: dict[str, An
         with _LLM_CONFIG_LOCK:
             llm_config["_consecutive_errors"] = 0
         return result
-    except (PromptBudgetError, PodcastBudgetExceededError):
-        # Prompt-budget overflows split upstream; spend-limit errors must reach
-        # the host fatal line (ApproveBudget action) — never degrade to text.
+    except (PromptBudgetError, PodcastBudgetExceededError, PodcastSecretMissingError):
+        # Prompt-budget overflows split upstream; spend-limit and missing-key
+        # errors must reach the host fatal line (ApproveBudget / ConfigureSecret
+        # actions) — never degrade to text.
         raise
     except Exception as exc:
         with _LLM_CONFIG_LOCK:
@@ -1684,12 +1689,20 @@ def count_missing_translations(
     markdown: str,
     turns: list[dict[str, Any]],
     is_english: bool,
+    translation_expected: bool = True,
 ) -> tuple[int, int]:
     """Return (missing, translatable) for en/mixed non-sponsor turns.
 
     ``missing`` covers both empty translations and [翻译缺失：…] /
     [TRANSLATION_MISSING] markers — whichever count is higher wins so markers
     that leaked into the rendered markdown without a matching turn still count.
+
+    ``translation_expected=False`` marks runs that intentionally skipped
+    translation (TaskSpec ``translate=false`` / zh-only content → the segments
+    JSON carries ``needs_translation: false``): empty translation fields are
+    expected output, not defects. Markers that still leaked into the rendered
+    markdown are still counted — a literal placeholder in shipped text is a
+    real defect regardless of mode.
     """
     translatable = [
         turn
@@ -1698,6 +1711,9 @@ def count_missing_translations(
         and not turn.get("is_sponsor")
         and str(turn.get("languageClass") or ("en" if is_english else "zh")) in {"en", "mixed"}
     ]
+    if not translation_expected:
+        marker_hits = len(MISSING_TRANSLATION_MARKERS_RE.findall(markdown))
+        return marker_hits, len(translatable)
     missing_turns = sum(1 for turn in translatable if _translation_missing(turn.get("translation")))
     marker_hits = len(MISSING_TRANSLATION_MARKERS_RE.findall(markdown))
     return max(missing_turns, marker_hits), len(translatable)
@@ -1712,6 +1728,7 @@ def final_quality_errors(
     require_speaker_roles: bool = False,
     missing_translation_max_count: int = MISSING_TRANSLATION_MAX_COUNT,
     missing_translation_max_ratio: float = MISSING_TRANSLATION_MAX_RATIO,
+    translation_expected: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     for pattern in BAD_FINAL_PATTERNS:
@@ -1720,8 +1737,12 @@ def final_quality_errors(
     # Missing translations only matter for en/mixed blocks — never Chinese-only.
     # A few missing markers are tolerated (warning + counted in the summary);
     # the QA gate fails only when the allowance is exceeded or nothing was
-    # translated at all.
-    missing, translatable = count_missing_translations(markdown, turns, is_english)
+    # translated at all. When the run intentionally skipped translation
+    # (needs_translation=False in the segments JSON), empty translation
+    # fields are expected output and do not count.
+    missing, translatable = count_missing_translations(
+        markdown, turns, is_english, translation_expected=translation_expected
+    )
     try:
         max_count = max(0, int(missing_translation_max_count))
     except (TypeError, ValueError):
@@ -1822,7 +1843,7 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
                     for idx, text in results.items():
                         if text:
                             polished_texts[idx] = text
-                except PodcastBudgetExceededError:
+                except (PodcastBudgetExceededError, PodcastSecretMissingError):
                     raise
                 except Exception as e:
                     logger.warning("Batch polish request failed, falling back to individual polish: %s", e)
@@ -1949,7 +1970,12 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
     markdown = "\n".join(lines).strip() + "\n"
     # Missing-translation markers degrade to a warning + count, not a fatal QA
     # failure — see count_missing_translations / final_quality_errors.
-    missing_translations, translatable_turns = count_missing_translations(markdown, render_turns, is_english)
+    # needs_translation=False (translate=false or zh-only run) means empty
+    # translation fields are the expected output, not defects.
+    translation_expected = data.get("needs_translation") is not False
+    missing_translations, translatable_turns = count_missing_translations(
+        markdown, render_turns, is_english, translation_expected=translation_expected
+    )
     LAST_POLISH_SUMMARY["translatable_turns"] = translatable_turns
     LAST_POLISH_SUMMARY["missing_translations"] = missing_translations
     if missing_translations:
@@ -1972,6 +1998,7 @@ def render_final_markdown(data: dict[str, Any], turns: list[dict[str, Any]], con
             missing_translation_max_ratio=final_config.get(
                 "missing_translation_max_ratio", MISSING_TRANSLATION_MAX_RATIO
             ),
+            translation_expected=translation_expected,
         )
         if errors:
             raise RuntimeError("Final Markdown QA failed: " + "; ".join(errors))

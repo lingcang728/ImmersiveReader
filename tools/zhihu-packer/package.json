@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Zhihu Content Archival Tool",
   "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "build": "tsc",
     "test": "node --import tsx --test tests/*.test.ts",
@@ -24,7 +27,7 @@
   },
   "devDependencies": {
     "@types/dompurify": "^3.0.5",
-    "@types/express": "^5.0.0",
+    "@types/express": "^4.17.25",
     "@types/jsdom": "^28.0.3",
     "@types/node": "^22.13.0",
     "esbuild": "^0.28.0",

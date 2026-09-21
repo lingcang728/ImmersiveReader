@@ -348,6 +348,48 @@ def test_final_quality_fails_when_missing_exceeds_tolerance() -> None:
         raise AssertionError("missing count above tolerance must fail QA")
 
 
+def test_final_quality_passes_when_translation_intentionally_disabled() -> None:
+    """translate=false (needs_translation=False in the segments JSON): en/mixed
+    turns ship without translation text — empty fields are expected output,
+    not a QA failure."""
+    turns = _en_turns(6, missing={0, 1, 2, 3, 4, 5})
+    markdown = pim.render_final_markdown(
+        {
+            "source_file": "english-no-translate.wav",
+            "detected_language": "en",
+            "needs_translation": False,
+        },
+        turns,
+        {"markdown": {"llm_polish": {"enabled": False}, "fail_on_quality_errors": True}},
+    )
+    assert "Original sentence number 0" in markdown
+    assert pim.LAST_POLISH_SUMMARY["translatable_turns"] == 6
+    assert pim.LAST_POLISH_SUMMARY["missing_translations"] == 0
+
+
+def test_final_quality_counts_leaked_marker_even_when_translation_disabled() -> None:
+    """needs_translation=False excuses empty fields, but literal
+    [翻译缺失：…] placeholders in shipped text are still defects — five
+    leaked markers exceed the 4-turn tolerance and fail QA."""
+    turns = _en_turns(6, missing={0, 1, 2, 3, 4, 5})
+    for index in (0, 1, 2, 3, 4):
+        turns[index]["translation"] = "[翻译缺失：translation failed]"
+    try:
+        pim.render_final_markdown(
+            {
+                "source_file": "leaked-marker.wav",
+                "detected_language": "en",
+                "needs_translation": False,
+            },
+            turns,
+            {"markdown": {"llm_polish": {"enabled": False}, "fail_on_quality_errors": True}},
+        )
+    except RuntimeError as error:
+        assert "missing translation" in str(error)
+    else:
+        raise AssertionError("a leaked missing-translation marker must still fail QA")
+
+
 def test_write_final_markdown_from_json_injects_configured_semaphore(tmp_path, monkeypatch) -> None:
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()

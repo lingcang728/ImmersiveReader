@@ -1,7 +1,7 @@
 import { Page } from 'playwright-core';
 import * as fs from 'fs';
 import * as path from 'path';
-import { logger, sleep } from './utils.js';
+import { logger, sleep, pruneDebugSnapshots, redactPathForLog } from './utils.js';
 import { normalizeUrl } from './extractor.js';
 import { resolveBrowserCacheDir } from './runtime-paths.js';
 
@@ -698,7 +698,9 @@ export async function scrapePeopleIndex(
         fs.mkdirSync(debugRoot, { recursive: true });
         const debugPath = path.join(debugRoot, `debug-people-${itemType}.html`);
         fs.writeFileSync(debugPath, await page.content(), 'utf-8');
-        logger.error(`未发现任何条目，已保存调试页面快照至: ${debugPath}（可据此判断是否为登录墙 / 风控空页）`);
+        pruneDebugSnapshots(debugRoot);
+        // 06-F-05：日志不落绝对路径（含用户目录结构），保留文件名即可定位。
+        logger.error(`未发现任何条目，已保存调试页面快照至: ${redactPathForLog(debugPath)}（可据此判断是否为登录墙 / 风控空页）`);
       } catch {
         // ignore
       }

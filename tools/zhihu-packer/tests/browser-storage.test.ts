@@ -39,10 +39,19 @@ test('stores Obscura login cookies beneath the managed Zhihu profile', async () 
 
     await syncCookiesToObscuraStorage(context);
 
+    // P2-1 之后凭据以 DPAPI 密文 cookies.dpapi 落盘；cookies.json 只在 DPAPI
+    // 不可用（非 Windows 调试）时作为回退产物出现，二者必有其一。
+    const storageDir = path.join(profileRoot, '.obscura-profile');
+    const protectedFile = path.join(storageDir, 'cookies.dpapi');
+    const legacyFile = path.join(storageDir, 'cookies.json');
     assert.equal(
-      fs.existsSync(path.join(profileRoot, '.obscura-profile', 'cookies.json')),
+      fs.existsSync(protectedFile) || fs.existsSync(legacyFile),
       true
     );
+    if (fs.existsSync(protectedFile)) {
+      // 密文必须是不透明字节——能被直接 JSON.parse 成 Cookie 列表即泄漏。
+      assert.throws(() => JSON.parse(fs.readFileSync(protectedFile, 'utf-8')));
+    }
     assert.equal(fs.existsSync(path.join(sandbox, '.obscura-profile', 'cookies.json')), false);
   } finally {
     process.chdir(previousCwd);

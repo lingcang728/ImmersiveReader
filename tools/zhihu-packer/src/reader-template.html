@@ -4,26 +4,32 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="darkreader-lock">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="dark light">
   <title>沉浸式 Markdown 阅读器</title>
   <style>
-    /* 沉浸阅读 — Night Lamp design tokens */
+    /* 沉浸阅读 — design tokens.
+       Defaults are the standalone dark theme; when embedded in the
+       ImmersiveReader shell the host pushes a full var pack via the
+       `set-theme` bridge message (inline styles — do NOT add !important
+       here, a stylesheet !important would win over the inline vars). */
     :root {
-      --bg-color: #161412 !important;
-      --bg-raised: #1c1916 !important;
-      --bg-elevated: #23201c !important;
-      --card-bg: rgba(28, 25, 22, 0.72) !important;
-      --card-bg-active: rgba(35, 32, 28, 0.94) !important;
-      --border-color: rgba(228, 221, 208, 0.07) !important;
-      --border-color-active: rgba(196, 164, 106, 0.35) !important;
-      --line: rgba(228, 221, 208, 0.07) !important;
-      --text-color: #e4ddd0 !important;
-      --text-secondary: #a39c8f !important;
-      --text-muted: #8f887d !important;
-      --text-light: #e4ddd0 !important;
-      --accent-color: #69b2ff !important;
-      --accent-gradient: linear-gradient(135deg, #69b2ff, #367ed0) !important;
-      --accent-glow: rgba(76, 151, 232, 0.2) !important;
+      --bg-color: #161412;
+      --bg-raised: #1c1916;
+      --bg-elevated: #23201c;
+      --card-bg: color-mix(in srgb, var(--bg-raised) 72%, transparent);
+      --card-bg-active: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+      --border-color: color-mix(in srgb, var(--text-color) 7%, transparent);
+      --border-color-active: color-mix(in srgb, var(--accent-color) 35%, transparent);
+      --line: color-mix(in srgb, var(--text-color) 7%, transparent);
+      --text-color: #e4ddd0;
+      --text-secondary: #a39c8f;
+      --text-muted: #8f887d;
+      --text-light: #e4ddd0;
+      --accent-color: #69b2ff;
+      --accent-gradient: linear-gradient(135deg, var(--accent-color), color-mix(in srgb, var(--accent-color) 70%, var(--bg-color)));
+      --accent-glow: color-mix(in srgb, var(--accent-color) 20%, transparent);
+      --danger-color: #d4a099;
+      --on-accent: #10151c;
       --p-font-size: 18px;
     }
 
@@ -39,7 +45,7 @@
 
     body {
       min-height: 100%;
-      background: radial-gradient(ellipse 80% 42% at 50% 0%, rgba(76, 151, 232, 0.08), transparent 62%), var(--bg-color);
+      background: radial-gradient(ellipse 80% 42% at 50% 0%, color-mix(in srgb, var(--accent-color) 8%, transparent), transparent 62%), var(--bg-color);
       color: var(--text-color);
       font-family: "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
       overflow-x: hidden;
@@ -62,11 +68,11 @@
       background: transparent;
     }
     ::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.1);
+      background: color-mix(in srgb, var(--text-color) 14%, transparent);
       border-radius: 3px;
     }
     ::-webkit-scrollbar-thumb:hover {
-      background: rgba(255, 255, 255, 0.25);
+      background: color-mix(in srgb, var(--text-color) 28%, transparent);
     }
 
     /* --- 极客磨砂玻璃风格导入页 --- */
@@ -84,19 +90,19 @@
       width: 100%;
       max-width: 520px;
       padding: 40px 32px;
-      background: rgba(28, 25, 22, 0.92) !important;
+      background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
       backdrop-filter: blur(24px) saturate(120%);
       border: 1px solid var(--border-color);
       border-radius: 20px;
       box-shadow: 0 28px 64px rgba(0, 0, 0, 0.48),
-                  0 0 40px rgba(196, 164, 106, 0.06);
+                  0 0 40px color-mix(in srgb, var(--accent-color) 6%, transparent);
       text-align: center;
     }
 
     .landing-content {
       width: min(520px, calc(100vw - 48px));
       padding: 40px 32px;
-      background: rgba(28, 25, 22, 0.96);
+      background: color-mix(in srgb, var(--bg-raised) 96%, transparent);
       border: 1px solid var(--border-color-active);
       border-radius: 18px;
       box-shadow: 0 28px 64px rgba(0, 0, 0, 0.48);
@@ -136,7 +142,7 @@
 
     .drop-zone {
       border: 1px dashed var(--border-color);
-      background: rgba(255, 255, 255, 0.02);
+      background: color-mix(in srgb, var(--text-color) 3%, transparent);
       border-radius: 12px;
       padding: 48px 24px;
       cursor: pointer;
@@ -150,13 +156,13 @@
 
     .drop-zone:hover {
       border-color: var(--accent-color);
-      background: rgba(196, 164, 106, 0.05);
+      background: color-mix(in srgb, var(--accent-color) 5%, transparent);
     }
 
     .drop-zone.dragover {
       border-color: var(--accent-color);
-      background: rgba(196, 164, 106, 0.14);
-      box-shadow: 0 0 20px rgba(196, 164, 106, 0.16);
+      background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+      box-shadow: 0 0 20px color-mix(in srgb, var(--accent-color) 16%, transparent);
     }
 
     .btn {
@@ -171,19 +177,19 @@
       border: none;
       border-radius: 8px;
       cursor: pointer;
-      box-shadow: 0 4px 15px rgba(196, 164, 106, 0.18);
+      box-shadow: 0 4px 15px color-mix(in srgb, var(--accent-color) 18%, transparent);
       transition: all 0.25s ease;
       width: 100%;
     }
 
     .btn:hover {
       transform: translateY(-1px);
-      box-shadow: 0 6px 20px rgba(196, 164, 106, 0.24);
+      box-shadow: 0 6px 20px color-mix(in srgb, var(--accent-color) 24%, transparent);
       opacity: 0.95;
     }
 
     .btn-secondary {
-      background: rgba(255, 255, 255, 0.03);
+      background: color-mix(in srgb, var(--text-color) 4%, transparent);
       border: 1px solid var(--border-color);
       color: var(--text-color);
       margin-top: 10px;
@@ -191,16 +197,16 @@
     }
 
     .btn-secondary:hover {
-      background: rgba(255, 255, 255, 0.08);
+      background: color-mix(in srgb, var(--text-color) 10%, transparent);
       border-color: var(--text-muted);
       transform: none;
       box-shadow: none;
     }
 
     .btn-error {
-      background: #EF4444 !important;
-      color: #FFFFFF !important;
-      box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
+      background: var(--danger-color);
+      color: var(--on-accent);
+      box-shadow: 0 4px 15px color-mix(in srgb, var(--danger-color) 30%, transparent);
     }
 
     .btn:disabled {
@@ -221,7 +227,7 @@
     }
 
     .landing-tips code {
-      background: rgba(255, 255, 255, 0.06);
+      background: color-mix(in srgb, var(--text-color) 8%, transparent);
       border: 1px solid var(--border-color);
       padding: 2px 6px;
       border-radius: 4px;
@@ -245,7 +251,7 @@
       position: fixed;
       left: 0;
       top: 0;
-      background: rgba(10, 10, 12, 0.85);
+      background: color-mix(in srgb, var(--bg-color) 85%, transparent);
       backdrop-filter: blur(24px) saturate(120%);
       border-right: 1px solid var(--border-color);
       display: flex;
@@ -267,7 +273,7 @@
       top: 0;
       width: 100%;
       height: 100%;
-      background: rgba(5, 5, 8, 0.5);
+      background: color-mix(in srgb, var(--bg-color) 50%, transparent);
       backdrop-filter: blur(2px);
       z-index: 999;
       opacity: 0;
@@ -309,7 +315,7 @@
       width: 100%;
       padding: 10px 14px 10px 36px;
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.05);
+      background: color-mix(in srgb, var(--text-color) 6%, transparent);
       border: 1px solid var(--border-color);
       color: var(--text-light);
       font-size: 0.9rem;
@@ -319,8 +325,8 @@
 
     .sidebar-search-input:focus {
       border-color: var(--accent-color);
-      box-shadow: 0 0 10px rgba(196, 164, 106, 0.16);
-      background: rgba(255, 255, 255, 0.08);
+      box-shadow: 0 0 10px color-mix(in srgb, var(--accent-color) 16%, transparent);
+      background: color-mix(in srgb, var(--text-color) 10%, transparent);
     }
 
     .search-icon-svg {
@@ -347,7 +353,7 @@
       left: 12px;
       right: 12px;
       height: 40px;
-      background: rgba(196, 164, 106, 0.12);
+      background: color-mix(in srgb, var(--accent-color) 12%, transparent);
       border-radius: 8px;
       border-left: 3px solid var(--accent-color);
       pointer-events: none;
@@ -384,7 +390,7 @@
 
     .menu-item:hover {
       color: var(--text-light);
-      background-color: rgba(255, 255, 255, 0.03);
+      background-color: color-mix(in srgb, var(--text-color) 4%, transparent);
     }
 
     .menu-item.active {
@@ -454,7 +460,7 @@
       width: 44px;
       height: 44px;
       border-radius: 12px;
-      background: rgba(19, 29, 43, 0.78);
+      background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
       backdrop-filter: blur(16px) saturate(135%);
       border: 1px solid color-mix(in srgb, var(--accent-color) 42%, var(--border-color));
       display: flex;
@@ -467,7 +473,7 @@
     }
 
     .menu-trigger-btn:hover {
-      background: rgba(28, 49, 76, 0.94);
+      background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
       border-color: color-mix(in srgb, var(--accent-color) 72%, var(--border-color));
       transform: scale(1.05);
     }
@@ -532,7 +538,8 @@
                   border-color 0.6s cubic-bezier(0.25, 1, 0.5, 1),
                   opacity 0.6s cubic-bezier(0.25, 1, 0.5, 1);
       
-      opacity: 0.55;
+      /* 非激活卡压暗营造阅读层次，但正文仍需可读。 */
+      opacity: 0.62;
       transform: scaleX(0.98);
     }
 
@@ -540,8 +547,8 @@
       background: var(--card-bg-active);
       border-color: var(--border-color-active);
       box-shadow: 0 0 50px var(--accent-glow), 
-                  0 0 100px rgba(196, 164, 106, 0.06),
-                  inset 0 0 15px rgba(255, 255, 255, 0.02);
+                  0 0 100px color-mix(in srgb, var(--accent-color) 6%, transparent),
+                  inset 0 0 15px color-mix(in srgb, var(--text-color) 3%, transparent);
       opacity: 1;
       transform: scaleX(1.01);
     }
@@ -566,7 +573,7 @@
 
     .article-divider {
       height: 1px;
-      background: linear-gradient(90deg, var(--accent-color), rgba(196, 164, 106, 0.2), transparent);
+      background: linear-gradient(90deg, var(--accent-color), color-mix(in srgb, var(--accent-color) 20%, transparent), transparent);
       width: 100%;
       margin-bottom: 20px;
     }
@@ -584,15 +591,15 @@
       display: flex;
       align-items: center;
       gap: 6px;
-      background: rgba(255, 255, 255, 0.04);
+      background: color-mix(in srgb, var(--text-color) 5%, transparent);
       padding: 6px 12px;
       border-radius: 30px;
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      border: 1px solid color-mix(in srgb, var(--text-color) 6%, transparent);
     }
 
     .meta-badge-upvote {
-      background: rgba(196, 164, 106, 0.08);
-      border-color: rgba(196, 164, 106, 0.2);
+      background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+      border-color: color-mix(in srgb, var(--accent-color) 20%, transparent);
       color: var(--accent-color);
     }
     
@@ -671,10 +678,10 @@
     .article-body code {
       font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
       font-size: 0.9em;
-      background: rgba(255, 255, 255, 0.06);
+      background: color-mix(in srgb, var(--text-color) 8%, transparent);
       padding: 3px 6px;
       border-radius: 6px;
-      border: 1px solid rgba(255, 255, 255, 0.04);
+      border: 1px solid color-mix(in srgb, var(--text-color) 5%, transparent);
       overflow-wrap: anywhere;
       word-break: break-word;
     }
@@ -708,7 +715,7 @@
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
       cursor: zoom-in;
       transition: transform 0.3s ease;
-      background: rgba(255, 255, 255, 0.02);
+      background: color-mix(in srgb, var(--text-color) 3%, transparent);
       min-height: 100px;
     }
 
@@ -716,11 +723,17 @@
       transform: scale(1.015);
     }
 
+    /* 图片可用 Enter/Space 聚焦打开放大——焦点环必须可见。 */
+    .article-body img:focus-visible {
+      outline: 2px solid var(--accent-color);
+      outline-offset: 2px;
+    }
+
     /* 引用块美化 */
     .article-body blockquote {
       border-left: 4px solid var(--accent-color);
       padding: 12px 20px;
-      background: rgba(196, 164, 106, 0.03);
+      background: color-mix(in srgb, var(--accent-color) 3%, transparent);
       border-radius: 0 8px 8px 0;
       color: var(--text-muted);
       margin: 1.5rem 0;
@@ -776,7 +789,7 @@
     }
 
     .article-body th {
-      background: rgba(255, 255, 255, 0.02);
+      background: color-mix(in srgb, var(--text-color) 3%, transparent);
       font-weight: 700;
       color: var(--text-light);
     }
@@ -797,9 +810,9 @@
     }
 
     .article-error-placeholder {
-      color: #f28b7d;
-      background: rgba(239, 68, 68, 0.02);
-      border-color: rgba(239, 68, 68, 0.15);
+      color: var(--danger-color);
+      background: color-mix(in srgb, var(--danger-color) 4%, transparent);
+      border-color: color-mix(in srgb, var(--danger-color) 18%, transparent);
     }
 
     /* 极简底部悬浮元信息 (取代控制台) */
@@ -807,7 +820,7 @@
       position: fixed;
       right: 24px;
       top: 24px;
-      background: rgba(16, 15, 13, 0.82);
+      background: color-mix(in srgb, var(--bg-color) 82%, transparent);
       backdrop-filter: blur(12px);
       border: 1px solid var(--border-color);
       border-radius: 12px;
@@ -831,7 +844,7 @@
       top: 0;
       width: 100%;
       height: 100%;
-      background: rgba(16, 15, 13, 0.84);
+      background: color-mix(in srgb, var(--bg-color) 84%, transparent);
       backdrop-filter: blur(8px);
       z-index: 2000;
       display: flex;
@@ -851,12 +864,12 @@
     .search-palette {
       width: 640px;
       max-width: 90vw;
-      background: rgba(28, 25, 22, 0.96);
+      background: color-mix(in srgb, var(--bg-raised) 96%, transparent);
       backdrop-filter: blur(24px) saturate(120%);
       border: 1px solid var(--accent-color);
       border-radius: 16px;
       box-shadow: 0 30px 70px rgba(0, 0, 0, 0.8),
-                  0 0 40px rgba(196, 164, 106, 0.1);
+                  0 0 40px color-mix(in srgb, var(--accent-color) 10%, transparent);
       overflow: hidden;
       transform: translateY(-20px) scale(0.98);
       transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
@@ -912,7 +925,7 @@
     }
 
     .palette-item:hover, .palette-item.selected {
-      background: rgba(196, 164, 106, 0.14);
+      background: color-mix(in srgb, var(--accent-color) 14%, transparent);
     }
     
     .palette-item.selected {
@@ -939,7 +952,7 @@
     }
     
     .palette-item-meta span {
-      background: rgba(255, 255, 255, 0.04);
+      background: color-mix(in srgb, var(--text-color) 5%, transparent);
       padding: 2px 8px;
       border-radius: 4px;
     }
@@ -964,8 +977,8 @@
     }
 
     .palette-footer kbd {
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: color-mix(in srgb, var(--text-color) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--text-color) 14%, transparent);
       border-radius: 4px;
       padding: 1px 5px;
       font-family: inherit;
@@ -980,7 +993,7 @@
       top: 0;
       width: 100%;
       height: 100%;
-      background: rgba(0, 0, 0, 0.95);
+      background: color-mix(in srgb, var(--bg-color) 95%, transparent);
       z-index: 3000;
       display: flex;
       justify-content: center;
@@ -1036,7 +1049,7 @@
       left: 0;
       width: 100vw;
       height: 100vh;
-      background: rgba(9, 9, 11, 0.85);
+      background: color-mix(in srgb, var(--bg-color) 85%, transparent);
       backdrop-filter: blur(8px);
       z-index: 9999;
       display: flex;
@@ -1046,7 +1059,7 @@
 
     .jump-loading-content {
       text-align: center;
-      background: rgba(28, 25, 22, 0.94);
+      background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
       padding: 32px 48px;
       border-radius: 16px;
       border: 1px solid var(--border-color);
@@ -1068,7 +1081,7 @@
     .spinner {
       width: 40px;
       height: 40px;
-      border: 3px solid rgba(196, 164, 106, 0.1);
+      border: 3px solid color-mix(in srgb, var(--accent-color) 10%, transparent);
       border-top-color: var(--accent-color);
       border-radius: 50%;
       animation: spin 1s linear infinite;

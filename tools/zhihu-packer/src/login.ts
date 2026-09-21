@@ -1,9 +1,18 @@
 import { getBrowserContext, closeBrowserContext, syncCookiesToObscuraStorage, markInteractiveSession } from './browser.js';
 import { logger } from './utils.js';
 
+// P3-2：登录窗口启动失败（浏览器全灭、profile 占用）原本只进 sidecar 日志，
+// 桌面端显示"已打开登录流程"然后什么都没有发生。最近一次失败原因挂在这里，
+// 由 /api/login-status 透传给前端展示。
+let loginLastError: string | null = null;
+export function getLoginLastError(): string | null {
+  return loginLastError;
+}
+
 export async function runLogin(): Promise<void> {
   logger.info('正在开启有头浏览器以进行知乎登录，请在弹出的浏览器中手动完成登录。');
-  
+  loginLastError = null;
+
   try {
     // 浏览器启动/开页也可能抛错：必须进 try，否则 finally 的 closeBrowserContext
     // 走不到，泄漏的有头窗口会一直被复用（P1-7/P1-8）。
@@ -29,16 +38,9 @@ export async function runLogin(): Promise<void> {
       const isUnhuman = currentUrl.includes('unhuman') || currentUrl.includes('captcha');
       
       if (!isUnhuman && ((!currentUrl.includes('signin') && hasLoginCookie) || profileExists)) {
+        // 06-F-05：日志不落知乎用户名（个人身份信息）——原先读取
+        // .AppHeader-profileName 只为拼欢迎语，整块移除。
         logger.info('检测到登录成功！');
-        
-        try {
-          await page.waitForSelector('.AppHeader-profileName', { timeout: 3000 });
-          const name = await page.$eval('.AppHeader-profileName', el => el.textContent);
-          logger.info(`欢迎回来，${name ? name.trim() : '知乎用户'}！`);
-        } catch (e) {
-          // ignore profile name fetch error
-        }
-        
         loggedIn = true;
         break;
       }
@@ -53,6 +55,7 @@ export async function runLogin(): Promise<void> {
       await syncCookiesToObscuraStorage(context);
     }
   } catch (e: any) {
+    loginLastError = e?.message || String(e);
     logger.error(`登录过程中发生错误: ${e.message}`);
   } finally {
     markInteractiveSession(false);

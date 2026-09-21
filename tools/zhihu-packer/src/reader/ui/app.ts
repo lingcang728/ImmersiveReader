@@ -1,7 +1,7 @@
 import { VirtualFile, readText } from '../core/scanner.js';
-import { ArticleMetadata } from '../core/metadata.js';
+import { ArticleMetadata, dedupeArticleIds } from '../core/metadata.js';
 import { renderMarkdown } from '../core/markdown-renderer.js';
-import { manageImageCache, clearAllImageCache } from '../core/image-resolver.js';
+import { clearAllImageCache, resolveRelativePath } from '../core/image-resolver.js';
 import { saveReadingProgress, getReadingProgress } from '../core/storage.js';
 import { buildSearchIndex, searchArticles, SearchIndexItem } from '../core/search.js';
 import {
@@ -87,6 +87,9 @@ export class ReaderApp {
     mode: ReaderMode = { kind: 'file' }
   ) {
     this.filesMap = filesMap;
+    // articleId 是 32 位散列，极小概率撞车——撞车时确定性改名，否则
+    // 进度恢复会跳错文章、目录定位会串。
+    dedupeArticleIds(articles);
     this.articles = articles;
     this.sourceId = sourceId;
     this.sourceName = sourceName;
@@ -149,15 +152,37 @@ export class ReaderApp {
   }
 
   private initUI() {
-    // 1. 清空旧的主体 DOM 与图片缓存
-    this.container.innerHTML = '';
+    // 1. Packed 构建会把前若干篇文章的 HTML 直接打进页面 (data-rendered="true")
+    //    用于秒开首屏——若占位卡片与当前文章列表前缀一致则保留，否则整体重建。
+    const prerendered = Array.from(
+      this.container.querySelectorAll<HTMLElement>(':scope > .article-card[data-rendered="true"]')
+    );
+    const keepPrerendered =
+      prerendered.length > 0 &&
+      prerendered.length <= this.articles.length &&
+      prerendered.every(
+        (el, i) => el.id === `article-${i}` && el.getAttribute('data-index') === String(i)
+      );
+    if (!keepPrerendered) {
+      this.container.innerHTML = '';
+    }
     clearAllImageCache();
 
     // 2. 渲染目录栏
     this.renderSidebarMenu();
 
     // 3. 一次性生成所有文章的外壳占位符 (防止一次性解析百篇 Markdown 导致卡死)
+    //    已预渲染的卡片跳过占位符，但补上运行时交互绑定（灯箱、双语对照）。
+    const prerenderedIndices = new Set<number>();
+    if (keepPrerendered) {
+      for (const el of prerendered) {
+        prerenderedIndices.add(Number(el.getAttribute('data-index')));
+        this.bindImageLightboxes(el);
+        this.bindPodcastBilingualInteractions(el);
+      }
+    }
     this.articles.forEach((art, idx) => {
+      if (prerenderedIndices.has(idx)) return;
       const card = document.createElement('article');
       card.className = 'article-card';
       card.id = `article-${idx}`;
@@ -417,14 +442,6 @@ export class ReaderApp {
     });
   }
 
-  private getNeighborIds(): string[] {
-    const neighbors: string[] = [];
-    const activeIndex = this.getSafeActiveIndex();
-    if (activeIndex > 0) neighbors.push(this.articles[activeIndex - 1].articleId);
-    if (activeIndex < this.articles.length - 1) neighbors.push(this.articles[activeIndex + 1].articleId);
-    return neighbors;
-  }
-
   private getSafeActiveIndex(): number {
     if (this.activeIndex >= 0 && this.activeIndex < this.articles.length) {
       return this.activeIndex;
@@ -482,11 +499,9 @@ export class ReaderApp {
       }
     }
 
-    // 异步完成后管理图片缓存生命周期 (已渲染的文章正文保留在 DOM 中，不执行卸载)
-    Promise.all(renderPromises).then(() => {
-      const activeId = this.articles[active].articleId;
-      manageImageCache(activeId, this.getNeighborIds());
-    });
+    // 正文 DOM 不卸载，图片 Blob URL 生命周期与整个阅读会话一致；
+    // 不做按文章回收（旧实现会让已渲染文章的 <img> 指向已 revoke 的 URL，回滚即裂图）。
+    void Promise.all(renderPromises);
   }
 
   /**
@@ -556,10 +571,23 @@ export class ReaderApp {
       const imageEl = img as HTMLImageElement;
       if (imageEl.dataset.bound) return;
       imageEl.dataset.bound = "true";
-      imageEl.addEventListener('click', (e) => {
-        e.stopPropagation();
+      // 键盘等价：Enter/Space 打开灯箱，与点击一致。
+      imageEl.tabIndex = 0;
+      imageEl.setAttribute('role', 'button');
+      imageEl.setAttribute('aria-label', imageEl.alt ? `放大图片：${imageEl.alt}` : '放大图片');
+      const openLightbox = () => {
         this.lightboxImg.src = imageEl.src;
         this.lightbox.classList.add('active');
+      };
+      imageEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openLightbox();
+      });
+      imageEl.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        e.stopPropagation();
+        openLightbox();
       });
     });
   }
@@ -886,8 +914,17 @@ export class ReaderApp {
       | { type: 'reading-activity' }
       | { type: 'font-scale-change'; scale: number }
       | { type: 'key-down'; key: 'Escape' | 'F10' }
+      | { type: 'reader-ready' }
   ) {
     if (window.parent === window) return;
+    // 宿主 origin 从 referrer 精确取（iframe 场景 referrer 即嵌入页 URL），
+    // 比通配 '*' 收敛；独立打开时 parent===window 早已返回。
+    let targetOrigin = '*';
+    try {
+      if (document.referrer) targetOrigin = new URL(document.referrer).origin;
+    } catch {
+      // 非法 referrer 不值得阻断消息——退回通配。
+    }
     try {
       window.parent.postMessage(
         {
@@ -895,7 +932,7 @@ export class ReaderApp {
           version: 1,
           ...payload,
         },
-        '*'
+        targetOrigin
       );
     } catch {
       // Cross-origin edge cases — ignore.
@@ -926,7 +963,7 @@ export class ReaderApp {
     window.scrollTo({ top: Math.max(0, targetTop), behavior: 'auto' });
   }
 
-  private showFontScaleToast(scale: number) {
+  private showToast(message: string) {
     if (!this.fontScaleToast) {
       const el = document.createElement('div');
       el.className = 'font-scale-toast';
@@ -951,13 +988,17 @@ export class ReaderApp {
       document.body.appendChild(el);
       this.fontScaleToast = el;
     }
-    this.fontScaleToast.textContent = `字号 ${Math.round(scale * 100)}%`;
+    this.fontScaleToast.textContent = message;
     this.fontScaleToast.style.opacity = '1';
     if (this.fontScaleToastTimer !== null) window.clearTimeout(this.fontScaleToastTimer);
     this.fontScaleToastTimer = window.setTimeout(() => {
       if (this.fontScaleToast) this.fontScaleToast.style.opacity = '0';
       this.fontScaleToastTimer = null;
     }, 1200);
+  }
+
+  private showFontScaleToast(scale: number) {
+    this.showToast(`字号 ${Math.round(scale * 100)}%`);
   }
 
   private applyFontScale(scale: number, options?: { notifyParent?: boolean; showToast?: boolean }) {
@@ -1009,10 +1050,31 @@ export class ReaderApp {
     requestAnimationFrame(() => this.restoreViewportAnchor(anchor));
   }
 
+  /** 宿主主题同步：整包 CSS 变量落到 :root 内联样式，覆盖模板默认值。 */
+  private applyParentTheme(scheme: 'light' | 'dark', vars: Record<string, unknown>) {
+    const root = document.documentElement;
+    root.style.colorScheme = scheme;
+    root.dataset.themeScheme = scheme;
+    for (const [key, value] of Object.entries(vars)) {
+      if (typeof value !== 'string') continue;
+      if (!/^--[a-zA-Z0-9-]+$/.test(key)) continue;
+      root.style.setProperty(key, value);
+    }
+  }
+
   private bindParentFontScaleBridge() {
     window.addEventListener('message', (event: MessageEvent) => {
       // Only accept messages from the embedding parent window.
       if (event.source !== window.parent) return;
+      // 宿主只会是 Tauri WebView(tauri.localhost) 或 dev server(localhost/127.0.0.1)；
+      // 其他页面把本阅读器嵌进 iframe 也发不进指令。
+      if (
+        !/^(https?:\/\/tauri\.localhost|tauri:\/\/localhost|https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?)$/.test(
+          event.origin
+        )
+      ) {
+        return;
+      }
       const data = event.data;
       if (!data || typeof data !== 'object') return;
       if (data.source !== 'immersive-reader-flow' || data.version !== 1) return;
@@ -1026,7 +1088,17 @@ export class ReaderApp {
       ) {
         this.applyLayoutMode(data.wide, data.contentMaxWidth);
       }
+      if (
+        data.type === 'set-theme' &&
+        (data.scheme === 'light' || data.scheme === 'dark') &&
+        data.vars &&
+        typeof data.vars === 'object'
+      ) {
+        this.applyParentTheme(data.scheme, data.vars as Record<string, unknown>);
+      }
     });
+    // 告诉宿主监听已就位：宿主收到后重发字号/布局，避免 iframe 脚本就绪前的消息丢失
+    this.postToParent({ type: 'reader-ready' });
   }
 
   private handleScrollThrottled() {
@@ -1126,6 +1198,9 @@ export class ReaderApp {
         let targetIndex = this.articles.findIndex(art => art.articleId === progress.current);
         if (targetIndex < 0) targetIndex = this.articles.findIndex(art => !this.servedReadIds.has(art.articleId));
         if (targetIndex < 0) targetIndex = 0;
+        // 恢复跳转不是"翻过上一篇"——先对齐 activeIndex，否则 updateActiveArticle
+        // 会把第 0 篇错误标记为已读
+        this.activeIndex = targetIndex;
         this.updateActiveArticle(targetIndex, false, true);
         await this.ensureRenderedForJump(targetIndex, false);
         const card = document.getElementById(`article-${targetIndex}`);
@@ -1134,7 +1209,10 @@ export class ReaderApp {
           window.scrollTo({ top: (card as HTMLElement).offsetTop + available * progress.position });
         }
       } catch (error) {
+        // 进度不可读时静默回第 0 篇会让用户误以为记录丢了——提示一下；
+        // 服务端对语义非法的进度文件已做了 .corrupt 备份，不丢数据。
         console.error('读取共享进度失败:', error);
+        this.showToast('阅读进度读取失败，已从头开始（原进度已备份）');
         this.updateActiveArticle(0, false, true);
       }
       return;
@@ -1328,9 +1406,15 @@ export class ReaderApp {
     }, { passive: true });
     document.addEventListener('selectionchange', () => this.handlePodcastSelectionChange());
 
-    // 搜索输入
+    // 搜索输入——每击键全量检索开销不小，100ms 防抖合并输入
+    let searchDebounce: number | null = null;
     this.paletteInput.addEventListener('input', (e) => {
-      this.renderSearchResults((e.target as HTMLInputElement).value);
+      const value = (e.target as HTMLInputElement).value;
+      if (searchDebounce !== null) window.clearTimeout(searchDebounce);
+      searchDebounce = window.setTimeout(() => {
+        searchDebounce = null;
+        this.renderSearchResults(value);
+      }, 100);
     });
 
     // 侧栏实时搜索过滤
@@ -1353,35 +1437,47 @@ export class ReaderApp {
       if (!rawHref) return;
       
       // 统一解析出的目标路径，处理斜杠及相对路径回退
-      const decodedHref = decodeURIComponent(rawHref).replace(/\\/g, '/');
+      let decodedHref: string;
+      try {
+        decodedHref = decodeURIComponent(rawHref).replace(/\\/g, '/');
+      } catch {
+        decodedHref = rawHref.replace(/\\/g, '/');
+      }
       const activeIndex = this.getSafeActiveIndex();
       const currentPath = this.articles[activeIndex].relativePath || this.articles[activeIndex].frontMatter.path || '';
-      
+
+      // resolvedPath 为 null = .. 越出根目录：目标不在本书范围内，不做文件名回退以防误跳同名文章
       const resolvedPath = (decodedHref.startsWith('.') || !decodedHref.includes('/')) ?
         resolveRelativePath(currentPath, decodedHref) : decodedHref;
-        
+
       const targetFilename = decodedHref.split('/').pop() || '';
-      
+
       // 在当前内存中的 articles 数组中按照优先级查找匹配项
       // 优先级: 1. relativePath, 2. frontMatter.path, 3. filename
-      let targetIdx = this.articles.findIndex(art => 
+      let targetIdx = resolvedPath === null ? -1 : this.articles.findIndex(art =>
         (art.relativePath && art.relativePath.replace(/\\/g, '/') === resolvedPath) ||
         (art.frontMatter?.path && art.frontMatter.path.replace(/\\/g, '/') === resolvedPath)
       );
-      
-      if (targetIdx === -1) {
-        // 尝试只匹配文件名
-        targetIdx = this.articles.findIndex(art => 
-          (art.filename && art.filename === targetFilename) ||
-          (art.relativePath && art.relativePath.split('/').pop() === targetFilename)
-        );
+
+      if (targetIdx === -1 && resolvedPath !== null) {
+        // 文件名回退只接受唯一命中——多个目录下的同名文件猜哪篇都可能跳错
+        const matches: number[] = [];
+        this.articles.forEach((art, i) => {
+          if (
+            (art.filename && art.filename === targetFilename) ||
+            (art.relativePath && art.relativePath.split('/').pop() === targetFilename)
+          ) {
+            matches.push(i);
+          }
+        });
+        if (matches.length === 1) targetIdx = matches[0];
       }
-      
+
       if (targetIdx !== -1) {
         this.scrollToArticle(targetIdx);
       } else {
         // 如果未在 articles 中找到，且有 filesMap (即在 Universal 模式下)，尝试使用 filesMap 匹配
-        let matchedFile = this.filesMap.get(resolvedPath);
+        let matchedFile = resolvedPath === null ? undefined : this.filesMap.get(resolvedPath);
         if (!matchedFile) {
           matchedFile = this.filesMap.get(decodedHref);
         }
@@ -1461,6 +1557,32 @@ export class ReaderApp {
         }
       }
 
+      // 3.5 Ctrl/Cmd 和弦与桌面壳快捷键习惯一致：查找、目录、字号。
+      // （下方的单键快捷键会被 shouldIgnoreGlobalShortcut 的组合键过滤拦掉，
+      //   所以修饰键组合必须在这里单独处理。）
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        switch (e.key.toLowerCase()) {
+          case 'f':
+            e.preventDefault();
+            this.openSearch();
+            return;
+          case 't':
+            e.preventDefault();
+            this.toggleSidebar();
+            return;
+          case '=':
+          case '+':
+            e.preventDefault();
+            this.adjustFontSize(1);
+            return;
+          case '-':
+            e.preventDefault();
+            this.adjustFontSize(-1);
+            return;
+        }
+        return;
+      }
+
       // 4. 判定是否应当过滤该次全局快捷键交互 (输入框过滤、元素内左右键过滤、组合键/默认拦截过滤)
       if (this.shouldIgnoreGlobalShortcut(e)) {
         return;
@@ -1527,23 +1649,4 @@ export class ReaderApp {
       }
     });
   }
-}
-
-// 辅助本地相对路径解析，直接从 image-resolver.ts 提取以解决循环依赖
-function resolveRelativePath(basePath: string, relativePath: string): string {
-  const cleanRel = relativePath.replace(/\\/g, '/');
-  const baseParts = basePath.split('/');
-  baseParts.pop();
-
-  const relParts = cleanRel.split('/');
-  for (const part of relParts) {
-    if (part === '.' || part === '') {
-      continue;
-    } else if (part === '..') {
-      baseParts.pop();
-    } else {
-      baseParts.push(part);
-    }
-  }
-  return baseParts.join('/');
 }

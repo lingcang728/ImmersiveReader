@@ -10,8 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from deepseek_pricing import (  # noqa: E402
+    PROPAGATE_FATAL_ERRORS,
     PodcastBudgetExceededError,
     PodcastLocalError,
+    PodcastSecretMissingError,
     PodcastUpstreamError,
     classify_upstream_error,
     deepseek_thinking_config,
@@ -20,7 +22,10 @@ from deepseek_pricing import (  # noqa: E402
     reserve_budget,
     settle_budget,
 )
-from podcast_transcriber.deepseek import effective_provider_name  # noqa: E402
+from podcast_transcriber.deepseek import (  # noqa: E402
+    deepseek_chat_completion,
+    effective_provider_name,
+)
 
 
 def test_deepseek_v4_thinking_mode_follows_config() -> None:
@@ -100,6 +105,90 @@ def test_budget_error_carries_approve_budget_action() -> None:
     error = PodcastBudgetExceededError("over")
     assert error.code == "BUDGET_CONFIRMATION_REQUIRED"
     assert error.required_action == "approve_budget"
+
+
+def test_secret_missing_error_carries_configure_secret_action() -> None:
+    """SECRET_MISSING must reach the host fatal line so the UI offers the
+    key-input flow instead of a retry that always fails."""
+    error = PodcastSecretMissingError("no key")
+    assert error.code == "SECRET_MISSING"
+    assert error.required_action == "configure_secret"
+    assert isinstance(error, PROPAGATE_FATAL_ERRORS)
+
+
+def test_deepseek_call_and_provider_fail_fast_on_missing_key(monkeypatch) -> None:
+    """Missing key fails before any HTTP attempt with the typed secret error —
+    both at the provider gate and at the chat-completion entry."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    bare = {"backend": "deepseek", "base_url": "https://api.deepseek.com", "api_key": "", "api_key_env": ""}
+    try:
+        deepseek_chat_completion("hello", bare)
+    except PodcastSecretMissingError as error:
+        assert error.code == "SECRET_MISSING"
+    else:
+        raise AssertionError("missing key must raise PodcastSecretMissingError, not RuntimeError")
+
+    no_entry = {"backend": "deepseek", "base_url": "", "api_key": "", "api_key_env": ""}
+    try:
+        effective_provider_name(no_entry)
+    except PodcastSecretMissingError as error:
+        assert error.required_action == "configure_secret"
+    else:
+        raise AssertionError("missing API entry must raise PodcastSecretMissingError")
+
+
+def test_unauthorized_upstream_suggests_configure_secret() -> None:
+    unauthorized = classify_upstream_error(http_error(401))
+    assert unauthorized is not None
+    assert unauthorized.code == "UPSTREAM_UNAUTHORIZED"
+    assert unauthorized.required_action == "configure_secret"
+
+
+def test_preflight_fails_fast_when_deepseek_polish_key_missing(monkeypatch) -> None:
+    """polish=deepseek + no key is guaranteed to fail — preflight must raise
+    SECRET_MISSING before the ASR stage burns GPU time."""
+    import logging
+
+    import transcribe_podcasts as tp
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("PODCAST_TRANSCRIBER_FORCE_POLISH", raising=False)
+    monkeypatch.delenv("PODCAST_TRANSCRIBER_FORCE_TRANSLATE", raising=False)
+    config = {
+        "translation": {"enabled": False, "backend": "none"},
+        "markdown": {
+            "llm_polish": {
+                "enabled": True,
+                "backend": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "api_key": "",
+                "api_key_env": "",
+            }
+        },
+    }
+    try:
+        tp.preflight_checks(config, logging.getLogger("test"))
+    except PodcastSecretMissingError as error:
+        assert error.code == "SECRET_MISSING"
+    else:
+        raise AssertionError("missing polish key must fail preflight")
+
+
+def test_preflight_passes_without_deepseek_backends(monkeypatch) -> None:
+    """Ollama/disabled polish must not trip the DeepSeek credential gate."""
+    import logging
+
+    import transcribe_podcasts as tp
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("PODCAST_TRANSCRIBER_FORCE_POLISH", raising=False)
+    config = {
+        # auto_start_ollama=False keeps the Ollama probe from spawning a real
+        # `ollama serve` process inside the test runner.
+        "translation": {"enabled": False, "backend": "none", "auto_start_ollama": False},
+        "markdown": {"llm_polish": {"enabled": True, "backend": "ollama"}},
+    }
+    assert tp.preflight_checks(config, logging.getLogger("test")) is True
 
 
 def test_parse_retry_after_accepts_seconds_and_invalid_values() -> None:

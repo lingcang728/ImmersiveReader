@@ -14,6 +14,7 @@ from typing import Any
 from deepseek_pricing import (
     DEEPSEEK_DEFAULT_MODEL,
     DEEPSEEK_MODEL_PRICING_PER_MILLION,
+    PodcastSecretMissingError,
     PromptBudgetError,
     classify_upstream_error,
     deepseek_chat_completions_url,
@@ -140,13 +141,23 @@ def has_api_entry(config: dict[str, Any], default_env: str = "DEEPSEEK_API_KEY")
     if not str(config.get("base_url") or "").strip():
         return False
     env_name = str(config.get("api_key_env") or default_env).strip()
-    return bool(env_name or str(config.get("api_key") or "").strip())
+    # 06-F-03: a config-file ``api_key`` no longer counts as an API entry —
+    # keys come from the env var only (the host injects it from Credential
+    # Manager). env_name falls back to the default name, so a configured
+    # base_url alone already yields True here.
+    return bool(env_name)
 
 
 def effective_provider_name(config: dict[str, Any]) -> str:
     provider = provider_name(config)
     if provider == "deepseek" and not has_api_entry(config):
-        raise RuntimeError("DeepSeek API backend is selected, but no base_url/API key entry is configured.")
+        # SECRET_MISSING + configure_secret reaches the host fatal line — a
+        # bare RuntimeError here used to either degrade into TRANSCRIPTION_FAILED
+        # or be swallowed by polish's fallback_on_error, silently shipping an
+        # unpolished "success" (05-F6).
+        raise PodcastSecretMissingError(
+            "DeepSeek API backend is selected, but no base_url/API key entry is configured."
+        )
     return provider
 
 
@@ -181,11 +192,34 @@ def model_label(config: dict[str, Any], fallback: str = "qwen3.5:9b") -> str:
     return f"{provider}/{model}"
 
 
+# 17-F7: the host injects DEEPSEEK_API_KEY into the worker env, and Python
+# children inherit their parent's env by default — ffmpeg/taskkill/ollama
+# grandchildren would all carry the secret. Cache the first resolution and
+# pop the variable so only the API client path ever sees it.
+_RESOLVED_API_KEYS: dict[str, str] = {}
+
+
 def resolve_api_key(config: dict[str, Any], default_env: str) -> str:
     env_name = str(config.get("api_key_env") or default_env).strip()
-    if env_name and os.environ.get(env_name):
-        return str(os.environ[env_name]).strip()
-    return str(config.get("api_key") or "").strip()
+    if env_name:
+        if env_name in _RESOLVED_API_KEYS:
+            return _RESOLVED_API_KEYS[env_name]
+        value = os.environ.get(env_name)
+        if value:
+            key = str(value).strip()
+            os.environ.pop(env_name, None)
+            _RESOLVED_API_KEYS[env_name] = key
+            return key
+    # 06-F-03: config.json ``api_key`` is no longer honored — a plaintext key
+    # there bypasses Credential Manager, gets copied into every seeded worker
+    # config, and lands in backup bundles. Env-var entry only; warn once so a
+    # stale legacy config is not silently dead.
+    if str(config.get("api_key") or "").strip():
+        logging.getLogger(__name__).warning(
+            "Ignoring config.json api_key for env %s — store the key via the app's credential store (DEEPSEEK_API_KEY).",
+            env_name or default_env,
+        )
+    return ""
 
 
 def estimate_deepseek_cost(usage: dict[str, Any], config: dict[str, Any]) -> float:
@@ -267,7 +301,12 @@ def deepseek_chat_completion(
 ) -> tuple[str, dict[str, Any], float]:
     api_key = resolve_api_key(config, "DEEPSEEK_API_KEY")
     if not api_key:
-        raise RuntimeError("DeepSeek API key is missing. Set DEEPSEEK_API_KEY or save it in config.")
+        # SECRET_MISSING + configure_secret reaches the host fatal line so the
+        # UI can send the user to the key input — a bare RuntimeError used to
+        # degrade into TRANSCRIPTION_FAILED with a retry that always fails.
+        raise PodcastSecretMissingError(
+            "DeepSeek API key is missing. Configure it in the app's settings (Windows Credential Manager)."
+        )
     assert_deepseek_prompt_budget(prompt, config)
 
     sem = deepseek_api_semaphore(_root_config or config)

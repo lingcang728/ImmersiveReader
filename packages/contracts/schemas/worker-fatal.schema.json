@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://immersive-reader.local/schemas/worker-fatal-v1.json",
+  "title": "Podcast worker fatal NDJSON record",
+  "description": "The last stderr/stdout line a managed podcast worker prints on a fatal exit (tools/podcast-transcriber/scripts/transcribe_task.py). The host parses type/errorCode/message/retryAfterSeconds/requiredAction field-by-field in control.rs (worker_error_code / worker_retry_after_seconds / worker_required_action / worker_error_message); type/errorCode/message are mandatory, the rest optional. Unknown keys are tolerated by the host, so this schema does not forbid them.",
+  "type": "object",
+  "required": ["type", "errorCode", "message"],
+  "properties": {
+    "type": { "const": "fatal" },
+    "errorCode": {
+      "description": "TaskErrorCode wire name (SCREAMING_SNAKE_CASE). Codes outside this enum cannot be represented in TaskSnapshot.errorCode and degrade to UNKNOWN on the host.",
+      "enum": [
+        "LOGIN_REQUIRED", "CAPTCHA_REQUIRED", "SECRET_MISSING", "INSUFFICIENT_DISK",
+        "BUDGET_CONFIRMATION_REQUIRED", "INPUT_CHANGED", "INPUT_COPY_FAILED",
+        "PIPELINE_INCOMPATIBLE", "MODEL_INCOMPATIBLE", "CONFIG_INCOMPATIBLE",
+        "ENGINE_UNAVAILABLE", "ENGINE_PROTOCOL_MISMATCH", "ENGINE_CRASHED",
+        "UPSTREAM_UNAUTHORIZED", "RATE_LIMITED", "UPSTREAM_TIMEOUT",
+        "UPSTREAM_UNAVAILABLE", "PUBLISH_FAILED", "PUBLISH_RECOVERY_REQUIRED",
+        "MIGRATION_REQUIRED", "CANCELLED_BY_USER", "TRANSCRIPTION_FAILED",
+        "MODEL_LOAD_FAILED", "ENGINE_BUSY", "INVALID_TASK_SPEC",
+        "PATH_OUTSIDE_MANAGED_ROOT", "PROMPT_BUDGET_EXCEEDED", "LOCAL_IO",
+        "LOCAL_NETWORK", "LOCAL_TIMEOUT", "UNKNOWN"
+      ]
+    },
+    "message": { "type": "string", "minLength": 1 },
+    "retryAfterSeconds": { "type": "integer", "minimum": 0 },
+    "requiredAction": {
+      "description": "RequiredAction wire name; the host maps it verbatim via control.rs::worker_required_action.",
+      "enum": ["none", "login", "captcha", "configure_secret", "free_disk_space", "approve_budget"]
+    },
+    "stage": { "type": "string", "minLength": 1 }
+  }
+}

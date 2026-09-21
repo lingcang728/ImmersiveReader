@@ -102,6 +102,48 @@ class Logger {
 
 export const logger = new Logger();
 
+/**
+ * 06-F-05：日志脱敏。URL 只保留 host + 最后一段路径（足够定位失败资源，
+ * 不外泄完整 URL 及其签名参数）；本地绝对路径只保留最后两级（目录名+
+ * 文件名），不外泄用户目录结构。
+ */
+export function redactUrlForLog(raw: string): string {
+  try {
+    const url = new URL(raw);
+    const segments = url.pathname.split('/').filter(Boolean);
+    const tail = segments.length > 0 ? segments[segments.length - 1] : '';
+    return tail ? `${url.host}/…/${tail}` : url.host;
+  } catch {
+    return '[url]';
+  }
+}
+
+export function redactPathForLog(raw: string): string {
+  const segments = String(raw).split(/[\\/]+/).filter(Boolean);
+  return segments.slice(-2).join('/') || '[path]';
+}
+
+// P3-7：调试快照（debug-*.html/png）保存的是已登录会话下的完整页面内容。
+// 写新快照时顺手清掉超过 7 天的旧快照，避免敏感页面内容长期驻留磁盘。
+const DEBUG_SNAPSHOT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function pruneDebugSnapshots(dir: string): void {
+  try {
+    const cutoff = Date.now() - DEBUG_SNAPSHOT_MAX_AGE_MS;
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith('debug-')) continue;
+      const filePath = path.join(dir, name);
+      try {
+        if (fs.statSync(filePath).mtimeMs < cutoff) fs.unlinkSync(filePath);
+      } catch {
+        // 单文件清理失败不影响主流程。
+      }
+    }
+  } catch {
+    // 目录不可读时静默跳过。
+  }
+}
+
 import { Page } from 'playwright-core';
 
 export async function evaluateClean<T>(page: Page, fn: (...args: any[]) => any, ...args: any[]): Promise<T> {

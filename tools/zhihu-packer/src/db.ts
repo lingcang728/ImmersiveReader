@@ -54,6 +54,7 @@ function backupDatabaseIfNeeded(database: DatabaseSync, dbPath: string, reason: 
     }
   }
   logger.info(`已在迁移前备份 SQLite 数据库 (${reason}): ${backupPath}`);
+  pruneStampedSiblings(dbPath, '.backup-', MIGRATION_BACKUPS_KEPT);
 }
 
 function tableExists(database: DatabaseSync, table: string): boolean {
@@ -142,6 +143,8 @@ function createSchema(database: DatabaseSync) {
       revision INTEGER NOT NULL,
       task_id TEXT NOT NULL,
       output_path TEXT NOT NULL,
+      -- 仅 migrate-legacy-archive.ts 在迁移旧归档时填充；正常发布路径不写
+      -- （哈希校验走 publish journal 的 metadata 比对，不靠这两列）。
       manifest_sha256 TEXT,
       provenance_sha256 TEXT,
       created_at INTEGER NOT NULL,
@@ -445,6 +448,40 @@ function quarantineCorruptDatabase(absolutePath: string, handle?: DatabaseSync |
     }
   }
   logger.error(`检测到 SQLite 数据库损坏，已隔离为 ${quarantined} 并重建空库（历史任务记录不再可见）。`);
+  pruneStampedSiblings(absolutePath, '.corrupt-', CORRUPT_QUARANTINES_KEPT);
+  pruneStampedSiblings(absolutePath, '.backup-', MIGRATION_BACKUPS_KEPT);
+}
+
+/** F8: `<db>.corrupt-<ts>` 证据与 `<db>.backup-<ts>` 迁移快照都要有保留上限，
+ * 否则每次自愈/迁移都往数据目录里再堆一份整库。同戳文件（主文件 + -wal/-shm/
+ * -journal 侧文件）视作一组整体裁剪。时间戳按 ISO 格式生成，字典序即时间序。 */
+const CORRUPT_QUARANTINES_KEPT = 5;
+const MIGRATION_BACKUPS_KEPT = 5;
+
+function pruneStampedSiblings(dbPath: string, marker: '.corrupt-' | '.backup-', keep: number): void {
+  const dir = path.dirname(dbPath);
+  const base = path.basename(dbPath);
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  const groups = new Set<string>();
+  for (const name of names) {
+    if (!name.startsWith(`${base}${marker}`)) continue;
+    groups.add(name.replace(/-(wal|shm|journal)$/, ''));
+  }
+  const stale = [...groups].sort().slice(0, Math.max(0, groups.size - keep));
+  for (const group of stale) {
+    for (const suffix of ['', '-wal', '-shm', '-journal']) {
+      try {
+        fs.rmSync(path.join(dir, `${group}${suffix}`), { force: true });
+      } catch (err) {
+        logger.warn(`清理旧${marker}文件失败 ${group}${suffix}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
 }
 
 function openAndMigrate(absolutePath: string): void {
@@ -457,6 +494,16 @@ function openAndMigrate(absolutePath: string): void {
     handle.exec('PRAGMA busy_timeout = 5000');
     handle.exec('PRAGMA journal_mode = WAL');
     handle.exec('PRAGMA foreign_keys = ON');
+    // F8: a database stamped by a NEWER build must not be migrated blindly —
+    // this binary does not know that schema's invariants and writing into it
+    // could corrupt rows. Refuse loudly instead of "helpfully" downgrading.
+    const stampedRow = handle.prepare('PRAGMA user_version').all()[0] as any;
+    const stamped = Number(stampedRow?.user_version || 0);
+    if (stamped > SCHEMA_VERSION) {
+      throw new Error(
+        `DB_SCHEMA_TOO_NEW: database is schema v${stamped}, this build understands v${SCHEMA_VERSION} — update zhihu-packer instead of downgrading`,
+      );
+    }
     migrateToV1(handle, absolutePath);
     migrateToV3(handle, absolutePath);
     migrateToV4(handle, absolutePath);
@@ -781,7 +828,9 @@ export function saveItem(item: Item) {
       url = COALESCE(NULLIF(excluded.url, ''), items.url),
       question_url = COALESCE(excluded.question_url, items.question_url),
       created_time = CASE WHEN excluded.created_time > 0 THEN excluded.created_time ELSE items.created_time END,
-      updated_time = CASE WHEN excluded.updated_time > 0 THEN excluded.updated_time ELSE items.updated_time END,
+      -- updated_time 是「内容最后修改时间」：一次索引读到旧快照不能把已记录的
+      -- 更新值回退（P3-4）——取两者较大者，0（未知）永远输给任何真实时间戳。
+      updated_time = MAX(items.updated_time, excluded.updated_time),
       voteup_count = excluded.voteup_count,
       comment_count = excluded.comment_count
   `);
@@ -1088,6 +1137,33 @@ export function clearCompletedTasks(): number {
   });
   logger.info(`已清理数据库中所有已结束（含成功/失败/暂停/取消/部分成功）的任务记录，共计 ${completed.length} 个`);
   return completed.length;
+}
+
+/**
+ * 06-F-07：终态任务行（含 peopleId、条目计数）曾永久驻留 zhihu-packer.db——
+ * 宿主 control.db 对终态任务有 7 天清理，边车这里对齐同一口径，启动时自清
+ * 过期行。'paused' 可恢复、不算终态，保留。task_items 经 ON DELETE CASCADE
+ * 级联删除。
+ */
+const TERMINAL_TASK_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function pruneTerminalTasks(olderThanMs = TERMINAL_TASK_RETENTION_MS): number {
+  const cutoff = Date.now() - olderThanMs;
+  const database = getDb();
+  const stale = database.prepare(
+    "SELECT id FROM tasks WHERE status IN ('success', 'failed', 'cancelled', 'partial_success') AND updated_at < ?"
+  ).all(cutoff) as unknown as { id: string }[];
+  if (stale.length === 0) {
+    return 0;
+  }
+  runInTransaction(() => {
+    const deleteTaskStmt = database.prepare('DELETE FROM tasks WHERE id = ?');
+    for (const t of stale) {
+      deleteTaskStmt.run(t.id);
+    }
+  });
+  logger.info(`已清理 ${stale.length} 条超过保留期的终态任务记录。`);
+  return stale.length;
 }
 
 export function resetTaskForce(taskId: string) {

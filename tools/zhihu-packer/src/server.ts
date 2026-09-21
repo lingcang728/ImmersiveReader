@@ -1,9 +1,9 @@
 import express from 'express';
-import { ensureDbHealthy, getTasks, resetRunningTasks, getTask } from './db.js';
+import { ensureDbHealthy, getTasks, resetRunningTasks, getTask, pruneTerminalTasks } from './db.js';
 import { cancelTask, createTask, pauseTask, queueTask } from './scheduler.js';
 import { logger } from './utils.js';
-import { getLoginStatus } from './browser.js';
-import { runLogin } from './login.js';
+import { getLoginStatus, clearLoginData } from './browser.js';
+import { runLogin, getLoginLastError } from './login.js';
 import { randomBytes } from 'crypto';
 import { resolveSidecarPort, writeReady } from './sidecar-protocol.js';
 import { hasBearerToken } from './auth.js';
@@ -48,7 +48,9 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
+// 请求体上限显式声明：任务创建/控制载荷都只有几 KB，默认 100kb 虽够用，
+// 但写死边界避免未来 Express 默认变化悄悄放宽。
+app.use(express.json({ limit: '256kb' }));
 
 function parseHost(hostHeader: string | undefined): string {
   return (hostHeader || '').split(':')[0].replace(/^\[|\]$/g, '').toLowerCase();
@@ -109,7 +111,9 @@ app.get('/api/status', requireLocalToken, (_req, res) => {
 app.get('/api/login-status', requireLocalToken, async (_req, res) => {
   try {
     const status = await getLoginStatus();
-    res.json({ success: true, data: status });
+    // P3-2: surface the last login-flow failure so the desktop UI can show
+    // "登录窗口未能打开：…" instead of silently looking logged-out.
+    res.json({ success: true, data: { ...status, lastError: getLoginLastError() } });
   } catch (e: any) {
     res.status(503).json({ success: false, error: e.message });
   }
@@ -135,6 +139,18 @@ app.post('/api/login/start', requireLocalToken, (_req, res) => {
       }
     });
   res.json({ success: true, started: true });
+});
+
+// 06-F-01：退出登录——清掉 DPAPI Cookie 文件、Chromium profile 与浏览器缓存，
+// 并尽力让知乎服务端会话失效。走与 /api 其余路由相同的本机+bearer 鉴权。
+app.post('/api/login/clear', requireLocalToken, async (_req, res) => {
+  try {
+    await clearLoginData();
+    res.json({ success: true, loggedIn: false });
+  } catch (e: any) {
+    logger.error(`[LOGIN] 清除登录数据失败: ${e?.message || e}`);
+    res.status(500).json({ success: false, error: e?.message || '清除登录数据失败' });
+  }
 });
 
 // API：获取任务列表
@@ -260,6 +276,13 @@ export function startServer(port = 3000) {
       resetRunningTasks();
     } catch (err: any) {
       logger.error(`启动时重置残留任务状态失败: ${err.message}`);
+    }
+    // 06-F-07：与宿主 control.db 的终态清理口径对齐（7 天），启动时自清过期
+    // 任务行，避免 peopleId/条目计数等元数据在 zhihu-packer.db 永久驻留。
+    try {
+      pruneTerminalTasks();
+    } catch (err: any) {
+      logger.error(`清理过期终态任务记录失败: ${err?.message || err}`);
     }
     logger.info(`知乎 sidecar 已在 ${HOST}:${address.port} 启动。`);
     logger.info('本地控制令牌已启用，仅通过桌面应用内存传递。');

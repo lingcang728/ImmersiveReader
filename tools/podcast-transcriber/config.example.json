@@ -1,5 +1,5 @@
 {
-  "_note": "Copy this file to config.json and adjust values. Set DEEPSEEK_API_KEY environment variable instead of filling api_key fields.",
+  "_note": "Copy this file to config.json and adjust values. The DeepSeek key is never read from this file — set the DEEPSEEK_API_KEY environment variable (the app injects it from Windows Credential Manager). api_key fields in config.json are ignored.",
   "_stability_note": "Fast profile for RTX 4060 Laptop 8GB: use large-v3-turbo, keep Whisper inference serialized, run DeepSeek translation/polish through the shared API limiter, and reduce API concurrency if 429s appear.",
   "input_dir": "input",
   "output_dir": "output",
@@ -65,7 +65,6 @@
     "strict_output": true,
     "base_url": "https://api.deepseek.com",
     "api_key_env": "DEEPSEEK_API_KEY",
-    "api_key": "",
     "pricing_per_million_tokens": {
       "input": 0.14,
       "cache_hit_input": 0.0028,
@@ -97,7 +96,6 @@
       "backend": "deepseek",
       "base_url": "https://api.deepseek.com",
       "api_key_env": "DEEPSEEK_API_KEY",
-      "api_key": "",
       "pricing_per_million_tokens": {
         "input": 0.14,
         "cache_hit_input": 0.0028,

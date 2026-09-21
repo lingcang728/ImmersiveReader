@@ -155,8 +155,12 @@ def _install_fake_pipeline(monkeypatch, exit_code: int, summary: dict | None = N
     class _BudgetExceededError(Exception):
         pass
 
+    class _SecretMissingError(Exception):
+        pass
+
     fake_pricing.PodcastUpstreamError = _UpstreamError
     fake_pricing.PodcastBudgetExceededError = _BudgetExceededError
+    fake_pricing.PodcastSecretMissingError = _SecretMissingError
     fake_pricing.classify_upstream_error = lambda error: None
 
     fake_pim = types.ModuleType("polish_interview_markdown")
@@ -257,6 +261,7 @@ def test_main_fatal_keeps_budget_code_and_required_action(tmp_path: Path, monkey
     fake_pricing = types.ModuleType("deepseek_pricing")
     fake_pricing.PodcastBudgetExceededError = _BudgetExceeded
     fake_pricing.PodcastUpstreamError = type("_Upstream", (Exception,), {})
+    fake_pricing.PodcastSecretMissingError = type("_SecretMissing", (Exception,), {})
     fake_pricing.classify_upstream_error = lambda error: None
 
     fake_pim = types.ModuleType("polish_interview_markdown")
@@ -274,3 +279,47 @@ def test_main_fatal_keeps_budget_code_and_required_action(tmp_path: Path, monkey
     assert fatal["errorCode"] == "BUDGET_CONFIRMATION_REQUIRED"
     assert fatal["requiredAction"] == "approve_budget"
     assert "budget" in fatal["message"].lower()
+
+
+def test_main_fatal_keeps_secret_missing_code_and_action(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A missing DeepSeek credential must surface SECRET_MISSING +
+    requiredAction=configure_secret so the host routes to the key-input
+    flow instead of offering a retry that always fails."""
+    path, environment = fixture(tmp_path)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, "argv", ["transcribe_task.py", "--task-spec", str(path)])
+
+    fake_worker = types.ModuleType("transcribe_podcasts")
+
+    class _SecretMissing(Exception):
+        code = "SECRET_MISSING"
+        required_action = "configure_secret"
+        retry_after_seconds = None
+
+    def _boom() -> int:
+        raise _SecretMissing("DeepSeek API key is missing")
+
+    fake_worker.main = _boom
+    fake_worker.LAST_RUN_SUMMARY = None
+
+    fake_pricing = types.ModuleType("deepseek_pricing")
+    fake_pricing.PodcastBudgetExceededError = type("_BudgetExceeded", (Exception,), {})
+    fake_pricing.PodcastUpstreamError = type("_Upstream", (Exception,), {})
+    fake_pricing.PodcastSecretMissingError = _SecretMissing
+    fake_pricing.classify_upstream_error = lambda error: None
+
+    fake_pim = types.ModuleType("polish_interview_markdown")
+    monkeypatch.setitem(sys.modules, "transcribe_podcasts", fake_worker)
+    monkeypatch.setitem(sys.modules, "deepseek_pricing", fake_pricing)
+    monkeypatch.setitem(sys.modules, "polish_interview_markdown", fake_pim)
+
+    from transcribe_task import main
+
+    assert main() == 1
+    captured = capsys.readouterr()
+    stderr_lines = [line for line in captured.err.splitlines() if line.strip()]
+    fatal = json.loads(stderr_lines[-1])
+    assert fatal["type"] == "fatal"
+    assert fatal["errorCode"] == "SECRET_MISSING"
+    assert fatal["requiredAction"] == "configure_secret"

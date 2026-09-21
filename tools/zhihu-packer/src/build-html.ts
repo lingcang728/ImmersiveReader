@@ -53,12 +53,19 @@ async function buildBook(template: string, manifestPath: string): Promise<number
     const markdown = fs.readFileSync(filePath, "utf8");
     articles.push(await renderMarkdownArticle(chapter, markdown, manifest.title));
   }
+  const outputPath = path.join(bookRoot, "reader.html");
   if (articles.length === 0) {
-    console.warn(`书目没有可构建章节：${manifest.title}`);
+    // 一章都构建不出来时旧 reader.html 不能再留——否则陈旧阅读器会与新
+    // manifest 并存，用户打开看到的是上一版内容（P3-8）。
+    if (fs.existsSync(outputPath)) {
+      fs.rmSync(outputPath, { force: true });
+      console.warn(`书目没有可构建章节，已移除陈旧 reader.html：${manifest.title}`);
+    } else {
+      console.warn(`书目没有可构建章节：${manifest.title}`);
+    }
     return missing;
   }
   const html = renderReaderHtml(template, articles, `${manifest.title} - 沉浸阅读`);
-  const outputPath = path.join(bookRoot, "reader.html");
   fs.writeFileSync(outputPath, html, "utf8");
   console.log(`Reader: ${outputPath} (${articles.length} 篇)`);
   return missing;

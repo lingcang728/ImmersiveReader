@@ -3,7 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as net from 'net';
-import { logger } from './utils.js';
+import { logger, redactPathForLog } from './utils.js';
 import { resolveBrowserCacheDir, resolveBrowserExecutable, resolveProfileDir } from './runtime-paths.js';
 
 let activeContext: BrowserContext | null = null;
@@ -151,6 +151,16 @@ async function ensureObscuraPort(): Promise<void> {
     return;
   }
 
+  // 06-F-02：CDP 端口本身无鉴权是固有风险，固定的 9230-9330 扫描区间让它
+  // 能被同机进程预测命中。优先随机高位端口（取在 Windows 动态端口段之下，
+  // 避开出站连接的临时源端口），多次随机尝试都被占用再退回固定区间兜底。
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const candidate = 20000 + Math.floor(Math.random() * 28000);
+    if (!(await isPortInUse(candidate))) {
+      obscuraPort = candidate;
+      return;
+    }
+  }
   for (let port = 9230; port < 9330; port++) {
     if (!(await isPortInUse(port))) {
       obscuraPort = port;
@@ -259,23 +269,126 @@ function toObscuraCookie(cookie: Cookie) {
   };
 }
 
+// P2-1：cookies.json 曾是登录凭据的明文第二副本（Chromium profile 内的那份
+// 有 Chromium 自己的 DPAPI，这面 mirror 没有）。改为经 DPAPI
+// CryptProtectData(CurrentUser) 加密落盘为 cookies.dpapi；cookies.json 仅作
+// 旧版本遗留读取，一旦读到即迁移删除。
+const COOKIE_MIRROR_FILE = 'cookies.json';
+const COOKIE_PROTECTED_FILE = 'cookies.dpapi';
+
+// 由 PowerShell 调 CryptProtectData/CryptUnprotectData（DataProtectionScope::
+// CurrentUser）——Node 没有可用的 DPAPI 绑定，而该文件读写只在登录同步/任务
+// 注入时发生，单次 ~200ms 可接受。文件路径经环境变量传入，避免把凭据明文放进
+// 命令行参数。
+const DPAPI_SCRIPT = [
+  'Add-Type -AssemblyName System.Security',
+  '$scope=[System.Security.Cryptography.DataProtectionScope]::CurrentUser',
+  '$in=[System.IO.File]::ReadAllBytes($env:DPAPI_IN)',
+  'if ($env:DPAPI_MODE -eq "protect")',
+  '{ $out=[System.Security.Cryptography.ProtectedData]::Protect($in,$null,$scope) }',
+  'else',
+  '{ $out=[System.Security.Cryptography.ProtectedData]::Unprotect($in,$null,$scope) }',
+  '[System.IO.File]::WriteAllBytes($env:DPAPI_OUT,$out)'
+].join('; ');
+
+function dpapiTransformFile(mode: 'protect' | 'unprotect', inputPath: string, outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', DPAPI_SCRIPT], {
+      env: { ...process.env, DPAPI_MODE: mode, DPAPI_IN: inputPath, DPAPI_OUT: outputPath },
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true
+    });
+    let stderr = '';
+    ps.stderr?.on('data', (d) => { stderr += d; });
+    const timer = setTimeout(() => {
+      ps.kill();
+      reject(new Error('DPAPI 调用超时'));
+    }, 20_000);
+    ps.on('error', (e) => { clearTimeout(timer); reject(e); });
+    ps.on('exit', (code) => {
+      clearTimeout(timer);
+      if (code === 0 && fs.existsSync(outputPath)) resolve();
+      else reject(new Error(`DPAPI ${mode} 退出码 ${code}: ${stderr.slice(0, 200)}`));
+    });
+  });
+}
+
+/**
+ * 读取持久化 Cookie：优先 DPAPI 密文，其次旧明文 cookies.json（读到后顺手
+ * 迁移成密文并删掉明文）。返回 null 表示无可用凭据。
+ */
+async function readStoredCookies(): Promise<any[] | null> {
+  const protectedFile = path.join(obscuraStorageDir, COOKIE_PROTECTED_FILE);
+  const legacyFile = path.join(obscuraStorageDir, COOKIE_MIRROR_FILE);
+  if (fs.existsSync(protectedFile)) {
+    const tempPlain = `${protectedFile}.read-${process.pid}`;
+    try {
+      await dpapiTransformFile('unprotect', protectedFile, tempPlain);
+      const parsed = JSON.parse(fs.readFileSync(tempPlain, 'utf-8'));
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      return null;
+    } catch (e: any) {
+      logger.warn(`解密登录凭据失败（按未登录处理）: ${e?.message || e}`);
+      return null;
+    } finally {
+      try { fs.unlinkSync(tempPlain); } catch { /* 临时文件清理失败无害 */ }
+    }
+  }
+  if (!fs.existsSync(legacyFile)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(legacyFile, 'utf-8'));
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    // 旧明文还在 → 立刻迁移为密文，尽量缩短明文驻留窗口。
+    const tempPlain = `${protectedFile}.tmp-${process.pid}`;
+    const tempProt = `${protectedFile}.enc-${process.pid}`;
+    try {
+      fs.writeFileSync(tempPlain, JSON.stringify(parsed), 'utf-8');
+      await dpapiTransformFile('protect', tempPlain, tempProt);
+      fs.renameSync(tempProt, protectedFile);
+      fs.unlinkSync(tempPlain);
+      fs.unlinkSync(legacyFile);
+      logger.info('已将旧明文 cookies.json 迁移为 DPAPI 加密存储。');
+    } catch {
+      try { fs.unlinkSync(tempPlain); } catch { /* ignore */ }
+      try { fs.unlinkSync(tempProt); } catch { /* ignore */ }
+    }
+    return parsed;
+  } catch (e: any) {
+    logger.warn(`解析登录凭据文件失败: ${e?.message || e}`);
+    return null;
+  }
+}
+
 export async function syncCookiesToObscuraStorage(context: BrowserContext): Promise<void> {
   const cookies = await context.cookies();
   fs.mkdirSync(obscuraStorageDir, { recursive: true });
-  // P3-28：cookies.json 是登录凭据——写入必须原子化（tmp+rename），否则进程在
-  // writeFileSync 中途被杀会留下半截 JSON，下次 injectStoredCookies 解析失败即丢登录态。
-  // 明文存储本身是 Cookie 缓存的固有形态，这里额外把文件权限收紧到属主读写（0o600；
-  // Windows 上 chmod 只影响只读位、属主写位仍在，所以是无害的最佳努力收紧）。
-  const cookieFile = path.join(obscuraStorageDir, 'cookies.json');
-  const tempFile = `${cookieFile}.tmp-${process.pid}`;
-  fs.writeFileSync(tempFile, JSON.stringify(cookies.map(toObscuraCookie), null, 2), 'utf-8');
-  fs.renameSync(tempFile, cookieFile);
+  // P3-28：写入必须原子化（tmp+rename），否则进程在 writeFileSync 中途被杀会
+  // 留下半截文件，下次注入解析失败即丢登录态。P2-1：密文优先——先把明文写到
+  // 临时文件，DPAPI 加密后原子替换 cookies.dpapi 并删除明文临时文件与旧
+  // cookies.json；DPAPI 不可用（非 Windows 调试等）才退回明文 mirror。
+  const protectedFile = path.join(obscuraStorageDir, COOKIE_PROTECTED_FILE);
+  const legacyFile = path.join(obscuraStorageDir, COOKIE_MIRROR_FILE);
+  const tempPlain = `${protectedFile}.tmp-${process.pid}`;
+  const tempProt = `${protectedFile}.enc-${process.pid}`;
+  fs.writeFileSync(tempPlain, JSON.stringify(cookies.map(toObscuraCookie), null, 2), 'utf-8');
   try {
-    fs.chmodSync(cookieFile, 0o600);
+    await dpapiTransformFile('protect', tempPlain, tempProt);
+    fs.renameSync(tempProt, protectedFile);
+    try { fs.unlinkSync(tempPlain); } catch { /* ignore */ }
+    try { fs.unlinkSync(legacyFile); } catch { /* ignore */ }
+    logger.info(`已同步 ${cookies.length} 个 Cookie（DPAPI 加密）到 ${redactPathForLog(protectedFile)}`);
+    return;
+  } catch (e: any) {
+    try { fs.unlinkSync(tempProt); } catch { /* ignore */ }
+    logger.warn(`DPAPI 加密不可用，回退明文 Cookie 存储: ${e?.message || e}`);
+  }
+  fs.renameSync(tempPlain, legacyFile);
+  try {
+    fs.chmodSync(legacyFile, 0o600);
   } catch {
     // 权限收紧失败不影响凭据本身可用性。
   }
-  logger.info(`已同步 ${cookies.length} 个 Cookie 到 Obscura 存储目录: ${obscuraStorageDir}`);
+  logger.info(`已同步 ${cookies.length} 个 Cookie 到 Obscura 存储目录: ${redactPathForLog(legacyFile)}`);
 }
 
 /**
@@ -286,20 +399,10 @@ export async function syncCookiesToObscuraStorage(context: BrowserContext): Prom
  * 同时还原被 toObscuraCookie 去掉的前导点，使 z_c0 等域 Cookie 对 www / zhuanlan 子域同时生效。
  */
 async function injectStoredCookies(context: BrowserContext): Promise<void> {
-  const file = path.join(obscuraStorageDir, 'cookies.json');
-  if (!fs.existsSync(file)) {
-    logger.warn(`未找到受管登录 Cookie 文件 (${file})，Obscura 将以未登录态运行。请在沉浸阅读的知乎获取面板登录。`);
-    return;
-  }
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
-  } catch (e: any) {
-    logger.warn(`解析 ${file} 失败，跳过 Cookie 注入: ${e.message}`);
-    return;
-  }
-  if (!Array.isArray(parsed) || parsed.length === 0) {
+  const parsed = await readStoredCookies();
+  if (!parsed) {
+    const file = path.join(obscuraStorageDir, COOKIE_PROTECTED_FILE);
+    logger.warn(`未找到可用登录凭据 (${redactPathForLog(file)})，Obscura 将以未登录态运行。请在沉浸阅读的知乎获取面板登录。`);
     return;
   }
 
@@ -310,9 +413,13 @@ async function injectStoredCookies(context: BrowserContext): Promise<void> {
     return 'Lax';
   };
 
+  const nowSec = Math.floor(Date.now() / 1000);
   const cookies = parsed
     // __zse_ck 是知乎反爬的易失性质询令牌，注入旧值反而会与现场质询冲突，交由实时质询生成。
-    .filter((c: any) => c && c.name && c.domain && c.name !== '__zse_ck')
+    // expires 已过的 Cookie 一并剔除——注入死凭据没有意义，也让旧 mirror 里
+    // 永驻的过期条目随下次 sync 被清掉。
+    .filter((c: any) => c && c.name && c.domain && c.name !== '__zse_ck'
+      && (typeof c.expires !== 'number' || !Number.isFinite(c.expires) || c.expires <= 0 || c.expires > nowSec))
     .map((c: any) => {
       const domain = String(c.domain).startsWith('.') ? String(c.domain) : `.${c.domain}`;
       const cookie: any = {
@@ -481,28 +588,19 @@ async function getBrowserContextLocked(headless: boolean, purpose: BrowserPurpos
 }
 
 /**
- * 读取本地持久化登录凭据（.obscura-profile/cookies.json）中是否存在有效 z_c0。
+ * 读取本地持久化登录凭据（.obscura-profile/cookies.dpapi）中是否存在有效 z_c0。
  * 每次成功的登录/人机验证流程都会通过 syncCookiesToObscuraStorage 刷新该文件，
  * 因此它是 sidecar 侧的登录态事实来源，可用于无浏览器的只读判定。
  */
-function hasStoredLoginCookie(): boolean {
-  const file = path.join(obscuraStorageDir, 'cookies.json');
-  if (!fs.existsSync(file)) {
+async function hasStoredLoginCookie(): Promise<boolean> {
+  const parsed = await readStoredCookies();
+  if (!parsed) {
     return false;
   }
-  try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'));
-    if (!Array.isArray(parsed)) {
-      return false;
-    }
-    const now = Math.floor(Date.now() / 1000);
-    return parsed.some((c: any) =>
-      c && c.name === 'z_c0'
-      && (typeof c.expires !== 'number' || !Number.isFinite(c.expires) || c.expires <= 0 || c.expires > now));
-  } catch (e: any) {
-    logger.warn(`解析登录凭据文件失败: ${e?.message || e}`);
-    return false;
-  }
+  const now = Math.floor(Date.now() / 1000);
+  return parsed.some((c: any) =>
+    c && c.name === 'z_c0'
+    && (typeof c.expires !== 'number' || !Number.isFinite(c.expires) || c.expires <= 0 || c.expires > now));
 }
 
 /**
@@ -522,12 +620,69 @@ export function getLoginStatus(): Promise<{ loggedIn: boolean }> {
         logger.warn(`读取活跃浏览器 Cookie 失败，改用本地登录凭据判断: ${e?.message || e}`);
       }
     }
-    return { loggedIn: hasStoredLoginCookie() };
+    return { loggedIn: await hasStoredLoginCookie() };
   });
 }
 
 export function closeBrowserContext(): Promise<void> {
   return withBrowserLock(closeBrowserContextLocked);
+}
+
+/**
+ * 尽力而为的远端登出：知乎的退出登录入口是 GET https://www.zhihu.com/logout，
+ * 按请求携带的 Cookie 定位并使服务端会话失效。失败只记日志——本地凭据无论
+ * 如何都会删除（残余风险：若请求未生效，z_c0 将留待其自然过期）。
+ */
+async function attemptRemoteLogout(cookieHeader: string): Promise<void> {
+  const controller = new AbortController();
+  // 宿主侧 HTTP 总时限 15s——远端登出给 5s 上限，本地清除必须先于它完成。
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    await fetch('https://www.zhihu.com/logout', {
+      method: 'GET',
+      redirect: 'manual',
+      signal: controller.signal,
+      headers: {
+        cookie: cookieHeader,
+        referer: 'https://www.zhihu.com/',
+        'user-agent': await resolveUserAgent()
+      }
+    });
+    logger.info('已向知乎发送退出登录请求。');
+  } catch (e: any) {
+    logger.warn(`远端退出登录未完成（本地登录数据仍会清除）: ${e?.message || e}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 退出登录 / 清除登录数据（06-F-01）：先尽力让知乎服务端会话失效，再关闭
+ * 浏览器并删除整份本地登录档案——.obscura-profile 的 DPAPI Cookie 文件、
+ * Chromium profile 目录（Cookies 库、localStorage 等）与浏览器缓存目录。
+ * 浏览器被登录窗口或归档任务占用时拒绝执行（与互杀防护同一规则）。
+ */
+export function clearLoginData(): Promise<void> {
+  return withBrowserLock(async () => {
+    if (taskBrowsingActive || interactiveSessionActive) {
+      throw new Error('浏览器正被登录窗口或归档任务占用，请先完成或取消后再退出登录。');
+    }
+    // 先取 Cookie 再删本地数据：远端登出放最后（尽力而为），宿主 HTTP 时限内
+    // 本地清除必定已完成——即使响应超时，用户态也已经真正退出。
+    const stored = await readStoredCookies();
+    const cookieHeader = (stored || [])
+      .filter((c: any) => c && c.name && c.value !== undefined)
+      .map((c: any) => `${c.name}=${c.value}`)
+      .join('; ');
+    await closeBrowserContextLocked();
+    for (const dir of [obscuraStorageDir, chromeProfileDir, browserCacheDir]) {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+    }
+    logger.info('已清除知乎登录数据（Cookie、浏览器档案与缓存目录）。');
+    if (cookieHeader) {
+      await attemptRemoteLogout(cookieHeader);
+    }
+  });
 }
 
 /** 锁内关闭实现：必须容忍任何异常（常用于 finally），绝不能把 rejection 抛给调用方（P1-7）。 */

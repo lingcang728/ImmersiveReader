@@ -25,6 +25,10 @@ export type ManifestBuildInput = {
 };
 
 function normalizedRelativePath(outputPath: string): string {
+  // 契约约束：归档章节一律平铺在作者目录根部，manifest 里存文件名本身——
+  // 调用方传入的前缀（`output/作者/`、`.incoming/<task>/作者/`、绝对路径）
+  // 只是来源描述。若未来允许子目录章节，这里必须改为按作者目录求相对路径，
+  // 否则两个同名文件会在 manifest 里指向同一路径互相覆盖（P3-8）。
   return path.basename(outputPath.replaceAll("\\", "/"));
 }
 

@@ -13,9 +13,24 @@ export type ReaderArticle = {
   readonly frontMatter: Readonly<Record<string, string>>;
 };
 
+// P3-6：构建期预渲染（前 5 篇 data-rendered="true"）必须与运行时清洗走同一
+// 份严格白名单——之前这里只 FORBID 了 style/form/input/button，预渲染正文里
+// 保留的 style 属性、srcset、video/audio 等正好绕过了 app.ts 的 ALLOWED_*。
+// 两侧白名单必须保持一致（reader/ui/app.ts sanitizeHtml）。
 function sanitizeHtmlFragment(html: string): string {
   return DOM_PURIFY.sanitize(html, {
-    FORBID_TAGS: ["style", "form", "input", "button"],
+    USE_PROFILES: { html: true },
+    ALLOWED_TAGS: [
+      "h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "hr", "blockquote",
+      "ul", "ol", "li", "dl", "dt", "dd", "table", "thead", "tbody", "tr", "th", "td",
+      "pre", "code", "em", "strong", "del", "span", "a", "img", "div", "ins", "sub", "sup",
+    ],
+    ALLOWED_ATTR: [
+      "src", "href", "title", "alt", "class", "id", "align", "valign",
+      "width", "height", "loading", "tabindex", "data-bilingual-id",
+    ],
+    ALLOW_UNKNOWN_PROTOCOLS: false,
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|ftp|tel):|[^a-z0-9+.-]+(?:[/?#]|$))/i,
   });
 }
 

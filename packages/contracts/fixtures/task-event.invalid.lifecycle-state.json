@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "taskId": "podcast-3f8a2c71",
+  "sequence": 12,
+  "revision": 12,
+  "type": "worker_completed",
+  "snapshot": {
+    "id": "podcast-3f8a2c71",
+    "kind": "podcast",
+    "revision": 12,
+    "lastSequence": 12,
+    "lifecycleState": "archived",
+    "outcome": "success",
+    "requiredAction": "none",
+    "progress": {
+      "mode": "determinate",
+      "percent": 100.0,
+      "completedUnits": 42,
+      "totalUnits": 42,
+      "label": "即将完成"
+    },
+    "errorCode": null,
+    "errorMessage": null,
+    "engineStage": "completed",
+    "engineStatus": "exited",
+    "recoverable": false,
+    "canPause": false,
+    "canResume": false,
+    "canRetry": false,
+    "canCancel": false,
+    "bookId": "podcast:fixture-author",
+    "sourceId": "fixture-author",
+    "cacheLeaseBytes": 0,
+    "createdAt": "2026-07-22T00:00:00Z",
+    "updatedAt": "2026-07-22T00:05:00Z"
+  },
+  "createdAt": "2026-07-22T00:05:00Z"
+}

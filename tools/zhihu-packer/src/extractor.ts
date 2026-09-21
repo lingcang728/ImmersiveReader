@@ -7,7 +7,7 @@ import { isIP } from 'node:net';
 import { request } from 'node:https';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
-import { logger, sanitizeFilename, evaluateClean } from './utils.js';
+import { logger, sanitizeFilename, evaluateClean, pruneDebugSnapshots, redactUrlForLog, redactPathForLog } from './utils.js';
 import { resolveBrowserCacheDir } from './runtime-paths.js';
 
 export interface ExtractedContent {
@@ -401,7 +401,9 @@ export async function scrapeAnswer(page: Page, targetUrl: string, fallbackAuthor
       fs.mkdirSync(debugDir, { recursive: true });
       const screenshotPath = path.join(debugDir, 'debug-answer.png');
       await page.screenshot({ path: screenshotPath });
-      logger.error(`已将调试截图保存至: ${screenshotPath}`);
+      pruneDebugSnapshots(debugDir);
+      // 06-F-05：日志不落绝对路径（含用户目录结构），保留文件名便于定位。
+      logger.error(`已将调试截图保存至: ${redactPathForLog(screenshotPath)}`);
     } catch {
       logger.warn('当前浏览器不支持调试截图，已跳过 debug-answer.png 生成。');
     }
@@ -814,9 +816,15 @@ function imageFileNameFor(url: string, mime?: string): string {
   return `${hash}.${ext}`;
 }
 
+// P2-3：非白名单远程图或下载失败的远程图不能再原样留在归档 Markdown 里——
+// 两侧阅读器的 CSP 都允许 img-src https:，打开章节就会向第三方主机发出真实
+// 请求（IP/Referer 外发面）。统一替换为占位文本，杜绝离线裂图与追踪像素。
+const REMOTE_IMAGE_PLACEHOLDER = '*[远程图片未归档]*';
+const FAILED_IMAGE_PLACEHOLDER = '*[图片下载失败]*';
+
 /**
  * 把 Markdown 中的远程图片下载到答主目录 assets/ 下，并改写为相对路径引用。
- * 单张失败只保留远程链接，不影响整篇归档。
+ * 拒绝/失败的图片替换为占位文本，不影响整篇归档。
  */
 export async function archiveImagesLocally(markdown: string, authorPath: string): Promise<string> {
   // 去掉 lazy 图与 noscript 副本可能造成的相邻重复引用
@@ -832,7 +840,8 @@ export async function archiveImagesLocally(markdown: string, authorPath: string)
   let totalBytes = 0;
   for (const [index, url] of urls.entries()) {
     if (index >= IMAGE_MAX_COUNT || !isAllowedImageUrl(url)) {
-      logger.warn(`图片下载被安全策略拒绝: ${url}`);
+      logger.warn(`图片下载被安全策略拒绝: ${redactUrlForLog(url)}`);
+      result = result.split(`![](${url})`).join(REMOTE_IMAGE_PLACEHOLDER);
       continue;
     }
     const existingPrefix = createHash('md5').update(url).digest('hex').slice(0, 12);
@@ -863,11 +872,12 @@ export async function archiveImagesLocally(markdown: string, authorPath: string)
       }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      logger.warn(`图片下载失败，保留远程链接: ${url} (${message})`);
+      logger.warn(`图片下载失败，替换为占位文本: ${redactUrlForLog(url)} (${message})`);
+      result = result.split(`![](${url})`).join(FAILED_IMAGE_PLACEHOLDER);
     }
   }
   if (downloaded > 0) {
-    logger.info(`已本地化 ${downloaded}/${urls.length} 张图片到 ${assetsDir}`);
+    logger.info(`已本地化 ${downloaded}/${urls.length} 张图片到 ${redactPathForLog(assetsDir)}`);
   }
   return result;
 }
@@ -936,6 +946,6 @@ export async function writeMarkdownFile(
   // 7. 写入文件 (完全剔除 Frontmatter, 直接以 H1 标题开始)
   const fullContent = headerLayout + localizedMarkdown;
   fs.writeFileSync(filePath, fullContent, 'utf-8');
-  logger.info(`内容已成功归一化并写入文件: ${filePath}`);
+  logger.info(`内容已成功归一化并写入文件: ${redactPathForLog(filePath)}`);
   return filePath;
 }

@@ -6,7 +6,7 @@ export interface VirtualFile {
   file?: File;          // input webkitdirectory 或 drag-drop 模式下的原生 File 对象
 }
 
-// 默认忽略的敏感/非文档目录
+// 默认忽略的敏感/非文档目录（小写存储；NTFS 目录名大小写不敏感，比较前一律 toLowerCase）
 const EXCLUDED_DIRS = new Set([
   '.git',
   'node_modules',
@@ -19,9 +19,12 @@ const EXCLUDED_DIRS = new Set([
 
 const MAX_FILES = 2000;
 const MAX_DEPTH = 5;
+// 单文件上限：整篇读入内存 + marked 解析，超大文件会卡死甚至 OOM 掉阅读器
+const MAX_TEXT_FILE_BYTES = 16 * 1024 * 1024;
 
 export function isMarkdownFile(name: string): boolean {
-  return name.toLowerCase().endsWith('.md');
+  const lower = name.toLowerCase();
+  return lower.endsWith('.md') || lower.endsWith('.markdown');
 }
 
 export function isSupportedFile(name: string): boolean {
@@ -52,7 +55,7 @@ async function scanDirectoryHandle(
     if (fileList.length >= MAX_FILES) break;
 
     if (entry.kind === 'directory') {
-      if (EXCLUDED_DIRS.has(entry.name)) continue;
+      if (EXCLUDED_DIRS.has(entry.name.toLowerCase())) continue;
       const subDirPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
       await scanDirectoryHandle(entry as FileSystemDirectoryHandle, subDirPath, depth + 1, fileList);
     } else if (entry.kind === 'file') {
@@ -89,7 +92,7 @@ async function scanNativeFiles(
     const pathParts = relPath.split('/');
     
     // 检查是否包含任何需要忽略的目录
-    const hasExcluded = pathParts.some(part => EXCLUDED_DIRS.has(part));
+    const hasExcluded = pathParts.some(part => EXCLUDED_DIRS.has(part.toLowerCase()));
     if (hasExcluded) continue;
 
     // 检查递归深度 (从根目录起计算的文件夹层数)
@@ -112,13 +115,14 @@ async function scanNativeFiles(
  * 通用读取文本接口
  */
 export async function readText(vFile: VirtualFile): Promise<string> {
-  if (vFile.file) {
-    return await vFile.file.text();
-  } else if (vFile.handle) {
-    const file = await vFile.handle.getFile();
-    return await file.text();
+  const file = vFile.file ?? (vFile.handle ? await vFile.handle.getFile() : undefined);
+  if (!file) {
+    throw new Error(`无法读取文件 ${vFile.relativePath}：缺少句柄或文件实体`);
   }
-  throw new Error(`无法读取文件 ${vFile.relativePath}：缺少句柄或文件实体`);
+  if (file.size > MAX_TEXT_FILE_BYTES) {
+    throw new Error(`文件过大（${Math.round(file.size / 1024 / 1024)}MB），已跳过解析`);
+  }
+  return await file.text();
 }
 
 /**

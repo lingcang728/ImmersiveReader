@@ -21,7 +21,9 @@ export function getPackedArticles(): ArticleMetadata[] | null {
         articleId: art.articleId || `packed_${idx}`,
         title: art.title || '无标题',
         date: art.date || '未知日期',
-        timestamp: art.timestamp || Date.parse(art.date) || Date.now(),
+        // 无日期文章取固定 0：Date.now() 会让每次打开得到不同的时间戳，
+        // 排序/展示随之漂移。
+        timestamp: art.timestamp || Date.parse(art.date) || 0,
         author: art.author || '老丹尼',
         summary: art.summary || (art.htmlContent ? art.htmlContent.replace(/<[^>]+>/g, '').slice(0, 150) : ''),
         // P3-29：兜底字数同样按 Unicode 标量计，不用 UTF-16 码元 .length。

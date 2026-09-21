@@ -9,6 +9,7 @@ import os
 import socket
 import threading
 import urllib.error
+import urllib.parse
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -95,6 +96,22 @@ class PodcastBudgetExceededError(RuntimeError):
     retry_after_seconds: int | None = None
 
 
+class PodcastSecretMissingError(RuntimeError):
+    """The configured DeepSeek credential is absent — no API call can succeed.
+
+    Raised instead of a bare ``RuntimeError`` so the worker's fatal NDJSON
+    line carries ``SECRET_MISSING`` + ``required_action="configure_secret"``
+    and the desktop routes the user to the key-input flow instead of
+    offering a retry that is guaranteed to fail again (a bare RuntimeError
+    used to surface as TRANSCRIPTION_FAILED after the whole ASR stage had
+    already burned GPU time).
+    """
+
+    code = "SECRET_MISSING"
+    required_action = "configure_secret"
+    retry_after_seconds: int | None = None
+
+
 # Errors carrying a stable host-facing errorCode / requiredAction that must
 # reach the worker's fatal NDJSON line untouched — pipeline stages must
 # re-raise these instead of folding them into per-file results.
@@ -103,6 +120,7 @@ class PodcastBudgetExceededError(RuntimeError):
 PROPAGATE_FATAL_ERRORS: tuple[type[BaseException], ...] = (
     PodcastUpstreamError,
     PodcastBudgetExceededError,
+    PodcastSecretMissingError,
 )
 
 # Network-ish OSError subclasses → LOCAL_NETWORK (socket.herror is not defined
@@ -480,7 +498,13 @@ def classify_upstream_error(exc: BaseException, service: str = "Upstream") -> Po
         message = f"{service} HTTP {status}"
         if detail:
             message = f"{message}: {detail}"
-        return PodcastUpstreamError(code, message, retry_after, status)
+        error = PodcastUpstreamError(code, message, retry_after, status)
+        if status == 401:
+            # A rejected credential is a configuration problem, not a
+            # transient upstream failure — route the user to the
+            # secret-config flow instead of a blind retry.
+            error.required_action = "configure_secret"
+        return error
     # Everything below never produced an upstream HTTP response → LOCAL_*.
     if isinstance(exc, urllib.error.URLError):
         reason = getattr(exc, "reason", None)
@@ -512,11 +536,58 @@ def is_retryable_http_error(exc: BaseException) -> bool:
 
 
 def deepseek_chat_completions_url(base_url: Any) -> str:
-    """Return the concrete ChatCompletions endpoint for DeepSeek."""
+    """Return the concrete ChatCompletions endpoint for DeepSeek.
+
+    06-F-03: this endpoint receives ``Authorization: Bearer <key>`` — a
+    tampered ``config.json`` used to be able to redirect the key to any
+    plaintext/remote host. Only a plain ``https://`` base URL is accepted:
+    no embedded credentials, no query, no fragment. ``INVALID_TASK_SPEC``
+    is the mapped host-facing code for a config-value violation.
+    """
     raw = str(base_url or DEEPSEEK_DEFAULT_BASE_URL).strip().rstrip("/")
+    parsed = urllib.parse.urlsplit(raw)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise PodcastLocalError(
+            "INVALID_TASK_SPEC",
+            "DeepSeek base_url must be a plain https:// endpoint (no embedded credentials, query or fragment)",
+        )
     if raw.endswith(DEEPSEEK_CHAT_COMPLETIONS_PATH):
         return raw
     return f"{raw}{DEEPSEEK_CHAT_COMPLETIONS_PATH}"
+
+
+LOOPBACK_HOSTNAMES = {"127.0.0.1", "::1", "localhost"}
+
+
+def validated_local_service_url(raw_url: Any, default: str) -> str:
+    """Gate for Ollama-style local service URLs (06-F-03).
+
+    ``ollama_url`` receives full transcript text; a tampered config could
+    point it at a remote plaintext endpoint. Accept ``https://`` hosts or
+    ``http://`` loopback (127.0.0.1 / ::1 / localhost) only.
+    """
+    raw = str(raw_url or default).strip()
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        parsed = urllib.parse.urlsplit("")
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if scheme == "https" and host:
+        return raw
+    if scheme == "http" and host in LOOPBACK_HOSTNAMES:
+        return raw
+    raise PodcastLocalError(
+        "INVALID_TASK_SPEC",
+        "Service URL must be https:// or an http:// loopback endpoint (127.0.0.1 / ::1 / localhost)",
+    )
 
 
 def normalize_deepseek_model(model: Any) -> str:

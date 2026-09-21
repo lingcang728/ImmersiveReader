@@ -37,9 +37,11 @@ del _stream
 from deepseek_pricing import (  # noqa: E402
     DEEPSEEK_DEFAULT_MODEL,
     PROPAGATE_FATAL_ERRORS,
+    PodcastSecretMissingError,
     PodcastUpstreamError,  # noqa: F401 — re-exported for tp.* compatibility
     PromptBudgetError,
     classify_upstream_error,
+    validated_local_service_url,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -828,7 +830,11 @@ def translation_response_schema() -> dict[str, Any]:
 
 
 def ollama_generate(prompt: str, translation_config: dict[str, Any], response_format: Any | None = None) -> str:
-    url = str(translation_config.get("ollama_url", "http://127.0.0.1:11434/api/generate"))
+    # 06-F-03: transcript text goes to this endpoint — config may only point it
+    # at https:// or an http:// loopback service.
+    url = validated_local_service_url(
+        translation_config.get("ollama_url"), "http://127.0.0.1:11434/api/generate"
+    )
     payload = {
         "model": translation_config.get("model", "qwen3.5:9b"),
         "prompt": prompt,
@@ -1479,7 +1485,11 @@ def find_executable(name: str) -> str | None:
 
 
 def ollama_tags_url(config: dict[str, Any]) -> str:
-    url = str((config.get("translation") or {}).get("ollama_url", "http://127.0.0.1:11434/api/generate"))
+    # 06-F-03: same endpoint policy as ollama_generate.
+    url = validated_local_service_url(
+        (config.get("translation") or {}).get("ollama_url"),
+        "http://127.0.0.1:11434/api/generate",
+    )
     return url.replace("/generate", "/tags")
 
 
@@ -2394,6 +2404,7 @@ def write_outputs(
     runtime: dict[str, str],
     started_at: str,
     bilingual: bool = False,
+    needs_translation: bool | None = None,
 ) -> dict[str, str]:
     payload = {
         "task_id": task_id,
@@ -2408,6 +2419,12 @@ def write_outputs(
         "transcribed_at": now_stamp(),
         "segments": segments,
     }
+    if needs_translation is not None:
+        # QA downstream (polish_interview_markdown.count_missing_translations)
+        # treats en/mixed turns with empty translations as defects — unless the
+        # run intentionally skipped translation (translate=false or zh-only).
+        # Persisting the decision keeps "no translation expected" explicit.
+        payload["needs_translation"] = bool(needs_translation)
     from podcast_transcriber.language import assign_language_classes  # noqa: E402
 
     assign_language_classes(segments, runtime.get("detected_language"))
@@ -2643,6 +2660,7 @@ def translate_json_outputs_if_needed(
         runtime,
         data.get("transcribed_at", now_stamp()),
         bilingual=bool((config.get("translation") or {}).get("output_bilingual_markdown", True)),
+        needs_translation=True,
     )
 
 
@@ -3212,6 +3230,7 @@ def _run_postprocess_body(
         runtime,
         started_at,
         bilingual=bool((config.get("translation") or {}).get("output_bilingual_markdown", True)),
+        needs_translation=needs_translation,
     )
     final_markdown = write_final_markdown_from_json(outputs["json"], logger, config)
     if final_markdown:
@@ -3334,6 +3353,7 @@ def translate_existing_outputs(config: dict[str, Any], force: bool = False, no_o
                 runtime,
                 data.get("transcribed_at", now_stamp()),
                 bilingual=True,
+                needs_translation=True,
             )
             final_markdown = write_final_markdown_from_json(outputs["json"], logger, config)
             if final_markdown:
@@ -3504,6 +3524,28 @@ def preflight_checks(config: dict[str, Any], logger: logging.Logger) -> bool:
             # when API key is not yet validated. This is not fatal at preflight —
             # actual validation happens at translation time. Log and continue.
             logger.warning("Backend preflight note: %s", exc)
+
+    # Fail fast on a guaranteed-missing DeepSeek credential. Polish runs for
+    # zh AND en content whenever enabled, so a missing key there is fatal
+    # regardless of detected language — cheaper than discovering it after the
+    # whole ASR stage. (Translation needs the key only when en/mixed content
+    # exists, which is unknown pre-ASR; its missing key still fails fast at
+    # the first deepseek_chat_completion call via PodcastSecretMissingError.)
+    polish_cfg = ((config.get("markdown") or {}).get("llm_polish") or {})
+    force_polish = os.environ.get("PODCAST_TRANSCRIBER_FORCE_POLISH")
+    polish_enabled = (
+        str(force_polish).strip().lower() not in {"0", "false", "no", "off", ""}
+        if force_polish is not None
+        else bool(polish_cfg.get("enabled", False))
+    )
+    if (
+        polish_enabled
+        and provider_name(polish_cfg) == "deepseek"
+        and not resolve_api_key(polish_cfg, "DEEPSEEK_API_KEY")
+    ):
+        raise PodcastSecretMissingError(
+            "DeepSeek API key is missing for polish. Set DEEPSEEK_API_KEY or save it in config."
+        )
     return True
 
 

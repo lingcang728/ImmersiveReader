@@ -30,5 +30,12 @@
   { "fixture": "provenance.invalid.schema-version.json", "contract": "provenance", "schema": "provenance.schema.json", "expect": "invalid" },
   { "fixture": "publish-transaction.valid.json", "contract": "publish-transaction", "schema": "publish-transaction.schema.json", "expect": "valid" },
   { "fixture": "publish-transaction.invalid.phase.json", "contract": "publish-transaction", "schema": "publish-transaction.schema.json", "expect": "invalid" },
-  { "fixture": "publish-transaction.invalid.schema-version.json", "contract": "publish-transaction", "schema": "publish-transaction.schema.json", "expect": "invalid" }
+  { "fixture": "publish-transaction.invalid.schema-version.json", "contract": "publish-transaction", "schema": "publish-transaction.schema.json", "expect": "invalid" },
+  { "fixture": "task-event.valid.json", "contract": "task-event", "schema": "task-event.schema.json", "expect": "valid" },
+  { "fixture": "task-event.invalid.lifecycle-state.json", "contract": "task-event", "schema": "task-event.schema.json", "expect": "invalid" },
+  { "fixture": "task-event.invalid.missing-snapshot.json", "contract": "task-event", "schema": "task-event.schema.json", "expect": "invalid" },
+  { "fixture": "worker-fatal.valid.json", "contract": "worker-fatal", "schema": "worker-fatal.schema.json", "expect": "valid" },
+  { "fixture": "worker-fatal.invalid.type.json", "contract": "worker-fatal", "schema": "worker-fatal.schema.json", "expect": "invalid" },
+  { "fixture": "worker-fatal.invalid.missing-error-code.json", "contract": "worker-fatal", "schema": "worker-fatal.schema.json", "expect": "invalid" },
+  { "fixture": "worker-fatal.invalid.unknown-error-code.json", "contract": "worker-fatal", "schema": "worker-fatal.schema.json", "expect": "invalid" }
 ]

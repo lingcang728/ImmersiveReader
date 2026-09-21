@@ -1,2 +1,6 @@
-pytest
-ruff
+# Dev-only tooling for podcast-transcriber. Pinned so CI and local runs resolve
+# identical versions (see verify.ps1 / .github/workflows/ci.yml).
+# Runtime dependencies live in requirements.txt — this file supplements it.
+pytest==9.0.3
+ruff==0.16.7
+jsonschema==4.26.0

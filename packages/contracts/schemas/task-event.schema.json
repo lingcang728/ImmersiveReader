@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://immersive-reader.local/schemas/task-event-v1.json",
+  "title": "Immersive Reader acquisition TaskEvent v1",
+  "description": "Wire shape the Rust backend emits on 'acquisition://task-event' and the frontend consumes in apps/desktop/src/lib/tasks/sync.ts. Mirrors TaskEvent/TaskSnapshot/TaskProgress in apps/desktop/src-tauri/src/tasks.rs (camelCase serde rename; Option fields serialize as explicit null unless marked skip_serializing_if). The Rust parity leg deserializes fixtures into the same structs, so field/enumeration drift fails either leg.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "taskId", "sequence", "revision", "type", "snapshot", "createdAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "taskId": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "revision": { "type": "integer", "minimum": 0 },
+    "type": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "minLength": 1 },
+    "snapshot": { "$ref": "#/$defs/taskSnapshot" }
+  },
+  "$defs": {
+    "taskSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "kind", "revision", "lastSequence", "lifecycleState", "outcome",
+        "requiredAction", "progress", "engineStage", "engineStatus",
+        "recoverable", "canPause", "canResume", "canRetry", "canCancel",
+        "cacheLeaseBytes", "createdAt", "updatedAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["podcast", "zhihu"] },
+        "revision": { "type": "integer", "minimum": 0 },
+        "lastSequence": { "type": "integer", "minimum": 0 },
+        "lifecycleState": { "enum": ["queued", "starting", "running", "pausing", "paused", "stopping", "terminal"] },
+        "outcome": { "enum": ["none", "success", "partial_success", "failed", "cancelled", "interrupted"] },
+        "requiredAction": { "$ref": "#/$defs/requiredAction" },
+        "progress": { "$ref": "#/$defs/taskProgress" },
+        "errorCode": { "$ref": "#/$defs/taskErrorCodeOrNull" },
+        "errorMessage": { "type": ["string", "null"] },
+        "retryAfterSeconds": { "type": ["integer", "null"], "minimum": 0 },
+        "engineStage": { "type": "string" },
+        "engineStatus": { "type": "string" },
+        "recoverable": { "type": "boolean" },
+        "canPause": { "type": "boolean" },
+        "canResume": { "type": "boolean" },
+        "canRetry": { "type": "boolean" },
+        "canCancel": { "type": "boolean" },
+        "bookId": { "type": ["string", "null"] },
+        "sourceId": { "type": ["string", "null"] },
+        "displayName": { "type": ["string", "null"] },
+        "cacheLeaseBytes": { "type": "integer", "minimum": 0 },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 },
+        "lastHeartbeatAt": { "type": ["string", "null"] },
+        "checkpointAt": { "type": ["string", "null"] }
+      }
+    },
+    "taskProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "percent", "completedUnits", "totalUnits", "label"],
+      "properties": {
+        "mode": { "enum": ["indeterminate", "determinate"] },
+        "percent": { "type": ["number", "null"] },
+        "completedUnits": { "type": ["integer", "null"], "minimum": 0 },
+        "totalUnits": { "type": ["integer", "null"], "minimum": 0 },
+        "label": { "type": ["string", "null"] },
+        "unit": { "type": "string" },
+        "sourceTotalUnits": { "type": "integer", "minimum": 0 },
+        "skippedUnits": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "requiredAction": {
+      "enum": ["none", "login", "captcha", "configure_secret", "free_disk_space", "approve_budget"]
+    },
+    "taskErrorCodeOrNull": {
+      "enum": [
+        "LOGIN_REQUIRED", "CAPTCHA_REQUIRED", "SECRET_MISSING", "INSUFFICIENT_DISK",
+        "BUDGET_CONFIRMATION_REQUIRED", "INPUT_CHANGED", "INPUT_COPY_FAILED",
+        "PIPELINE_INCOMPATIBLE", "MODEL_INCOMPATIBLE", "CONFIG_INCOMPATIBLE",
+        "ENGINE_UNAVAILABLE", "ENGINE_PROTOCOL_MISMATCH", "ENGINE_CRASHED",
+        "UPSTREAM_UNAUTHORIZED", "RATE_LIMITED", "UPSTREAM_TIMEOUT",
+        "UPSTREAM_UNAVAILABLE", "PUBLISH_FAILED", "PUBLISH_RECOVERY_REQUIRED",
+        "MIGRATION_REQUIRED", "CANCELLED_BY_USER", "TRANSCRIPTION_FAILED",
+        "MODEL_LOAD_FAILED", "ENGINE_BUSY", "INVALID_TASK_SPEC",
+        "PATH_OUTSIDE_MANAGED_ROOT", "PROMPT_BUDGET_EXCEEDED", "LOCAL_IO",
+        "LOCAL_NETWORK", "LOCAL_TIMEOUT", "UNKNOWN",
+        null
+      ]
+    }
+  }
+}

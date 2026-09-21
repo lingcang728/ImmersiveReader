@@ -83,6 +83,17 @@ test("long article emphasis never scales the vertical axis or leaves stale anima
   assert.match(activeMethod, /translateY\(0\) scaleX\(1\.01\)/);
 });
 
+test("reader announces readiness so the host re-sends font scale and layout", () => {
+  // The host may post set-font-scale/set-layout-mode before the iframe's
+  // listener is bound; reader-ready lets it re-send instead of losing them.
+  assert.match(appSource, /type:\s*['"]reader-ready['"]/);
+  const bridge = appSource.slice(
+    appSource.indexOf("private bindParentFontScaleBridge"),
+    appSource.indexOf("private handleScrollThrottled"),
+  );
+  assert.match(bridge, /postToParent\(\{ type: 'reader-ready' \}\)/);
+});
+
 test("compiled reader template includes the message bridge after compile-reader", () => {
   assert.ok(fs.existsSync(templatePath), "dist/reader-template.html should exist after compile-reader");
   const compiled = fs.readFileSync(templatePath, "utf-8");

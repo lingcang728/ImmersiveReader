@@ -71,6 +71,10 @@ export interface SearchIndexItem {
   path: string;       // 相对路径
   summary: string;    // 前 150 字摘要
   index: number;      // 原始排序索引
+  // 建索引时一次性小写化，避免每次按键检索对全部条目重复 toLowerCase
+  titleLower: string;
+  pathLower: string;
+  summaryLower: string;
 }
 
 /**
@@ -81,13 +85,17 @@ export function buildSearchIndex(
 ): SearchIndexItem[] {
   return articles.map((art, idx) => {
     const pinyinAbbr = getPinyinAbbr(art.title);
+    const path = art.relativePath || art.frontMatter?.path || art.filename || '';
     return {
       articleId: art.articleId,
       title: art.title,
       pinyinAbbr,
-      path: art.relativePath || art.frontMatter?.path || art.filename || '',
+      path,
       summary: art.summary,
-      index: idx
+      index: idx,
+      titleLower: art.title.toLowerCase(),
+      pathLower: path.toLowerCase(),
+      summaryLower: art.summary.toLowerCase()
     };
   });
 }
@@ -108,10 +116,10 @@ export function searchArticles(
   const summaryMatches: SearchIndexItem[] = [];
 
   for (const item of searchIndex) {
-    const title = item.title.toLowerCase();
+    const title = item.titleLower;
     const pinyin = item.pinyinAbbr;
-    const path = item.path.toLowerCase();
-    const summary = item.summary.toLowerCase();
+    const path = item.pathLower;
+    const summary = item.summaryLower;
 
     if (title.includes(cleanQuery)) {
       titleMatches.push(item);
