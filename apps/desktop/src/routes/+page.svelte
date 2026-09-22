@@ -2782,7 +2782,11 @@
 		};
 
 		const handleKeyup = (e: KeyboardEvent) => {
+			const isVolUp = e.key === "AudioVolumeUp" || e.key === "VolumeUp" || (e as any).keyCode === 24;
+			const isVolDown = e.key === "AudioVolumeDown" || e.key === "VolumeDown" || (e as any).keyCode === 25;
+			const eventKey = isVolUp ? "AudioVolumeUp" : isVolDown ? "AudioVolumeDown" : e.key;
 			chapterNavigationKeyLatch.release(e.key);
+			chapterNavigationKeyLatch.release(eventKey);
 		};
 
 		const handleWindowBlur = () => {
@@ -3020,7 +3024,7 @@
 		const handleDblClick = (e: MouseEvent) => {
 			cancelPendingArticleLinkOpen();
 			// 移动端双击手势专属用于切换专注模式，不误触发段落就地源码编辑
-			if (isMobile) return;
+			if (isMobile || suppressNextDblClick) return;
 			// 双击选词是正常的文本选择手势——非折叠选区说明用户在选择而
 			// 不是想进编辑；此时不动选区、不吞事件，双击只取消链接导航。
 			if (window.getSelection()?.isCollapsed === false) return;
@@ -3222,6 +3226,7 @@
 		// fires continuously, so coalesce to one run per animation frame.
 		let resizeFrame: number | null = null;
 		const handleResize = () => {
+			deviceInfo = detectDevice();
 			if (resizeFrame !== null) return;
 			resizeFrame = requestAnimationFrame(() => {
 				resizeFrame = null;
@@ -5194,7 +5199,11 @@
 			clientHeight: contentEl.clientHeight,
 		});
 		if (resolution.type === "chapter") {
-			navigateBookChapterFromKey(key, resolution.direction, resolution.offsetPx);
+			if (key.startsWith("Touch")) {
+				void navigateBookChapter(resolution.direction, resolution.offsetPx);
+			} else {
+				navigateBookChapterFromKey(key, resolution.direction, resolution.offsetPx);
+			}
 			return;
 		}
 		// Locked behavior: long jumps (e.g. Home/End across a long chapter)
