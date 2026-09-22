@@ -413,4 +413,12 @@ describe('chrome hide timer host pattern', () => {
 		vi.advanceTimersByTime(1000);
 		expect(hideCount).toBe(0);
 	});
+
+	it('recognizes volume buttons as reading activity keys', () => {
+		expect(isReadingActivityKey('AudioVolumeDown')).toBe(true);
+		expect(isReadingActivityKey('AudioVolumeUp')).toBe(true);
+		expect(isReadingActivityKey('VolumeDown')).toBe(true);
+		expect(isReadingActivityKey('VolumeUp')).toBe(true);
+		expect(isReadingActivityKey('A')).toBe(false);
+	});
 });

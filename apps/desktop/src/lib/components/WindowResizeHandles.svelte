@@ -28,6 +28,10 @@
 	let handlesEnabled = true;
 
 	async function refreshHandleState() {
+		if (typeof window !== 'undefined' && (window.innerWidth <= 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0 && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)))) {
+			handlesEnabled = false;
+			return;
+		}
 		try {
 			const win = getCurrentWebviewWindow();
 			const [maximized, fullscreen] = await Promise.all([
@@ -141,5 +145,10 @@
 		width: 8px;
 		height: 8px;
 		cursor: nesw-resize;
+	}
+	@media (max-width: 768px) {
+		.resize-edge {
+			display: none !important;
+		}
 	}
 </style>

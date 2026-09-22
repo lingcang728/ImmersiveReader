@@ -21,7 +21,23 @@ describe("reading keyboard navigation", () => {
 			direction: -1,
 			kind: "page"
 		});
+		expect(readingScrollIntentForKey("AudioVolumeUp")).toEqual({
+			direction: -1,
+			kind: "page"
+		});
+		expect(readingScrollIntentForKey("VolumeUp")).toEqual({
+			direction: -1,
+			kind: "page"
+		});
 		expect(readingScrollIntentForKey("ArrowRight")).toEqual({
+			direction: 1,
+			kind: "page"
+		});
+		expect(readingScrollIntentForKey("AudioVolumeDown")).toEqual({
+			direction: 1,
+			kind: "page"
+		});
+		expect(readingScrollIntentForKey("VolumeDown")).toEqual({
 			direction: 1,
 			kind: "page"
 		});

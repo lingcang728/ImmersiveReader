@@ -54,9 +54,13 @@ export function readingScrollIntentForKey(
 			return { direction: 1, kind: "line" };
 		case "ArrowLeft":
 		case "PageUp":
+		case "AudioVolumeUp":
+		case "VolumeUp":
 			return { direction: -1, kind: "page" };
 		case "ArrowRight":
 		case "PageDown":
+		case "AudioVolumeDown":
+		case "VolumeDown":
 			return { direction: 1, kind: "page" };
 		case " ":
 		case "Spacebar":

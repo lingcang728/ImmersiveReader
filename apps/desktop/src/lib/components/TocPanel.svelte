@@ -370,4 +370,32 @@
 		from { opacity: 0; transform: scale(0.95); }
 		to { opacity: 1; transform: scale(1); }
 	}
+	@keyframes slideUp {
+		from { transform: translateY(100%); }
+		to { transform: translateY(0); }
+	}
+
+	@media (max-width: 768px) {
+		.toc-overlay {
+			padding-top: 0;
+			align-items: flex-end;
+		}
+		.toc-palette {
+			width: 100vw;
+			max-width: 100vw;
+			max-height: 80vh;
+			border-radius: 20px 20px 0 0;
+			animation: slideUp 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+			padding-bottom: max(16px, env(safe-area-inset-bottom));
+		}
+		.toc-input-row {
+			height: 52px;
+			padding: 0 16px;
+		}
+		.toc-item {
+			min-height: 44px;
+			padding: 10px 14px;
+			font-size: 15px;
+		}
+	}
 </style>

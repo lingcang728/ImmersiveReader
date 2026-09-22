@@ -360,16 +360,31 @@
 	}
 
 	@media (max-width: 620px) {
+		.workflow-dialog {
+			width: 100vw;
+			max-width: 100vw;
+			margin: auto 0 0 0;
+			padding: 0;
+			border-radius: 20px 20px 0 0;
+		}
+
+		.workflow-panel {
+			border-radius: 20px 20px 0 0;
+			max-height: 88vh;
+			border-bottom: 0;
+		}
+
 		.workflow-header,
 		.workflow-body,
 		.workflow-footer {
-			padding-left: 16px;
-			padding-right: 16px;
+			padding-left: 18px;
+			padding-right: 18px;
 		}
 
 		.workflow-footer {
 			flex-direction: column;
 			align-items: stretch;
+			padding-bottom: max(18px, env(safe-area-inset-bottom));
 		}
 	}
 

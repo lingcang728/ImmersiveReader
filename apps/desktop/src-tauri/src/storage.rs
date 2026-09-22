@@ -46,7 +46,7 @@ impl StorageLocations {
                 let documents_root = documents.join("沉浸阅读");
                 (
                     "production".to_string(),
-                    roaming.join(r"immersive-reader\settings.json"),
+                    roaming.join("immersive-reader").join("settings.json"),
                     local.join("ImmersiveReader"),
                     documents_root.join("Library"),
                     documents_root.join("Backups"),
@@ -56,10 +56,11 @@ impl StorageLocations {
                 let app_root = local.join("ImmersiveReader-QA").join(run_id);
                 (
                     "qa".to_string(),
-                    app_root.join(r"Settings\settings.json"),
+                    app_root.join("Settings").join("settings.json"),
                     app_root.clone(),
                     documents
-                        .join(r"Codex\ImmersiveReader-QA")
+                        .join("Codex")
+                        .join("ImmersiveReader-QA")
                         .join(run_id)
                         .join("Library"),
                     app_root.join("Backups"),

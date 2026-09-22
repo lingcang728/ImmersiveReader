@@ -205,7 +205,11 @@ export function isReadingActivityKey(key: string): boolean {
 		key === 'PageUp' ||
 		key === 'Home' ||
 		key === 'End' ||
-		key === ' '
+		key === ' ' ||
+		key === 'AudioVolumeDown' ||
+		key === 'AudioVolumeUp' ||
+		key === 'VolumeDown' ||
+		key === 'VolumeUp'
 	);
 }
 

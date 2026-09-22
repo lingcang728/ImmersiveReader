@@ -144,18 +144,38 @@ fn delete_secret(target: &str) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn read_secret(_target: &str) -> Result<Option<Vec<u8>>, String> {
-    Err("Windows Credential Manager is unavailable".to_string())
+fn secret_file_path(target: &str) -> Result<std::path::PathBuf, String> {
+    let locations = crate::storage::StorageLocations::current()?;
+    let safe_name = target.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    Ok(locations.data_root.join("Private").join(format!("{safe_name}.key")))
 }
 
 #[cfg(not(windows))]
-fn write_secret(_target: &str, _value: &[u8]) -> Result<(), String> {
-    Err("Windows Credential Manager is unavailable".to_string())
+fn read_secret(target: &str) -> Result<Option<Vec<u8>>, String> {
+    let path = secret_file_path(target)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("failed to read secret: {err}")),
+    }
 }
 
 #[cfg(not(windows))]
-fn delete_secret(_target: &str) -> Result<(), String> {
-    Err("Windows Credential Manager is unavailable".to_string())
+fn write_secret(target: &str, value: &[u8]) -> Result<(), String> {
+    let path = secret_file_path(target)?;
+    crate::atomic_file::write(&path, value)
+}
+
+#[cfg(not(windows))]
+fn delete_secret(target: &str) -> Result<(), String> {
+    let path = secret_file_path(target)?;
+    if path.is_file() {
+        std::fs::remove_file(&path).map_err(|e| format!("failed to delete secret: {e}"))?;
+    }
+    Ok(())
 }
 
 pub fn deepseek_status(channel: &AppChannel) -> Result<SecretStatus, String> {

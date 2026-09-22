@@ -50,6 +50,7 @@
 		readingFontFamily,
 		autoFocusMode,
 	} from "$lib/stores/app";
+	import { detectDevice, volumeKeyPaging, touchZonesEnabled, type DeviceInfo } from "$lib/platform/device";
 	import { flowThemeVars } from "$lib/theme/themes";
 	import SearchBar from "$lib/components/SearchBar.svelte";
 	import TocPanel from "$lib/components/TocPanel.svelte";
@@ -305,6 +306,166 @@
 	const modLabel = isMac ? '⌘' : 'Ctrl+';
 	function isModKey(e: KeyboardEvent): boolean {
 		return isMac ? e.metaKey : e.ctrlKey;
+	}
+
+	let deviceInfo: DeviceInfo = detectDevice();
+	$: isMobile = deviceInfo.isMobile;
+
+	let mobileHistoryPushed = false;
+	function syncMobileHistory() {
+		if (!isMobile || typeof history === "undefined") return;
+		const hasActiveLayer = Boolean(
+			lightboxSrc ||
+			editingParagraph ||
+			$searchOpen ||
+			$tocOpen ||
+			$settingsOpen ||
+			trashOpen ||
+			podcastWorkflowOpen ||
+			zhihuWorkflowOpen ||
+			selectedBookDetail !== null ||
+			actionConfirm !== null ||
+			navigationGuardOpen ||
+			$focusMode ||
+			flowReaderSession ||
+			$currentFilePath
+		);
+		if (hasActiveLayer && !mobileHistoryPushed) {
+			mobileHistoryPushed = true;
+			try {
+				history.pushState({ mmbookActive: true }, "");
+			} catch {}
+		} else if (!hasActiveLayer && mobileHistoryPushed) {
+			mobileHistoryPushed = false;
+		}
+	}
+
+	$: if (isMobile) {
+		void [
+			lightboxSrc,
+			editingParagraph,
+			$searchOpen,
+			$tocOpen,
+			$settingsOpen,
+			trashOpen,
+			podcastWorkflowOpen,
+			zhihuWorkflowOpen,
+			selectedBookDetail,
+			actionConfirm,
+			navigationGuardOpen,
+			$focusMode,
+			flowReaderSession,
+			$currentFilePath
+		];
+		syncMobileHistory();
+	}
+
+	let touchStartX = 0;
+	let touchStartY = 0;
+	let touchStartTime = 0;
+	let lastTapTime = 0;
+	let suppressNextDblClick = false;
+
+	function toggleChromeForTouch() {
+		if (chromeState.chromeVisible) {
+			dispatchChrome({ type: "apply-hide" });
+		} else {
+			dispatchChrome({ type: "top-edge-enter" });
+		}
+	}
+
+	function handleReaderTouchStart(e: TouchEvent) {
+		if (e.touches.length !== 1) return;
+		touchStartX = e.touches[0].clientX;
+		touchStartY = e.touches[0].clientY;
+		touchStartTime = Date.now();
+	}
+
+	function handleReaderTouchEnd(e: TouchEvent) {
+		if (e.changedTouches.length !== 1) return;
+		const touchEndX = e.changedTouches[0].clientX;
+		const touchEndY = e.changedTouches[0].clientY;
+		const deltaX = touchEndX - touchStartX;
+		const deltaY = touchEndY - touchStartY;
+		const elapsed = Date.now() - touchStartTime;
+
+		// 1. Horizontal swipe gesture for chapter navigation
+		if (Math.abs(deltaX) > 60 && Math.abs(deltaY) < 45 && elapsed < 400) {
+			if (activeBook && !$focusMode) {
+				if (deltaX < 0) {
+					void navigateBookChapter(1);
+					return;
+				} else {
+					void navigateBookChapter(-1);
+					return;
+				}
+			}
+		}
+
+		// 2. Tap gesture (small movement, short duration)
+		if (Math.abs(deltaX) < 14 && Math.abs(deltaY) < 14 && elapsed < 350) {
+			if (typeof window !== "undefined" && window.getSelection()?.toString().trim()) {
+				return;
+			}
+			const target = e.target as HTMLElement | null;
+			if (target && target.closest("button, a, input, [data-no-tap], .mobile-focus-bar, .context-bar")) {
+				return;
+			}
+
+			const now = Date.now();
+			// Double tap to toggle focus mode
+			if (now - lastTapTime < 320) {
+				lastTapTime = 0;
+				if ($currentFilePath && !flowReaderSession) {
+					suppressNextDblClick = true;
+					setTimeout(() => {
+						suppressNextDblClick = false;
+					}, 450);
+					void toggleFocusMode(!$focusMode);
+					return;
+				}
+			}
+			lastTapTime = now;
+
+			// Zone-based touch navigation or sentence selection
+			if ($touchZonesEnabled && typeof window !== "undefined") {
+				const w = window.innerWidth;
+				const tapX = touchEndX;
+				if (tapX < w * 0.25) {
+					// Left 25%: Page Up / Prev Sentence
+					if ($focusMode) {
+						const chDir = moveFocus(-1);
+						if (chDir !== null) void navigateBookChapter(chDir);
+					} else {
+						handleReadingScrollIntent({ direction: -1, kind: "page" }, "TouchLeft");
+					}
+					return;
+				} else if (tapX > w * 0.75) {
+					// Right 25%: Page Down / Next Sentence
+					if ($focusMode) {
+						const chDir = moveFocus(1);
+						if (chDir !== null) void navigateBookChapter(chDir);
+					} else {
+						handleReadingScrollIntent({ direction: 1, kind: "page" }, "TouchRight");
+					}
+					return;
+				} else {
+					// Center 50%: If focus mode, clicking sentence focuses it; else toggle header
+					if ($focusMode && target && focusBlockFromInteraction(target)) {
+						return;
+					}
+					toggleChromeForTouch();
+					return;
+				}
+			} else {
+				// Touch zones disabled: if focus mode, tapping sentence sets focus; else toggle chrome
+				if ($focusMode && target && focusBlockFromInteraction(target)) {
+					return;
+				}
+				toggleChromeForTouch();
+				return;
+			}
+		}
 	}
 
 	$: isLightTheme = $currentTheme.name.toLowerCase().includes('light');
@@ -2160,6 +2321,10 @@
 	}
 
 	function navigateBookChapterFromKey(key: string, direction: -1 | 1, offsetPx = 0) {
+		if (key.startsWith("Touch") || key.startsWith("AudioVolume") || key.startsWith("Volume")) {
+			void navigateBookChapter(direction, offsetPx);
+			return;
+		}
 		if (!chapterNavigationKeyLatch.tryLatch(key)) return;
 		void navigateBookChapter(direction, offsetPx);
 	}
@@ -2503,19 +2668,23 @@
 				noteReadingActivity();
 			}
 
+			const isVolUp = e.key === "AudioVolumeUp" || e.key === "VolumeUp" || (e as any).keyCode === 24;
+			const isVolDown = e.key === "AudioVolumeDown" || e.key === "VolumeDown" || (e as any).keyCode === 25;
+
 			if ($currentFilePath && $focusMode && !e.ctrlKey && !e.metaKey && !e.altKey && !isTextInputTarget(e.target)) {
 				const focusDirection =
-					e.key === "ArrowUp" || e.key === "ArrowLeft"
+					e.key === "ArrowUp" || e.key === "ArrowLeft" || ($volumeKeyPaging && isVolUp)
 						? -1
-						: e.key === "ArrowDown" || e.key === "ArrowRight"
+						: e.key === "ArrowDown" || e.key === "ArrowRight" || ($volumeKeyPaging && isVolDown)
 							? 1
 							: null;
 				if (focusDirection !== null) {
 					e.preventDefault();
-					if (chapterNavigationKeyLatch.isLatched(e.key)) return;
+					const eventKey = isVolUp ? "AudioVolumeUp" : isVolDown ? "AudioVolumeDown" : e.key;
+					if (chapterNavigationKeyLatch.isLatched(eventKey)) return;
 					const chapterDirection = moveFocus(focusDirection);
 					if (chapterDirection !== null) {
-						navigateBookChapterFromKey(e.key, chapterDirection);
+						navigateBookChapterFromKey(eventKey, chapterDirection);
 					}
 					return;
 				}
@@ -2545,12 +2714,17 @@
 				!e.altKey &&
 				!isTextInputTarget(e.target)
 			) {
-				const intent = readingScrollIntentForKey(e.key, e.shiftKey);
-				if (intent) {
-					e.preventDefault();
-					if (chapterNavigationKeyLatch.isLatched(e.key)) return;
-					handleReadingScrollIntent(intent, e.key);
-					return;
+				const eventKey = isVolUp ? "AudioVolumeUp" : isVolDown ? "AudioVolumeDown" : e.key;
+				if ((isVolUp || isVolDown) && !$volumeKeyPaging) {
+					// volume paging disabled in settings
+				} else {
+					const intent = readingScrollIntentForKey(eventKey, e.shiftKey);
+					if (intent) {
+						e.preventDefault();
+						if (chapterNavigationKeyLatch.isLatched(eventKey)) return;
+						handleReadingScrollIntent(intent, eventKey);
+						return;
+					}
 				}
 			}
 
@@ -2845,6 +3019,8 @@
 
 		const handleDblClick = (e: MouseEvent) => {
 			cancelPendingArticleLinkOpen();
+			// 移动端双击手势专属用于切换专注模式，不误触发段落就地源码编辑
+			if (isMobile) return;
 			// 双击选词是正常的文本选择手势——非折叠选区说明用户在选择而
 			// 不是想进编辑；此时不动选区、不吞事件，双击只取消链接导航。
 			if (window.getSelection()?.isCollapsed === false) return;
@@ -3003,6 +3179,45 @@
 		};
 		contentEl?.addEventListener("pointerdown", clearOpenAnchor);
 		contentEl?.addEventListener("touchstart", clearOpenAnchor, { passive: true });
+		contentEl?.addEventListener("touchstart", handleReaderTouchStart, { passive: true });
+		contentEl?.addEventListener("touchend", handleReaderTouchEnd, { passive: true });
+
+		const handlePopState = () => {
+			mobileHistoryPushed = false;
+			if (lightboxSrc) {
+				closeLightbox();
+			} else if (editingParagraph) {
+				cancelEdit();
+			} else if ($searchOpen) {
+				$searchOpen = false;
+				$searchQuery = "";
+				clearSearchHighlights();
+			} else if ($tocOpen) {
+				$tocOpen = false;
+			} else if ($settingsOpen) {
+				$settingsOpen = false;
+			} else if (trashOpen) {
+				trashOpen = false;
+			} else if (podcastWorkflowOpen) {
+				podcastWorkflowOpen = false;
+			} else if (zhihuWorkflowOpen) {
+				zhihuWorkflowOpen = false;
+			} else if (selectedBookDetail !== null) {
+				selectedBookDetail = null;
+			} else if (actionConfirm !== null) {
+				chooseActionConfirm(false);
+			} else if (navigationGuardOpen) {
+				void chooseNavigationGuard("cancel");
+			} else if ($focusMode) {
+				void toggleFocusMode(false);
+			} else if (flowReaderSession) {
+				void closeFlowReader();
+			} else if ($currentFilePath) {
+				void returnToBookshelf();
+			}
+			setTimeout(syncMobileHistory, 60);
+		};
+		window.addEventListener("popstate", handlePopState);
 		// rebuildFocusMetrics is O(units) synchronous layout; a resize drag
 		// fires continuously, so coalesce to one run per animation frame.
 		let resizeFrame: number | null = null;
@@ -3305,6 +3520,9 @@
 			contentEl?.removeEventListener("load", handleContentLoad, true);
 			contentEl?.removeEventListener("pointerdown", clearOpenAnchor);
 			contentEl?.removeEventListener("touchstart", clearOpenAnchor);
+			contentEl?.removeEventListener("touchstart", handleReaderTouchStart);
+			contentEl?.removeEventListener("touchend", handleReaderTouchEnd);
+			window.removeEventListener("popstate", handlePopState);
 			if (contentLoadFrame !== null) {
 				cancelAnimationFrame(contentLoadFrame);
 				contentLoadFrame = null;
@@ -5992,6 +6210,30 @@
 			{/each}
 		</div>
 	{/if}
+
+	<!-- Mobile Focus Mode Navigation HUD (OPPO Find X9 & mobile devices) -->
+	{#if $focusMode && isMobile && $currentFilePath && !flowReaderSession}
+		<div class="mobile-focus-bar" role="toolbar" aria-label="手机专注模式导航">
+			<button class="mobile-focus-btn" on:click={() => moveFocus(-1)} aria-label="上一句">
+				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="m18 15-6-6-6 6"/>
+				</svg>
+				<span>上一句</span>
+			</button>
+			<div class="mobile-focus-counter" aria-live="polite">
+				{lastFocusedIdx >= 0 ? lastFocusedIdx + 1 : 1} / {focusUnits.length || 1}
+			</div>
+			<button class="mobile-focus-btn" on:click={() => moveFocus(1)} aria-label="下一句">
+				<span>下一句</span>
+				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="m6 9 6 6 6-6"/>
+				</svg>
+			</button>
+			<button class="mobile-focus-btn mobile-focus-exit" on:click={() => void toggleFocusMode(false)} aria-label="退出专注模式">
+				退出
+			</button>
+		</div>
+	{/if}
 </div>
 
 <style>
@@ -7241,6 +7483,113 @@
 		:global(.editing) {
 			animation: none;
 			box-shadow: 0 0 0 1.5px var(--selection);
+		}
+	}
+
+	/* ===== Mobile Adaptation (e.g. OPPO Find X9 & iOS/Android devices) ===== */
+	@media (max-width: 768px) {
+		.app {
+			padding-top: env(safe-area-inset-top, 0px);
+			padding-bottom: env(safe-area-inset-bottom, 0px);
+			padding-left: env(safe-area-inset-left, 0px);
+			padding-right: env(safe-area-inset-right, 0px);
+		}
+
+		.context-bar {
+			padding-left: max(14px, env(safe-area-inset-left, 0px));
+			padding-right: max(14px, env(safe-area-inset-right, 0px));
+			height: 48px;
+		}
+
+		.topbar-left .filename {
+			max-width: 150px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+			font-size: 13.5px;
+		}
+
+		.article {
+			--article-padding-x: max(16px, env(safe-area-inset-left, 0px));
+			--article-padding-top: calc(16px + env(safe-area-inset-top, 0px));
+			--article-padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+			max-width: 100% !important;
+			padding-left: var(--article-padding-x);
+			padding-right: var(--article-padding-x);
+			padding-top: var(--article-padding-top);
+			padding-bottom: var(--article-padding-bottom);
+		}
+
+		:global(.article pre),
+		:global(.article table),
+		:global(.article .mermaid) {
+			max-width: 100%;
+			overflow-x: auto;
+			-webkit-overflow-scrolling: touch;
+		}
+
+		.icon-btn {
+			width: 38px;
+			height: 38px;
+			padding: 8px;
+		}
+
+		.status-line-pill {
+			bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+			font-size: 11.5px;
+			padding: 4px 12px;
+		}
+
+		.mobile-focus-bar {
+			position: fixed;
+			bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+			left: 50%;
+			transform: translateX(-50%);
+			z-index: 95;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 14px;
+			border-radius: 999px;
+			background: color-mix(in srgb, var(--bg-secondary) 90%, transparent);
+			backdrop-filter: blur(16px);
+			-webkit-backdrop-filter: blur(16px);
+			border: 1px solid var(--hr);
+			box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28);
+			animation: fadeIn 0.2s ease;
+		}
+
+		.mobile-focus-btn {
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			border: none;
+			background: transparent;
+			color: var(--text);
+			font-size: 13px;
+			font-weight: 500;
+			padding: 6px 10px;
+			border-radius: 999px;
+			cursor: pointer;
+			touch-action: manipulation;
+		}
+
+		.mobile-focus-btn:active {
+			background: color-mix(in srgb, var(--text) 14%, transparent);
+		}
+
+		.mobile-focus-counter {
+			font-size: 12px;
+			color: var(--text-secondary);
+			padding: 0 6px;
+			font-variant-numeric: tabular-nums;
+			font-weight: 500;
+		}
+
+		.mobile-focus-exit {
+			color: var(--danger);
+			font-size: 12px;
+			margin-left: 4px;
 		}
 	}
 </style>

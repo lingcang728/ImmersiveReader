@@ -15,6 +15,7 @@
 		READING_LINE_HEIGHTS,
 		READING_WIDTHS,
 	} from "$lib/stores/app";
+	import { volumeKeyPaging, touchZonesEnabled } from "$lib/platform/device";
 	import { getThemePairs } from "$lib/theme/themes";
 	import { checkForDesktopUpdate, downloadAndInstallDesktopUpdate, updateState } from "$lib/update/service";
 	import WorkflowDialogShell from "./WorkflowDialogShell.svelte";
@@ -574,6 +575,30 @@
 							aria-label="打开文章后自动进入沉浸模式"
 							checked={$autoFocusMode}
 							on:change={() => ($autoFocusMode = !$autoFocusMode)}
+						/>
+						<span class="toggle-slider" aria-hidden="true"></span>
+					</label>
+				</div>
+				<div class="typo-row">
+					<span class="typo-label">音量键翻页</span>
+					<label class="toggle-switch" title="使用手机上下音量键翻页或切换专注句子">
+						<input
+							type="checkbox"
+							aria-label="使用手机上下音量键翻页或切换专注句子"
+							checked={$volumeKeyPaging}
+							on:change={() => ($volumeKeyPaging = !$volumeKeyPaging)}
+						/>
+						<span class="toggle-slider" aria-hidden="true"></span>
+					</label>
+				</div>
+				<div class="typo-row">
+					<span class="typo-label">触控区域翻页</span>
+					<label class="toggle-switch" title="点击屏幕左右侧翻页，中央点击唤出控制栏">
+						<input
+							type="checkbox"
+							aria-label="点击屏幕左右侧翻页，中央点击唤出控制栏"
+							checked={$touchZonesEnabled}
+							on:change={() => ($touchZonesEnabled = !$touchZonesEnabled)}
 						/>
 						<span class="toggle-slider" aria-hidden="true"></span>
 					</label>
