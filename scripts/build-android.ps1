@@ -205,15 +205,19 @@ try {
         if (Test-Path -LiteralPath $apkSearchPath) {
             $apks = Get-ChildItem -Path $apkSearchPath -Filter '*.apk' -Recurse
             $mobileOut = Join-Path $repoRoot 'output\mobile'
+            $appVersion = (Get-Content -LiteralPath (Join-Path $desktopDir 'package.json') -Raw | ConvertFrom-Json).version
             New-Item -ItemType Directory -Force -Path $mobileOut | Out-Null
             foreach ($apk in $apks) {
                 $hash = (Get-FileHash -LiteralPath $apk.FullName -Algorithm SHA256).Hash
                 $sizeMb = [math]::Round($apk.Length / 1MB, 2)
+                # app-<abi>-<type>.apk -> ImmersiveReader_<ver>_android-<abi>-<type>.apk
+                $suffix = $apk.BaseName -replace '^app-', ''
+                $targetName = "ImmersiveReader_${appVersion}_android-${suffix}.apk"
                 Write-Host "产物文件: $($apk.FullName)" -ForegroundColor Yellow
                 Write-Host "文件大小: $sizeMb MB" -ForegroundColor Yellow
                 Write-Host "SHA-256:  $hash" -ForegroundColor Yellow
-                Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $mobileOut $apk.Name) -Force
-                Write-Host "已收纳到: $(Join-Path $mobileOut $apk.Name)" -ForegroundColor Green
+                Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $mobileOut $targetName) -Force
+                Write-Host "已收纳到: $(Join-Path $mobileOut $targetName)" -ForegroundColor Green
             }
         }
     } else {
