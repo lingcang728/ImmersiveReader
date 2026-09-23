@@ -7,6 +7,79 @@ mod path_guard;
 pub(crate) use path_guard::path_within;
 pub use path_guard::validate_library_root;
 
+/// Android has no `dirs` backend — `dirs::data_dir`/`document_dir` all return
+/// `None` there (`dirs-sys` `home_dir()` has no fallback without `$HOME`), so
+/// every storage root derives from the app-private directories exposed by
+/// Tauri's built-in mobile path plugin instead. The plugin needs a live
+/// `AppHandle`, so the roots are captured once during `Builder::setup` into
+/// this `OnceLock`; `StorageLocations::current()` then stays synchronous.
+#[cfg(target_os = "android")]
+mod android_roots {
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    #[derive(Clone, Debug)]
+    pub(crate) struct AndroidBaseDirs {
+        /// `app_data_dir()` → `Context.getDataDir()` — the app-private data
+        /// root. Feeds `resolve_for`'s `roaming` slot (settings.json parent).
+        pub(crate) app_data: PathBuf,
+        /// `app_local_data_dir()` → also `getDataDir()` on Android. Feeds the
+        /// `local` slot (`Data`/`Cache`/`Logs`/`RuntimeState` live under it).
+        pub(crate) app_local_data: PathBuf,
+        /// `document_dir()` → `getExternalFilesDir(DIRECTORY_DOCUMENTS)`,
+        /// which returns `null` when shared storage is unavailable — falls
+        /// back to `app_data` so the Library always lands somewhere writable.
+        pub(crate) documents: PathBuf,
+        /// Lazy placeholder under the private cache dir. The managed
+        /// Zhihu/Podcast runtimes never ship to Android, so tool readiness
+        /// probes report "error" here instead of crashing on a bogus path.
+        pub(crate) runtime: PathBuf,
+    }
+
+    static ANDROID_BASE: OnceLock<AndroidBaseDirs> = OnceLock::new();
+
+    /// Must be the first call inside `Builder::setup` — every subsequent
+    /// `StorageLocations::current()` depends on it. Fails loudly: without
+    /// these roots the app cannot read settings, state, or its database.
+    pub(crate) fn init_android_roots(app: &tauri::AppHandle) -> Result<(), String> {
+        use tauri::Manager;
+
+        let resolver = app.path();
+        let app_data = resolver
+            .app_data_dir()
+            .map_err(|error| format!("Android app data directory is unavailable: {error}"))?;
+        let app_local_data = resolver
+            .app_local_data_dir()
+            .unwrap_or_else(|_| app_data.clone());
+        let app_cache = resolver
+            .app_cache_dir()
+            .map_err(|error| format!("Android app cache directory is unavailable: {error}"))?;
+        let documents = resolver
+            .document_dir()
+            .unwrap_or_else(|_| app_data.join("Documents"));
+        let runtime = app_cache.join("runtime");
+        ANDROID_BASE
+            .set(AndroidBaseDirs {
+                app_data,
+                app_local_data,
+                documents,
+                runtime,
+            })
+            .map_err(|_| "Android storage roots were already initialized".to_string())
+    }
+
+    /// Errors before `init_android_roots` completes — callers must surface the
+    /// failure, never fall back to `dirs` or the process CWD.
+    pub(crate) fn android_base_dirs() -> Result<&'static AndroidBaseDirs, String> {
+        ANDROID_BASE
+            .get()
+            .ok_or_else(|| "Android storage roots were not initialized".to_string())
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) use android_roots::{android_base_dirs, init_android_roots};
+
 /// User-facing acquisition hint for the managed runtime bundle. The NSIS
 /// installer ships only the application; the multi-gigabyte runtime is a
 /// separate GitHub Release asset (`runtime-bundle.zip.*` volumes) that must
@@ -82,32 +155,56 @@ impl StorageLocations {
     }
 
     pub fn current() -> Result<Self, String> {
-        let roaming =
-            dirs::data_dir().ok_or_else(|| "Roaming AppData is unavailable".to_string())?;
-        let local =
-            dirs::data_local_dir().ok_or_else(|| "Local AppData is unavailable".to_string())?;
-        let documents = dirs::document_dir()
-            .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
-            .ok_or_else(|| "Documents directory is unavailable".to_string())?;
-        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let qa_run_id = std::env::var("IMMERSIVE_QA_RUN_ID").ok();
         let channel = AppChannel::detect(qa_run_id.as_deref())?;
-        let runtime_root = if let Some(configured) = std::env::var_os("IMMERSIVE_RUNTIME_ROOT") {
-            PathBuf::from(configured)
-        } else {
-            executable
-                .parent()
-                .ok_or_else(|| "Application directory is unavailable".to_string())?
-                .join("runtime")
-        };
 
-        Ok(Self::resolve_for(
-            &channel,
-            &roaming,
-            &local,
-            &documents,
-            &runtime_root,
-        ))
+        #[cfg(target_os = "android")]
+        {
+            // `dirs` returns no usable directories on Android; the roots were
+            // captured from the mobile path plugin during setup. Before that
+            // (e.g. the pre-setup `app_log` call) this errors — callers such as
+            // `app_log` already fail silently, so no panic path is introduced.
+            let base = android_base_dirs()?;
+            let runtime_root = std::env::var_os("IMMERSIVE_RUNTIME_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| base.runtime.clone());
+            Ok(Self::resolve_for(
+                &channel,
+                &base.app_data,
+                &base.app_local_data,
+                &base.documents,
+                &runtime_root,
+            ))
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let roaming =
+                dirs::data_dir().ok_or_else(|| "Roaming AppData is unavailable".to_string())?;
+            let local =
+                dirs::data_local_dir().ok_or_else(|| "Local AppData is unavailable".to_string())?;
+            let documents = dirs::document_dir()
+                .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
+                .ok_or_else(|| "Documents directory is unavailable".to_string())?;
+            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+            let runtime_root = if let Some(configured) = std::env::var_os("IMMERSIVE_RUNTIME_ROOT")
+            {
+                PathBuf::from(configured)
+            } else {
+                executable
+                    .parent()
+                    .ok_or_else(|| "Application directory is unavailable".to_string())?
+                    .join("runtime")
+            };
+
+            Ok(Self::resolve_for(
+                &channel,
+                &roaming,
+                &local,
+                &documents,
+                &runtime_root,
+            ))
+        }
     }
 
     /// Default storage roots plus the user-configured Library path from settings.

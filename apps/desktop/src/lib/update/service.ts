@@ -1,5 +1,6 @@
 import { writable } from "svelte/store";
 import { describeError } from "$lib/errors";
+import { detectDevice } from "$lib/platform/device";
 
 export type UpdateStatus = "idle" | "checking" | "available" | "downloading" | "installing" | "failed" | "upToDate";
 
@@ -83,6 +84,12 @@ export function checkForDesktopUpdate(manual = false): Promise<void> {
 
 async function doCheckForDesktopUpdate(manual: boolean): Promise<void> {
 	if (!isTauriRuntime()) return;
+	// The updater plugin is desktop-only — on Android/iOS there is no updater
+	// backend to call, so stay in the harmless idle state instead of failing.
+	if (detectDevice().isMobile) {
+		patch({ status: "idle", error: "" });
+		return;
+	}
 	patch({ status: "checking", error: "" });
 	try {
 		await loadCurrentVersion();

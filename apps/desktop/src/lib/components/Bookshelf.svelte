@@ -2,6 +2,7 @@
 	import { tick } from 'svelte';
 	import { findChapterIndexById, type BookDetail, type BookSummary, type LibraryIssue, type TemporaryItem } from '$lib/library/books';
 	import type { TaskEvent, TaskSnapshot } from '$lib/tasks/sync';
+	import { detectDevice } from '$lib/platform/device';
 	import TaskQueue from './TaskQueue.svelte';
 	import './bookshelf.css';
 
@@ -40,6 +41,11 @@
 	export let onOpenSettings: () => void;
 	export let onRemoveBook: (bookId: string, title: string, chapterCount: number) => void;
 	export let onDeleteBook: (bookId: string, title: string, chapterCount: number) => void;
+
+	// Zhihu archival / podcast transcription run as managed Node/Python
+	// sidecars — desktop-only. Folder picking is also unsupported by the
+	// Android dialog plugin, so those affordances are hidden on mobile.
+	const isMobile = typeof window !== 'undefined' ? detectDevice().isMobile : false;
 
 	let query = '';
 	let acquireOpen = false;
@@ -319,27 +325,31 @@
 				</button>
 				{#if acquireOpen}
 					<div class="acquire-menu" role="menu" tabindex="-1" aria-label="获取内容" on:keydown={menuKeydown}>
-						<button
-							type="button"
-							role="menuitem"
-							on:click={() => runAcquire(onOpenZhihuWorkflow)}
-						>
-							归档知乎
-						</button>
-						<button
-							type="button"
-							role="menuitem"
-							on:click={() => runAcquire(onOpenPodcastWorkflow)}
-						>
-							转写播客
-						</button>
+						{#if !isMobile}
+							<button
+								type="button"
+								role="menuitem"
+								on:click={() => runAcquire(onOpenZhihuWorkflow)}
+							>
+								归档知乎
+							</button>
+							<button
+								type="button"
+								role="menuitem"
+								on:click={() => runAcquire(onOpenPodcastWorkflow)}
+							>
+								转写播客
+							</button>
+						{/if}
 						<button type="button" role="menuitem" on:click={() => runAcquire(onImport)}>
-							导入文件夹
+							{isMobile ? '导入文件' : '导入文件夹'}
 						</button>
 						<button type="button" role="menuitem" on:click={() => runAcquire(onOpenFile)}>
 							临时打开
 						</button>
-						<div class="menu-hint" role="presentation">播客可在这里预检、确认预算并加入统一任务队列。</div>
+						{#if !isMobile}
+							<div class="menu-hint" role="presentation">播客可在这里预检、确认预算并加入统一任务队列。</div>
+						{/if}
 					</div>
 				{/if}
 			</div>
@@ -361,7 +371,9 @@
 		{#if !writable}
 			<div class="state-banner error" role="alert">
 				<span>书库不可写。请选择可写目录：{libraryRoot}</span>
-				<button class="recover-action" on:click={onChooseLibrary}>选择书库</button>
+				{#if !isMobile}
+					<button class="recover-action" on:click={onChooseLibrary}>选择书库</button>
+				{/if}
 			</div>
 		{/if}
 		{#if issues.length > 0}
@@ -414,12 +426,19 @@
 		{:else}
 			<div class="empty-state">
 				<h2>书架还是空的</h2>
-				<p>导入一个 Markdown 文件夹，或从知乎归档内容开始。</p>
-				<div>
-					<button class="btn-resume" on:click={onImport}>导入书库</button>
-					<button class="quiet-action" on:click={onOpenZhihuWorkflow}>归档知乎</button>
-					<button class="quiet-action" on:click={onOpenPodcastWorkflow}>转写播客</button>
-				</div>
+				{#if isMobile}
+					<p>导入 Markdown 文件，开始阅读。</p>
+					<div>
+						<button class="btn-resume" on:click={onImport}>导入文件</button>
+					</div>
+				{:else}
+					<p>导入一个 Markdown 文件夹，或从知乎归档内容开始。</p>
+					<div>
+						<button class="btn-resume" on:click={onImport}>导入书库</button>
+						<button class="quiet-action" on:click={onOpenZhihuWorkflow}>归档知乎</button>
+						<button class="quiet-action" on:click={onOpenPodcastWorkflow}>转写播客</button>
+					</div>
+				{/if}
 			</div>
 		{/if}
 

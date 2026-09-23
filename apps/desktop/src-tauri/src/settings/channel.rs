@@ -55,9 +55,14 @@ impl AppChannel {
 
     pub fn default_library(&self, documents: &Path) -> PathBuf {
         match self {
-            Self::Production => documents.join(r"沉浸阅读\Library"),
+            // Component-wise joins, not `沉浸阅读\Library` — a backslash is a
+            // literal filename character on Android, not a separator, so the
+            // one-string form would mint a flat directory that never matches
+            // `resolve_for`'s nested library_root.
+            Self::Production => documents.join("沉浸阅读").join("Library"),
             Self::Qa(run_id) => documents
-                .join(r"Codex\ImmersiveReader-QA")
+                .join("Codex")
+                .join("ImmersiveReader-QA")
                 .join(run_id)
                 .join("Library"),
         }

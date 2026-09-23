@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { themes, applyTheme, type Theme } from '$lib/theme/themes';
 
 export const currentFilePath = writable<string | null>(null);
@@ -7,28 +7,111 @@ export const renderedHtml = writable<string>('');
 export const isLoading = writable<boolean>(false);
 
 // Theme
+const THEME_STORAGE_KEY = 'mmbook-theme';
+
 let savedTheme: string | null = null;
 try {
-	savedTheme = typeof localStorage !== 'undefined' ? localStorage.getItem('mmbook-theme') : null;
+	savedTheme =
+		typeof localStorage !== 'undefined' ? localStorage.getItem(THEME_STORAGE_KEY) : null;
 } catch {
 	// localStorage may be disabled or quota exceeded
 }
-const defaultTheme = savedTheme
-	? themes.find((t) => t.name === savedTheme) || themes[0]
-	: themes[0];
+
+/** Same-family (identical label) variant of `theme` in the requested scheme. */
+export function themeForScheme(theme: Theme, scheme: 'light' | 'dark'): Theme {
+	return themes.find((t) => t.label === theme.label && t.scheme === scheme) ?? theme;
+}
+
+function systemPrefersDark(): boolean {
+	try {
+		return (
+			typeof window !== 'undefined' &&
+			typeof window.matchMedia === 'function' &&
+			window.matchMedia('(prefers-color-scheme: dark)').matches
+		);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Boot theme: a valid stored choice wins; otherwise follow the OS
+ * prefers-color-scheme within the default 素纸 family.
+ */
+export function resolveInitialTheme(savedName: string | null, prefersDark: boolean): Theme {
+	const saved = savedName ? themes.find((t) => t.name === savedName) : undefined;
+	return saved ?? themeForScheme(themes[0], prefersDark ? 'dark' : 'light');
+}
+
+// Only a stored value that names a real theme counts as an explicit user choice.
+const hasSavedTheme = savedTheme !== null && themes.some((t) => t.name === savedTheme);
+const defaultTheme = resolveInitialTheme(savedTheme, systemPrefersDark());
 
 export const currentTheme = writable<Theme>(defaultTheme);
 
+// While set, the next store emission must NOT be written to localStorage.
+// It covers the system-derived initial value and every OS-driven switch via
+// applySystemTheme — persisting those would masquerade as an explicit user
+// choice and permanently stop the theme from following prefers-color-scheme.
+let themePersistSuspended = !hasSavedTheme;
+
 currentTheme.subscribe((theme) => {
-	if (typeof document !== 'undefined') {
-		applyTheme(theme);
-		try {
-			localStorage.setItem('mmbook-theme', theme.name);
-		} catch {
-			// localStorage may be disabled or quota exceeded — silently skip
-		}
+	const suspended = themePersistSuspended;
+	themePersistSuspended = false;
+	if (typeof document === 'undefined') return;
+	applyTheme(theme);
+	if (suspended) return;
+	try {
+		localStorage.setItem(THEME_STORAGE_KEY, theme.name);
+	} catch {
+		// localStorage may be disabled or quota exceeded — silently skip
 	}
 });
+
+/**
+ * Apply a system-driven scheme switch. Goes through the store so all
+ * subscribers see the new theme, but the write is flagged non-persisting:
+ * 'mmbook-theme' stays absent and the app keeps following the OS scheme.
+ */
+export function applySystemTheme(theme: Theme): void {
+	themePersistSuspended = true;
+	currentTheme.set(theme);
+}
+
+// Follow prefers-color-scheme changes only while the user has no explicit
+// stored choice; once 'mmbook-theme' holds a valid theme name the listener
+// leaves the store alone. SSR/test builds without matchMedia keep the
+// static default.
+try {
+	if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+		const schemeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+		const onSchemeChange = (event: MediaQueryListEvent) => {
+			let stored: string | null = null;
+			try {
+				stored = localStorage.getItem(THEME_STORAGE_KEY);
+			} catch {
+				return; // cannot tell whether the user chose — do not fight them
+			}
+			if (stored !== null && themes.some((t) => t.name === stored)) return;
+			const current = get(currentTheme);
+			const next = themeForScheme(current, event.matches ? 'dark' : 'light');
+			if (next !== current) applySystemTheme(next);
+		};
+		if (typeof schemeMedia.addEventListener === 'function') {
+			schemeMedia.addEventListener('change', onSchemeChange);
+		} else {
+			// Legacy Safari (<14): MediaQueryList.addListener passes the list
+			// itself, which also exposes .matches.
+			(
+				schemeMedia as unknown as {
+					addListener?: (listener: (event: MediaQueryListEvent) => void) => void;
+				}
+			).addListener?.(onSchemeChange);
+		}
+	}
+} catch {
+	// matchMedia unavailable — keep the static default
+}
 
 // Font scale (reader zoom). Clamped, persisted, applied as a CSS variable so
 // focus mode can derive its own capped enlargement from the same value.

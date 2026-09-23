@@ -15,12 +15,14 @@
 		READING_LINE_HEIGHTS,
 		READING_WIDTHS,
 	} from "$lib/stores/app";
-	import { volumeKeyPaging, touchZonesEnabled } from "$lib/platform/device";
+	import { volumeKeyPaging, touchZonesEnabled, detectDevice } from "$lib/platform/device";
 	import { getThemePairs } from "$lib/theme/themes";
 	import { checkForDesktopUpdate, downloadAndInstallDesktopUpdate, updateState } from "$lib/update/service";
 	import WorkflowDialogShell from "./WorkflowDialogShell.svelte";
 
 	const themePairs = getThemePairs();
+	// 快照即可：设备形态在会话内不变（与 WindowChrome 同一写法）。
+	const isMobile = typeof window !== "undefined" ? detectDevice().isMobile : false;
 
 	type StorageLocations = {
 		channel: string;
@@ -605,8 +607,9 @@
 				</div>
 			</div>
 
-			<div class="settings-title section-title">软件更新</div>
-			<div class="update-card">
+			{#if !isMobile}
+				<div class="settings-title section-title">软件更新</div>
+				<div class="update-card">
 				<div class="update-head">
 					<div>
 						<strong>{updateStatusLabel}</strong>
@@ -638,7 +641,8 @@
 						<button type="button" class="action-btn update-primary" disabled={updateBusy} on:click={() => void installUpdate()}>确认安装</button>
 					</div>
 				{/if}
-			</div>
+				</div>
+			{/if}
 
 			<div class="settings-title section-title">AI 服务与书库</div>
 			<div class="credential-row">
@@ -1161,8 +1165,158 @@
 		outline-offset: 2px;
 	}
 
+	/* —— 移动端：设置面板全屏化，像原生设置页 —— */
+	/* dialog 走 showModal 进 top layer，但 DOM 上仍是 .app.is-mobile 的后代。 */
+	:global(.is-mobile) .settings-dialog {
+		width: 100vw;
+		max-width: 100vw;
+		height: 100vh;
+		height: 100dvh;
+		max-height: 100vh;
+		max-height: 100dvh;
+		margin: 0;
+		animation: settingsSlideUp 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+	}
+	:global(.is-mobile) .settings-dialog::backdrop {
+		background: rgba(0, 0, 0, 0.3);
+	}
+	:global(.is-mobile) .settings-panel {
+		height: 100%;
+		max-height: none;
+		border: 0;
+		border-radius: 0;
+		box-shadow: none;
+		padding:
+			0
+			max(16px, env(safe-area-inset-right, 0px))
+			calc(18px + env(safe-area-inset-bottom, 0px))
+			max(16px, env(safe-area-inset-left, 0px));
+	}
+	/* header 吸顶；顶部 safe-area 内边距放进 header 自身，滚动内容从其下方经过。 */
+	:global(.is-mobile) .settings-header {
+		position: sticky;
+		top: 0;
+		z-index: 2;
+		align-items: center;
+		margin-bottom: 12px;
+		padding-top: calc(12px + env(safe-area-inset-top, 0px));
+		padding-bottom: 10px;
+		background: var(--bg);
+		border-bottom: 1px solid var(--hr);
+	}
+	:global(.is-mobile) .close-btn {
+		min-width: 44px;
+		min-height: 44px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		margin: -6px -10px 0 0;
+	}
+	:global(.is-mobile) .settings-title {
+		font-size: 15px;
+	}
+	:global(.is-mobile) .nested-title,
+	:global(.is-mobile) .settings-subtitle,
+	:global(.is-mobile) .status-line,
+	:global(.is-mobile) .notice,
+	:global(.is-mobile) .credential-row,
+	:global(.is-mobile) .status-card,
+	:global(.is-mobile) .backup-row,
+	:global(.is-mobile) .path-row {
+		font-size: 13px;
+	}
+	:global(.is-mobile) .section-title {
+		margin-top: 26px;
+	}
+	:global(.is-mobile) .theme-grid {
+		gap: 10px;
+	}
+	:global(.is-mobile) .theme-option {
+		padding: 12px;
+		gap: 8px;
+	}
+	:global(.is-mobile) .theme-option span {
+		font-size: 13px;
+	}
+	:global(.is-mobile) .theme-preview {
+		height: 52px;
+		font-size: 18px;
+	}
+	:global(.is-mobile) .typo-rows {
+		gap: 6px;
+	}
+	:global(.is-mobile) .typo-row {
+		min-height: 46px;
+	}
+	:global(.is-mobile) .typo-label {
+		font-size: 14px;
+	}
+	:global(.is-mobile) .typo-options {
+		gap: 8px;
+	}
+	:global(.is-mobile) .typo-btn {
+		height: 40px;
+		min-width: 52px;
+		padding: 0 12px;
+		font-size: 14px;
+	}
+	:global(.is-mobile) .typo-value {
+		min-width: 52px;
+		font-size: 14px;
+	}
+	:global(.is-mobile) .toggle-switch {
+		width: 50px;
+		height: 30px;
+	}
+	:global(.is-mobile) .toggle-slider::before {
+		width: 26px;
+		height: 26px;
+	}
+	:global(.is-mobile) .toggle-switch input:checked + .toggle-slider::before {
+		transform: translateX(20px);
+	}
+	:global(.is-mobile) .mini-btn,
+	:global(.is-mobile) .action-btn {
+		min-height: 38px;
+		padding: 8px 14px;
+		font-size: 13px;
+	}
+	:global(.is-mobile) .action-grid {
+		gap: 10px;
+	}
+	:global(.is-mobile) .advanced-toggle {
+		min-height: 46px;
+		padding: 12px;
+		font-size: 13px;
+	}
+	:global(.is-mobile) .credential-form input {
+		min-height: 42px;
+		padding: 9px 12px;
+		font-size: 14px;
+	}
+	:global(.is-mobile) .status-card {
+		padding: 10px 12px;
+	}
+	/* 窄屏：路径行的标签独占一行，路径值与操作按钮折到下一行。 */
+	:global(.is-mobile) .path-row {
+		grid-template-columns: minmax(0, 1fr) auto;
+		row-gap: 6px;
+	}
+	:global(.is-mobile) .path-row > span:first-child {
+		grid-column: 1 / -1;
+		font-weight: 600;
+		color: var(--text);
+	}
+	:global(.is-mobile) .path-actions .mini-btn {
+		min-width: 56px;
+	}
+
 	@keyframes fadeIn {
 		from { opacity: 0; }
 		to { opacity: 1; }
+	}
+	@keyframes settingsSlideUp {
+		from { transform: translateY(100%); }
+		to { transform: translateY(0); }
 	}
 </style>

@@ -5,6 +5,8 @@
 	import { stableRequestId } from "$lib/requestId";
 	import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 	import { open } from "@tauri-apps/plugin-dialog";
+	import { mkdir, readFile, remove, writeFile } from "@tauri-apps/plugin-fs";
+	import { appCacheDir, join } from "@tauri-apps/api/path";
 	import { openUrl } from "@tauri-apps/plugin-opener";
 	import { checkForDesktopUpdate } from "$lib/update/service";
 	import { describeError, reportError } from "$lib/errors";
@@ -1838,6 +1840,12 @@
 
 	async function importFolderToLibrary() {
 		if (importFolderBusy) return;
+		// Android: the dialog plugin has no folder picker — fall back to a
+		// multi-file pick and stage the content:// URIs into the app cache.
+		if (isMobile) {
+			await importPickedFilesToLibrary();
+			return;
+		}
 		const selected = await open({ directory: true, multiple: false, title: "选择 Markdown 文件夹" });
 		if (!selected || Array.isArray(selected)) return;
 		importFolderBusy = true;
@@ -1851,6 +1859,94 @@
 		} finally {
 			importFolderBusy = false;
 		}
+	}
+
+	// Mobile import path: SAF file picking returns content:// URIs that
+	// std::fs cannot read, so each pick is copied into the app cache as a
+	// real file and the existing folder importer runs on the staging dir
+	// (whose name becomes the book title).
+	async function importPickedFilesToLibrary() {
+		// The picker Activity can fail to launch at all (no file manager) —
+		// cancellation resolves null, but a launch failure rejects.
+		const selected = await open({
+			multiple: true,
+			title: "选择要导入的 Markdown 文件",
+			filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+		}).catch((error) => {
+			noticeError("无法打开文件选择器", error);
+			return null;
+		});
+		const uris = (Array.isArray(selected) ? selected : selected ? [selected] : []).filter(
+			(uri): uri is string => typeof uri === "string" && uri.length > 0,
+		);
+		if (uris.length === 0) return;
+		importFolderBusy = true;
+		showAppNotice("正在导入所选文件…");
+		let stagingRoot: string | null = null;
+		try {
+			stagingRoot = await join(await appCacheDir(), `mobile-import-${Date.now()}`);
+			const stagingDir = await join(stagingRoot, "导入文集");
+			await mkdir(stagingDir, { recursive: true });
+			const usedNames = new Set<string>();
+			let staged = 0;
+			let skipped = 0;
+			for (const [index, uri] of uris.entries()) {
+				try {
+					// readFile keeps the raw bytes — GB18030-encoded sources would
+					// be corrupted by a text-mode read; the importer decodes itself.
+					const bytes = await readFile(uri);
+					const name = await mobileStagingFileName(uri, index, usedNames);
+					await writeFile(await join(stagingDir, name), bytes);
+					staged += 1;
+				} catch (error) {
+					console.warn("跳过无法读取的所选文件:", uri, error);
+					skipped += 1;
+				}
+			}
+			if (staged === 0) {
+				showAppNotice("所选文件都无法读取，未导入任何内容");
+				return;
+			}
+			const manifest = await invoke<{ bookId: string }>("import_markdown_folder", { path: stagingDir });
+			await refreshLibrary();
+			if (skipped > 0) {
+				showAppNotice(`已导入，${skipped} 个文件无法读取被跳过`);
+			}
+			await openLibraryBook(manifest.bookId);
+		} catch (error) {
+			noticeError("导入失败", error);
+		} finally {
+			importFolderBusy = false;
+			// The staging dir is single-use; a failed sweep just leaves
+			// reclaimable cache files behind.
+			if (stagingRoot) void remove(stagingRoot, { recursive: true }).catch(() => {});
+		}
+	}
+
+	// SAF display names are free-form: take the last path segment, drop
+	// leading dots (dot-prefixed files are invisible to the importer), and
+	// force a Markdown extension — `.txt` picks import as `.md` chapters.
+	async function mobileStagingFileName(uri: string, index: number, usedNames: Set<string>): Promise<string> {
+		let displayName = "";
+		try {
+			displayName = (await invoke<string>("file_name_for_uri", { uri })) ?? "";
+		} catch {
+			displayName = "";
+		}
+		let name = (displayName.split(/[\\/]/).pop() ?? "").trim().replace(/^\.+/, "");
+		if (!/\.(md|markdown)$/i.test(name)) {
+			name = name.replace(/\.txt$/i, "");
+			name = name ? `${name}.md` : `chapter-${index + 1}.md`;
+		}
+		if (usedNames.has(name.toLowerCase())) {
+			const stem = name.replace(/\.(md|markdown)$/i, "");
+			const ext = name.slice(stem.length);
+			let n = 2;
+			while (usedNames.has(`${stem}-${n}${ext}`.toLowerCase())) n += 1;
+			name = `${stem}-${n}${ext}`;
+		}
+		usedNames.add(name.toLowerCase());
+		return name;
 	}
 
 	async function chooseLibraryRoot() {
@@ -1907,6 +2003,19 @@
 		} catch (error) {
 			noticeError("删除失败", error);
 		}
+	}
+
+	// The Zhihu/Podcast workflows drive managed Node/Python sidecars that
+	// only exist on desktop builds — on mobile they can never succeed, so
+	// the panels stay closed even if a caller slips past the hidden buttons.
+	function openZhihuWorkflowPanel() {
+		if (isMobile) return;
+		zhihuWorkflowOpen = true;
+	}
+
+	function openPodcastWorkflowPanel() {
+		if (isMobile) return;
+		podcastWorkflowOpen = true;
 	}
 
 	async function openBrowserReader(bookId: string) {
@@ -3688,13 +3797,42 @@
 		try {
 			const selected = await open({
 				multiple: false,
-				filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+				filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+			}).catch((error) => {
+				// Android: a missing/broken picker Activity rejects instead of
+				// resolving null. Keep desktop semantics unchanged.
+				if (!isMobile) throw error;
+				noticeError("无法打开文件选择器", error);
+				return null;
 			});
 			if (selected) {
-				openFile(selected as string);
+				// Android SAF returns a content:// URI — stage it into the app
+				// cache so the Rust reader (std::fs) can open it as a real file.
+				if (isMobile) {
+					await openMobilePickedFile(selected as string);
+				} else {
+					openFile(selected as string);
+				}
 			}
 		} finally {
 			fileDialogOpen = false;
+		}
+	}
+
+	// Mobile single-file open: copy the picked content:// document into the
+	// cache dir as a real .md, then take the normal openFile path (the
+	// read-side whitelist accepts any existing absolute .md path).
+	async function openMobilePickedFile(uri: string) {
+		try {
+			const bytes = await readFile(uri);
+			const stagingDir = await join(await appCacheDir(), "临时");
+			const name = await mobileStagingFileName(uri, 0, new Set<string>());
+			await mkdir(stagingDir, { recursive: true });
+			const stagedPath = await join(stagingDir, name);
+			await writeFile(stagedPath, bytes);
+			await openFile(stagedPath);
+		} catch (error) {
+			noticeError("无法打开文件", error);
 		}
 	}
 
@@ -6097,8 +6235,8 @@
 				onImport={() => void importFolderToLibrary()}
 				onOpenFile={() => void openFileDialog()}
 				onOpenTemporary={(path) => void openFile(path)}
-				onOpenZhihuWorkflow={() => (zhihuWorkflowOpen = true)}
-				onOpenPodcastWorkflow={() => (podcastWorkflowOpen = true)}
+				onOpenZhihuWorkflow={openZhihuWorkflowPanel}
+				onOpenPodcastWorkflow={openPodcastWorkflowPanel}
 				onStartTask={(taskId) => void startPodcastTask(taskId)}
 				onStartZhihuTask={(taskId, revision) => void startZhihuTask(taskId, revision)}
 				onOpenTaskResult={(taskId) => void openPodcastTaskResult(taskId)}
@@ -6114,7 +6252,7 @@
 				onDeleteBook={(bookId, title, chapterCount) =>
 					void deleteLibraryBook(bookId, title, chapterCount)}
 			/>
-			{#if podcastWorkflowOpen}
+			{#if podcastWorkflowOpen && !isMobile}
 				<PodcastWorkflow
 					tasks={acquisitionTasks}
 					onClose={() => (podcastWorkflowOpen = false)}
@@ -6123,7 +6261,7 @@
 					onOpenResult={(taskId) => void openPodcastTaskResult(taskId)}
 				/>
 			{/if}
-			{#if zhihuWorkflowOpen}
+			{#if zhihuWorkflowOpen && !isMobile}
 				<ZhihuWorkflow
 					tasks={acquisitionTasks}
 					onClose={() => (zhihuWorkflowOpen = false)}
@@ -7150,6 +7288,9 @@
 		opacity: 0.95;
 	}
 	.status-chapter {
+		/* Flex item: min-width:0 lets the chapter name shrink and ellipsize
+		   instead of pushing the pill past its max-width on narrow screens. */
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		color: var(--text-secondary);
@@ -7571,6 +7712,9 @@
 
 	/* ===== Mobile Adaptation (e.g. OPPO Find X9 & iOS/Android devices) ===== */
 	.app.is-mobile {
+		/* Dynamic viewport height: tracks WebView/browser chrome changes
+		   better than 100vh; unsupported engines keep the base 100vh. */
+		height: 100dvh;
 		padding-top: env(safe-area-inset-top, 0px);
 		padding-bottom: env(safe-area-inset-bottom, 0px);
 		padding-left: env(safe-area-inset-left, 0px);
@@ -7592,12 +7736,12 @@
 	}
 
 	.app.is-mobile .article {
-		--article-padding-x: max(16px, env(safe-area-inset-left, 0px));
 		--article-padding-top: calc(16px + env(safe-area-inset-top, 0px));
 		--article-padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px));
 		max-width: 100% !important;
-		padding-left: var(--article-padding-x);
-		padding-right: var(--article-padding-x);
+		/* Each side takes its own inset — landscape cutouts are asymmetric. */
+		padding-left: max(16px, env(safe-area-inset-left, 0px));
+		padding-right: max(16px, env(safe-area-inset-right, 0px));
 		padding-top: var(--article-padding-top);
 		padding-bottom: var(--article-padding-bottom);
 	}
@@ -7610,20 +7754,72 @@
 		-webkit-overflow-scrolling: touch;
 	}
 
+	/* 44px touch targets (Apple HIG / WCAG comfortable size). Six buttons in
+	   the context bar still fit ≥360px: the filename collapses first via its
+	   overflow:hidden minimum, then only the bar padding remains. */
 	.app.is-mobile .icon-btn {
-		width: 38px;
-		height: 38px;
-		padding: 8px;
+		width: 44px;
+		height: 44px;
+		padding: 10px;
 	}
 
 	.app.is-mobile .status-line-pill {
 		bottom: calc(14px + env(safe-area-inset-bottom, 0px));
 		font-size: 11.5px;
 		padding: 4px 12px;
+		max-width: calc(100vw - 48px);
 	}
 
 	.app.is-mobile .edit-hint {
 		bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+		max-width: calc(100vw - 32px);
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* Shortcut hint pill is wider than a phone viewport — cap it and let the
+	   text span ellipsize instead of bleeding past both screen edges. */
+	.app.is-mobile .first-hint {
+		max-width: calc(100vw - 24px);
+	}
+	.app.is-mobile .first-hint span {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	/* ~40px effective close target without changing the 20px visual. */
+	.app.is-mobile .first-hint-close::before {
+		inset: -10px;
+	}
+
+	.app.is-mobile .zoom-indicator {
+		max-width: calc(100vw - 32px);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	/* Search ticks are 9×3px markers — expand the tap area on touch screens
+	   without changing how the rail looks. */
+	.app.is-mobile .search-tick::before {
+		content: '';
+		position: absolute;
+		inset: -10px -8px;
+	}
+
+	.app.is-mobile .lightbox-close {
+		width: 44px;
+		height: 44px;
+		top: calc(12px + env(safe-area-inset-top, 0px));
+		right: calc(12px + env(safe-area-inset-right, 0px));
+	}
+
+	.app.is-mobile .footnote-preview {
+		max-height: min(320px, 50vh);
+	}
+
+	.app.is-mobile .mobile-focus-bar {
+		max-width: calc(100vw - 24px);
 	}
 
 	.mobile-focus-bar {
@@ -7701,12 +7897,12 @@
 		}
 
 		.article {
-			--article-padding-x: max(16px, env(safe-area-inset-left, 0px));
 			--article-padding-top: calc(16px + env(safe-area-inset-top, 0px));
 			--article-padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px));
 			max-width: 100% !important;
-			padding-left: var(--article-padding-x);
-			padding-right: var(--article-padding-x);
+			/* Each side takes its own inset — landscape cutouts are asymmetric. */
+			padding-left: max(16px, env(safe-area-inset-left, 0px));
+			padding-right: max(16px, env(safe-area-inset-right, 0px));
 			padding-top: var(--article-padding-top);
 			padding-bottom: var(--article-padding-bottom);
 		}

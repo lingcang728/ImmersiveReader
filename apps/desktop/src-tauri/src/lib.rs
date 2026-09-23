@@ -143,9 +143,22 @@ fn directory_size_at(path: &Path, depth: usize) -> Result<u64, String> {
 }
 
 fn legacy_state_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("mmbook")
+    #[cfg(target_os = "android")]
+    {
+        // The legacy mmbook state dir only ever existed on desktop installs,
+        // and `dirs` returns nothing on Android anyway. Point at an inert
+        // app-private path instead of the process cwd so the `exists()`
+        // lookups below simply find nothing.
+        return storage::android_base_dirs()
+            .map(|base| base.app_local_data.join("legacy-mmbook-none"))
+            .unwrap_or_else(|_| PathBuf::from("/data/local/tmp/immersive-reader-legacy-none"));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("mmbook")
+    }
 }
 
 /// State file names need a hash whose output is stable across Rust versions —
@@ -516,6 +529,27 @@ async fn get_file_mtime(path: String) -> Result<u64, String> {
             .map_err(|e| e.to_string())?
             .as_millis() as u64;
         Ok(ms)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Resolves the display name for a path or URI. Mobile file pickers hand back
+/// `content://` URIs whose last path segment is an opaque provider document id
+/// — on Android the path plugin resolves the real name through the
+/// ContentResolver. Elsewhere this is `Path::file_name`, which is exactly what
+/// the desktop resolver does internally.
+#[tauri::command]
+async fn file_name_for_uri(app: tauri::AppHandle, uri: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        app.path()
+            .file_name(&uri)
+            .or_else(|| {
+                Path::new(&uri)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .ok_or_else(|| "FILE_NAME_UNAVAILABLE".to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2785,9 +2819,11 @@ pub fn run() {
     let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             get_file_mtime,
+            file_name_for_uri,
             read_markdown_file,
             save_markdown_file,
             load_reading_state,
@@ -2852,6 +2888,17 @@ pub fn run() {
             reader_server::ReaderServiceState::default(),
         ))
         .setup(|app| {
+            // Android has no `dirs` backend — every storage root derives from
+            // the app-private directories exposed by the mobile path plugin.
+            // This must run before anything that touches
+            // `StorageLocations::current()` (app_log, control.db recovery,
+            // settings). Failure is fatal: without storage roots the app
+            // cannot run at all.
+            #[cfg(target_os = "android")]
+            if let Err(error) = storage::init_android_roots(app.handle()) {
+                eprintln!("Android storage roots init failed: {error}");
+                panic!("failed to initialize Android storage roots: {error}");
+            }
             storage::app_log(
                 "app",
                 &format!("immersive-reader v{} starting", env!("CARGO_PKG_VERSION")),

@@ -55,9 +55,22 @@ pub fn app_state_dir() -> PathBuf {
     // P3-23: fail closed — never root app state at the process CWD. Same
     // contract as `AppChannel::current`, which panics rather than silently
     // downgrading to the production channel.
-    dirs::data_dir()
-        .expect("Roaming AppData is unavailable")
-        .join(AppChannel::current().settings_directory_name())
+    #[cfg(target_os = "android")]
+    {
+        // `dirs` has no Android backend (`data_dir()` is `None`, so the
+        // desktop `expect` below would panic). `current()` failing here means
+        // `init_android_roots` never ran — setup aborts the app in that case,
+        // so this is only reachable from tests/pre-setup paths. Return a
+        // stable sentinel under the OS temp dir instead of panicking or
+        // resolving `.` (cwd): any write there simply fails.
+        std::env::temp_dir().join("immersive-reader").join("state")
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        dirs::data_dir()
+            .expect("Roaming AppData is unavailable")
+            .join(AppChannel::current().settings_directory_name())
+    }
 }
 
 pub fn default_settings() -> AppSettings {
@@ -67,6 +80,11 @@ pub fn default_settings() -> AppSettings {
             library_root: locations.library_root.to_string_lossy().into_owned(),
         };
     }
+    #[cfg(target_os = "android")]
+    let documents = crate::storage::android_base_dirs()
+        .map(|base| base.documents.clone())
+        .unwrap_or_else(|_| std::env::temp_dir().join("immersive-reader"));
+    #[cfg(not(target_os = "android"))]
     let documents = dirs::document_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
         .unwrap_or_else(|| PathBuf::from("."));
@@ -244,11 +262,21 @@ pub fn runtime_root() -> Result<PathBuf, String> {
     if let Some(configured) = std::env::var_os("IMMERSIVE_RUNTIME_ROOT") {
         return Ok(PathBuf::from(configured));
     }
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    let parent = executable
-        .parent()
-        .ok_or_else(|| "Application directory is unavailable".to_string())?;
-    Ok(parent.join("runtime"))
+    #[cfg(target_os = "android")]
+    {
+        // `current_exe` is meaningless inside an Android app process; the
+        // runtime root is the lazy placeholder captured at setup. Tool probes
+        // then report "runtime missing" instead of a garbage path.
+        crate::storage::android_base_dirs().map(|base| base.runtime.clone())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let parent = executable
+            .parent()
+            .ok_or_else(|| "Application directory is unavailable".to_string())?;
+        Ok(parent.join("runtime"))
+    }
 }
 
 #[cfg(test)]

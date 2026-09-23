@@ -1436,11 +1436,18 @@
 @media (max-width: 760px) {
 	.bs-header,
 	.bs-body {
-		padding-left: 16px;
-		padding-right: 16px;
+		padding-left: max(16px, env(safe-area-inset-left, 0px));
+		padding-right: max(16px, env(safe-area-inset-right, 0px));
 	}
 	.search {
-		width: 140px;
+		/* Fixed 140px pushed the header past the viewport on ~360px phones;
+		   let it flex and shrink instead. */
+		flex: 1 1 auto;
+		width: auto;
+		min-width: 0;
+	}
+	.bs-page-head {
+		flex-wrap: wrap;
 	}
 	.collection-grid {
 		grid-template-columns: 1fr;
@@ -1448,6 +1455,7 @@
 	.resume {
 		grid-template-columns: 1fr;
 		gap: 16px;
+		padding: 18px;
 	}
 	.btn-resume {
 		justify-self: start;
@@ -1474,4 +1482,71 @@
 	.task-actions {
 		justify-content: flex-start;
 	}
+	/* Detail dialog: single-column meta + slimmer backdrop gutter so the
+	   sheet keeps comfortable margins on narrow screens. */
+	.book-detail-backdrop {
+		padding: 12px;
+	}
+	.book-detail-meta,
+	.provenance-grid {
+		grid-template-columns: 1fr;
+	}
+	.chapter-list {
+		padding-left: 16px;
+	}
+}
+
+/* Touch targets on real touch devices (UA-detected .is-mobile on .app):
+   raise small controls toward the 40–44px comfortable minimum. Visual size
+   stays the same where a ::before halo expands the hit area instead. */
+.app.is-mobile .icon-action {
+	width: 42px;
+	height: 42px;
+}
+.app.is-mobile .menu-trigger {
+	min-height: 42px;
+}
+.app.is-mobile .settings-trigger {
+	width: 42px;
+}
+.app.is-mobile .card-menu-btn,
+.app.is-mobile .close-detail,
+.app.is-mobile .task-queue-dismiss {
+	position: relative;
+}
+.app.is-mobile .card-menu-btn::before,
+.app.is-mobile .close-detail::before,
+.app.is-mobile .task-queue-dismiss::before {
+	content: '';
+	position: absolute;
+	inset: -7px; /* ~44px effective hit area, unchanged visual */
+}
+.app.is-mobile .task-queue-expand {
+	padding: 8px 10px;
+}
+.app.is-mobile .act-primary,
+.app.is-mobile .act-secondary {
+	height: 40px;
+}
+.app.is-mobile .task-btn {
+	padding: 12px 14px;
+}
+.app.is-mobile .temp-item button {
+	padding: 10px 14px;
+}
+.app.is-mobile .source-link {
+	padding: 9px 12px;
+}
+.app.is-mobile .recover-action {
+	padding: 10px 14px;
+}
+.app.is-mobile .load-more-chapters {
+	padding: 12px;
+}
+.app.is-mobile .acquire-menu button,
+.app.is-mobile .card-menu button {
+	padding: 12px;
+}
+.app.is-mobile .chapter-list li {
+	padding: 8px 0;
 }

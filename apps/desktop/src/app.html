@@ -46,7 +46,20 @@
           'muguang-light': ['#fdf6ec', '#342a22', 'light'],
           'muguang-dark': ['#1c1914', '#d6cbb8', 'dark'],
         };
-        var boot = bootThemes[localStorage.getItem('mmbook-theme')];
+        var savedName = localStorage.getItem('mmbook-theme');
+        var boot =
+          savedName && Object.prototype.hasOwnProperty.call(bootThemes, savedName)
+            ? bootThemes[savedName]
+            : null;
+        if (!boot) {
+          // No explicit choice yet — first paint follows the OS scheme, same
+          // pick as resolveInitialTheme() in stores/app.ts, so a dark-mode
+          // phone never flashes the light fallback before hydration.
+          var prefersDark =
+            window.matchMedia &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches;
+          boot = bootThemes[prefersDark ? 'suzhi-dark' : 'suzhi-light'];
+        }
         if (boot) {
           var rootStyle = document.documentElement.style;
           rootStyle.setProperty('--bg', boot[0]);

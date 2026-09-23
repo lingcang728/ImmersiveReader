@@ -90,6 +90,11 @@ const ERROR_COPY: [pattern: RegExp, message: string][] = [
 	[/PROCESS_THREADS_NOT_FOUND|PRIMARY_THREAD_NOT_FOUND|SetInformationJobObject failed|UNEXPECTED_SUSPEND_COUNT/, "进程管理异常"],
 	[/TLS_CRYPTO_PROVIDER_UNAVAILABLE/, "安全组件不可用"],
 	[/Only the configured/, "不允许启动该工具"],
+	// Mobile / platform limits
+	[/Android storage roots|Android app (data|cache|local data) directory/, "存储目录初始化失败，请重启应用"],
+	[/Folder picker is not implemented on mobile/, "暂不支持选择文件夹，请改用文件选择"],
+	[/FILE_NAME_UNAVAILABLE/, "无法读取文件名"],
+	[/failed to open file/, "无法打开所选文件"],
 ];
 
 /** Returns true when the message is already user-facing Chinese copy. */
