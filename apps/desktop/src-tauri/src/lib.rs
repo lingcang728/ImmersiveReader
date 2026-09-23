@@ -3031,6 +3031,7 @@ pub fn run() {
 
     // macOS: file opened via Apple Event (double-click / Open With)
     app.run(|app_handle, event| match event {
+        #[cfg(desktop)]
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },

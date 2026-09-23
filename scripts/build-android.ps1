@@ -125,46 +125,51 @@ if (-not (Test-Path -LiteralPath $tauriCli)) {
     throw "未找到 Tauri CLI。请在 apps/desktop 下运行 npm ci。"
 }
 
-$genAndroid = Join-Path $srcTauriDir 'gen\android'
-if (-not (Test-Path -LiteralPath $genAndroid)) {
-    Write-Host "检测到尚未生成 Android 项目工程，正在调用 tauri android init..." -ForegroundColor Cyan
-    & $tauriCli android init --ci --skip-targets-install
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Tauri Android 项目初始化因环境缺失未能完成（需配置 ANDROID_HOME 与 NDK_HOME）。"
-    }
-}
-
-Write-Host "正在调用 Tauri Android 构建 ($Target)..." -ForegroundColor Cyan
-$buildArgs = @('android', 'build', '--apk')
-if ($Target -ne 'universal') {
-    $buildArgs += @('--target', $Target)
-}
-if ($Release) {
-    # release 模式 (默认会构建 release APK)
-} else {
-    $buildArgs += @('--debug')
-}
-
-Write-Host "执行构建命令: $tauriCli ($($buildArgs -join ' '))"
-& $tauriCli $buildArgs
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "==================================================" -ForegroundColor Green
-    Write-Host "  APK 打包成功！" -ForegroundColor Green
-    Write-Host "==================================================" -ForegroundColor Green
-    
-    # 查找并输出 APK 位置
-    $apkSearchPath = Join-Path $srcTauriDir 'gen\android\app\build\outputs\apk'
-    if (Test-Path -LiteralPath $apkSearchPath) {
-        $apks = Get-ChildItem -Path $apkSearchPath -Filter '*.apk' -Recurse
-        foreach ($apk in $apks) {
-            $hash = (Get-FileHash -LiteralPath $apk.FullName -Algorithm SHA256).Hash
-            $sizeMb = [math]::Round($apk.Length / 1MB, 2)
-            Write-Host "产物文件: $($apk.FullName)" -ForegroundColor Yellow
-            Write-Host "文件大小: $sizeMb MB" -ForegroundColor Yellow
-            Write-Host "SHA-256:  $hash" -ForegroundColor Yellow
+Push-Location $desktopDir
+try {
+    $genAndroid = Join-Path $srcTauriDir 'gen\android'
+    if (-not (Test-Path -LiteralPath $genAndroid)) {
+        Write-Host "检测到尚未生成 Android 项目工程，正在调用 tauri android init..." -ForegroundColor Cyan
+        & $tauriCli android init --ci --skip-targets-install
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Tauri Android 项目初始化因环境缺失未能完成（需配置 ANDROID_HOME 与 NDK_HOME）。"
         }
     }
-} else {
-    Write-Host "Tauri Android 构建退出码: $LASTEXITCODE" -ForegroundColor Red
+
+    Write-Host "正在调用 Tauri Android 构建 ($Target)..." -ForegroundColor Cyan
+    $buildArgs = @('android', 'build', '--apk')
+    if ($Target -ne 'universal') {
+        $buildArgs += @('--target', $Target)
+    }
+    if ($Release) {
+        # release 模式 (默认会构建 release APK)
+    } else {
+        $buildArgs += @('--debug')
+    }
+
+    Write-Host "执行构建命令: $tauriCli ($($buildArgs -join ' '))"
+    & $tauriCli $buildArgs
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "==================================================" -ForegroundColor Green
+        Write-Host "  APK 打包成功！" -ForegroundColor Green
+        Write-Host "==================================================" -ForegroundColor Green
+        
+        # 查找并输出 APK 位置
+        $apkSearchPath = Join-Path $srcTauriDir 'gen\android\app\build\outputs\apk'
+        if (Test-Path -LiteralPath $apkSearchPath) {
+            $apks = Get-ChildItem -Path $apkSearchPath -Filter '*.apk' -Recurse
+            foreach ($apk in $apks) {
+                $hash = (Get-FileHash -LiteralPath $apk.FullName -Algorithm SHA256).Hash
+                $sizeMb = [math]::Round($apk.Length / 1MB, 2)
+                Write-Host "产物文件: $($apk.FullName)" -ForegroundColor Yellow
+                Write-Host "文件大小: $sizeMb MB" -ForegroundColor Yellow
+                Write-Host "SHA-256:  $hash" -ForegroundColor Yellow
+            }
+        }
+    } else {
+        Write-Host "Tauri Android 构建退出码: $LASTEXITCODE" -ForegroundColor Red
+    }
+} finally {
+    Pop-Location
 }

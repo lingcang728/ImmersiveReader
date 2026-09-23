@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+	import { detectDevice } from '$lib/platform/device';
 
 	type ResizeDirection =
 		| 'East'
@@ -28,7 +29,7 @@
 	let handlesEnabled = true;
 
 	async function refreshHandleState() {
-		if (typeof window !== 'undefined' && (window.innerWidth <= 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0 && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)))) {
+		if (typeof window !== 'undefined' && detectDevice().isMobile) {
 			handlesEnabled = false;
 			return;
 		}
@@ -147,8 +148,11 @@
 		cursor: nesw-resize;
 	}
 	@media (max-width: 768px) {
-		.resize-edge {
+		.resize-handle {
 			display: none !important;
 		}
+	}
+	:global(.is-mobile) .resize-handle {
+		display: none !important;
 	}
 </style>

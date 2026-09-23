@@ -2,12 +2,15 @@
 	import { onMount, tick } from 'svelte';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 	import { emit } from '@tauri-apps/api/event';
+	import { detectDevice } from '$lib/platform/device';
 
 	export let visible = true;
 	/** When true, chrome overlays content (immersive reading). */
 	export let overlay = false;
 	/** Fired only when maximized state actually changes. */
 	export let onMaximizedChange: ((maximized: boolean) => void) | undefined = undefined;
+
+	let isMobile = typeof window !== 'undefined' ? detectDevice().isMobile : false;
 
 	let maximized = false;
 	let unlistenResize: (() => void) | undefined;
@@ -182,8 +185,14 @@
 		} catch {
 			/* Web preview without Tauri internals. */
 		}
+		const updateMobile = () => {
+			isMobile = detectDevice().isMobile;
+		};
+		window.addEventListener('resize', updateMobile);
+
 		return () => {
 			disposed = true;
+			window.removeEventListener('resize', updateMobile);
 			if (resizeRaf) cancelAnimationFrame(resizeRaf);
 			unlistenResize?.();
 			unlistenResize = undefined;
@@ -191,6 +200,7 @@
 	});
 </script>
 
+{#if !isMobile}
 <header
 	class="window-chrome"
 	class:hidden={!visible}
@@ -295,6 +305,7 @@
 		</button>
 	</div>
 {/if}
+{/if}
 
 <style>
 	.window-chrome {
@@ -339,15 +350,19 @@
 
 	@media (max-width: 768px) {
 		.window-chrome {
-			height: calc(var(--chrome-h) + env(safe-area-inset-top, 0px));
-			min-height: calc(var(--chrome-h) + env(safe-area-inset-top, 0px));
-			padding-top: env(safe-area-inset-top, 0px);
-			padding-left: env(safe-area-inset-left, 0px);
-			padding-right: env(safe-area-inset-right, 0px);
+			display: none !important;
+			height: 0 !important;
+			min-height: 0 !important;
 		}
 		.chrome-controls {
 			display: none !important;
 		}
+	}
+
+	:global(.is-mobile) .window-chrome {
+		display: none !important;
+		height: 0 !important;
+		min-height: 0 !important;
 	}
 
 	.chrome-drag {
