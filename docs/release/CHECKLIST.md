@@ -28,7 +28,7 @@
 ## 4. GitHub Release 资产
 
 - [ ] 先创建**草稿** Release（tag `v<版本>`），上传 `runtime-bundle.zip.001…N` 全部分卷。
-- [ ] `apps\desktop\scripts\collect-release.ps1` 产出 `output\release\` 下的 `ImmersiveReader_<版本>_x64-setup.exe`、`….sig` 与 `latest.json`（notes 兜底取 `RELEASE_NOTES.md` 首段，可用 `IMMERSIVE_READER_RELEASE_NOTES` 覆盖）。
+- [ ] `apps\desktop\scripts\collect-release.ps1` 产出 `output\desktop\` 下的 `ImmersiveReader_<版本>_x64-setup.exe`、`….sig` 与 `latest.json`（notes 兜底取 `RELEASE_NOTES.md` 首段，可用 `IMMERSIVE_READER_RELEASE_NOTES` 覆盖）。
 - [ ] 上传 setup.exe、`….sig`、`latest.json` 到草稿 Release，随后推送 tag 触发 release.yml 复核并发布。
 
 ## 5. 发布后验证

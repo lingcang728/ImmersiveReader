@@ -1,4 +1,4 @@
-﻿param([string]$OutputDirectory = '..\..\output\release')
+﻿param([string]$OutputDirectory = '..\..\output\desktop')
 
 $ErrorActionPreference = 'Stop'
 $desktopRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path

@@ -151,14 +151,14 @@ jobs:
           $pubkeyB64 = (Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).plugins.updater.pubkey
           $pubkeyFile = "$env:RUNNER_TEMP\updater.pub"
           [IO.File]::WriteAllBytes($pubkeyFile, [Convert]::FromBase64String($pubkeyB64))
-          $installer = (Get-ChildItem -LiteralPath output/release -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
-          if (-not $installer) { throw 'output/release 下没有 NSIS 安装包可供验签。' }
+          $installer = (Get-ChildItem -LiteralPath output/desktop -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
+          if (-not $installer) { throw 'output/desktop 下没有 NSIS 安装包可供验签。' }
           $sig = "$installer.sig"
           if (-not (Test-Path -LiteralPath $sig -PathType Leaf)) { throw "updater 签名文件缺失：$sig" }
           & $minisign -V -m $installer -x $sig -p $pubkeyFile
           if ($LASTEXITCODE -ne 0) { throw "updater 签名验签失败：$installer" }
           # latest.json must embed exactly the verified signature text.
-          $latest = Get-Content output/release/latest.json -Raw | ConvertFrom-Json
+          $latest = Get-Content output/desktop/latest.json -Raw | ConvertFrom-Json
           $embedded = [string]$latest.platforms.'windows-x86_64'.signature
           if ($embedded.Trim() -cne (Get-Content $sig -Raw).Trim()) {
             throw 'latest.json 内嵌签名与 .sig 文件不一致。'
@@ -181,17 +181,17 @@ jobs:
           gh release view '${{ github.ref_name }}' *> $null
           if ($LASTEXITCODE -ne 0) { throw '当前 Tag 的 GitHub Release 不存在。' }
           $global:LASTEXITCODE = 0
-          $installer = (Get-ChildItem -LiteralPath output/release -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
+          $installer = (Get-ChildItem -LiteralPath output/desktop -Filter 'ImmersiveReader_*-setup.exe' -File | Select-Object -First 1).FullName
           if (-not $installer -or -not (Test-Path -LiteralPath $installer -PathType Leaf)) {
-            throw 'output/release 下没有 NSIS 安装包，拒绝发布空 Release。'
+            throw 'output/desktop 下没有 NSIS 安装包，拒绝发布空 Release。'
           }
-          if (-not (Test-Path -LiteralPath 'output/release/latest.json' -PathType Leaf)) {
-            throw 'output/release/latest.json 缺失，拒绝发布。'
+          if (-not (Test-Path -LiteralPath 'output/desktop/latest.json' -PathType Leaf)) {
+            throw 'output/desktop/latest.json 缺失，拒绝发布。'
           }
           # gh is a native CLI: pwsh does NOT turn a non-zero exit code into a
           # terminating error — check every gh call or a failed upload would
           # silently publish a Release with no installer.
-          gh release upload '${{ github.ref_name }}' $installer output/release/latest.json --clobber
+          gh release upload '${{ github.ref_name }}' $installer output/desktop/latest.json --clobber
           if ($LASTEXITCODE -ne 0) { throw "gh release upload 失败（exit $LASTEXITCODE）。" }
           gh release edit '${{ github.ref_name }}' --draft=false --prerelease=false --title "沉浸阅读 ${{ github.ref_name }}" --notes-file $notesFile
           if ($LASTEXITCODE -ne 0) { throw "gh release edit 失败（exit $LASTEXITCODE）。" }

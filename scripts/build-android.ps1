@@ -66,6 +66,23 @@ if ($env:JAVA_HOME -and (Test-Path -LiteralPath $env:JAVA_HOME)) {
     Write-Host "[OK] java: $($java.Source)" -ForegroundColor Green
 }
 
+# 2.5 AGP 8.x 需要 JDK 17/21：JAVA_HOME 缺失或指向更高版本时，自动切换到 G:\build_cache 下的 JDK 21
+$javaHomeExe = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\java.exe' } else { $null }
+$javaHomeMajor = $null
+if ($javaHomeExe -and (Test-Path -LiteralPath $javaHomeExe)) {
+    $javaHomeOut = & $javaHomeExe -version 2>&1 | Out-String
+    if ($javaHomeOut -match 'version "(\d+)') { $javaHomeMajor = [int]$matches[1] }
+}
+if (-not $env:JAVA_HOME -or -not $javaHomeMajor -or $javaHomeMajor -gt 21) {
+    $jdk21 = Get-ChildItem -LiteralPath 'G:\build_cache' -Directory -Filter 'jdk-21*' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+    if ($jdk21 -and (Test-Path -LiteralPath (Join-Path $jdk21.FullName 'bin\java.exe'))) {
+        Write-Host "自动切换 JAVA_HOME -> $($jdk21.FullName)（AGP 兼容版本）" -ForegroundColor Cyan
+        $env:JAVA_HOME = $jdk21.FullName
+    } elseif ($javaHomeMajor -gt 21) {
+        Write-Warning "[WARN] JAVA_HOME 指向 JDK $javaHomeMajor，且未在 G:\build_cache 找到 jdk-21*，Android 构建可能失败。"
+    }
+}
+
 # 3. 检查 Android SDK
 $sdkCandidates = @(
     $env:ANDROID_HOME,
@@ -187,12 +204,16 @@ try {
         $apkSearchPath = Join-Path $srcTauriDir 'gen\android\app\build\outputs\apk'
         if (Test-Path -LiteralPath $apkSearchPath) {
             $apks = Get-ChildItem -Path $apkSearchPath -Filter '*.apk' -Recurse
+            $mobileOut = Join-Path $repoRoot 'output\mobile'
+            New-Item -ItemType Directory -Force -Path $mobileOut | Out-Null
             foreach ($apk in $apks) {
                 $hash = (Get-FileHash -LiteralPath $apk.FullName -Algorithm SHA256).Hash
                 $sizeMb = [math]::Round($apk.Length / 1MB, 2)
                 Write-Host "产物文件: $($apk.FullName)" -ForegroundColor Yellow
                 Write-Host "文件大小: $sizeMb MB" -ForegroundColor Yellow
                 Write-Host "SHA-256:  $hash" -ForegroundColor Yellow
+                Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $mobileOut $apk.Name) -Force
+                Write-Host "已收纳到: $(Join-Path $mobileOut $apk.Name)" -ForegroundColor Green
             }
         }
     } else {
