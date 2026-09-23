@@ -534,25 +534,64 @@ async fn get_file_mtime(path: String) -> Result<u64, String> {
     .map_err(|error| error.to_string())?
 }
 
-/// Resolves the display name for a path or URI. Mobile file pickers hand back
-/// `content://` URIs whose last path segment is an opaque provider document id
-/// — on Android the path plugin resolves the real name through the
-/// ContentResolver. Elsewhere this is `Path::file_name`, which is exactly what
-/// the desktop resolver does internally.
+/// Android-only: the ContentReaderPlugin Kotlin class registered via the
+/// `content-reader` plugin in `run()` below.
+#[cfg(target_os = "android")]
+struct ContentReaderHandle(tauri::plugin::PluginHandle<tauri::Wry>);
+
+#[cfg(target_os = "android")]
+#[derive(serde::Deserialize)]
+struct StagedContentFile {
+    path: String,
+    name: String,
+}
+
+/// Android SAF picks hand back `content://` URIs that `std::fs` cannot open.
+/// The fs plugin's fd path panics (`unimplemented!()`) when a provider
+/// returns a null descriptor, leaving the JS invoke pending forever — our
+/// own plugin streams the bytes through ContentResolver.openInputStream into
+/// an app-private staging dir instead, with real errors on failure.
 #[tauri::command]
-async fn file_name_for_uri(app: tauri::AppHandle, uri: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        app.path()
-            .file_name(&uri)
-            .or_else(|| {
-                Path::new(&uri)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .ok_or_else(|| "FILE_NAME_UNAVAILABLE".to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
+async fn stage_content_uri(
+    app: tauri::AppHandle,
+    uri: String,
+    dest_dir: String,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        return tauri::async_runtime::spawn_blocking(
+            move || -> Result<serde_json::Value, String> {
+                use tauri::Manager;
+                // The renderer chooses the staging dir name but the write
+                // must stay inside the app cache — never arbitrary storage.
+                let cache = app
+                    .path()
+                    .app_cache_dir()
+                    .map_err(|e| format!("app cache dir unavailable: {e}"))?;
+                if !Path::new(&dest_dir).starts_with(&cache) {
+                    return Err("STAGE_DIR_OUTSIDE_CACHE".to_string());
+                }
+                let handle = app
+                    .try_state::<ContentReaderHandle>()
+                    .ok_or_else(|| "content reader plugin unavailable".to_string())?;
+                let staged = handle
+                    .0
+                    .run_mobile_plugin::<StagedContentFile>(
+                        "copyToDir",
+                        serde_json::json!({ "uri": uri, "dir": dest_dir }),
+                    )
+                    .map_err(|error| format!("failed to open file: {error}"))?;
+                Ok(serde_json::json!({ "path": staged.path, "name": staged.name }))
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, uri, dest_dir);
+        Err("stage_content_uri is only supported on Android".to_string())
+    }
 }
 
 #[tauri::command]
@@ -2821,9 +2860,27 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
+        // In-app mobile plugin: streams SAF content:// picks into the app
+        // cache (ContentReaderPlugin.kt in the Android app module).
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("content-reader")
+                .setup(|app, api| {
+                    #[cfg(target_os = "android")]
+                    {
+                        let handle = api.register_android_plugin(
+                            "com.lingcang.immersivereading",
+                            "ContentReaderPlugin",
+                        )?;
+                        app.manage(ContentReaderHandle(handle));
+                    }
+                    let _ = (app, api);
+                    Ok(())
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             get_file_mtime,
-            file_name_for_uri,
+            stage_content_uri,
             read_markdown_file,
             save_markdown_file,
             load_reading_state,

@@ -5,7 +5,7 @@
 	import { stableRequestId } from "$lib/requestId";
 	import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 	import { open } from "@tauri-apps/plugin-dialog";
-	import { mkdir, readFile, remove, writeFile } from "@tauri-apps/plugin-fs";
+	import { remove } from "@tauri-apps/plugin-fs";
 	import { appCacheDir, join } from "@tauri-apps/api/path";
 	import { openUrl } from "@tauri-apps/plugin-opener";
 	import { checkForDesktopUpdate } from "$lib/update/service";
@@ -1806,13 +1806,24 @@
 		if (!libraryLoadedOnce) libraryLoading = true;
 		try {
 			// The trash list is only read while its panel is open — the bookshelf
-			// badge follows the panel's own refreshes instead.
+			// badge follows the panel's own refreshes instead. On mobile a wedged
+			// IPC call must surface the error banner rather than spin forever.
+			const bound = <T>(p: Promise<T>, label: string) =>
+				isMobile ? withMobileTimeout(p, label) : p;
 			const [settings, scan, nextTemporaryItems, nextTrashItems] = await Promise.all([
-				invoke<AppSettings>("get_app_settings"),
-				invoke<{ books: BookSummary[]; issues: LibraryIssue[]; writable: boolean }>("scan_library"),
-				invoke<TemporaryItem[]>("list_temporary_content").catch(() => [] as TemporaryItem[]),
+				bound(invoke<AppSettings>("get_app_settings"), "读取设置"),
+				bound(
+					invoke<{ books: BookSummary[]; issues: LibraryIssue[]; writable: boolean }>("scan_library"),
+					"扫描书库",
+				),
+				bound(
+					invoke<TemporaryItem[]>("list_temporary_content"),
+					"读取临时内容",
+				).catch(() => [] as TemporaryItem[]),
 				trashOpen
-					? invoke<TrashItem[]>("list_trash").catch(() => [] as TrashItem[])
+					? bound(invoke<TrashItem[]>("list_trash"), "读取回收站").catch(
+							() => [] as TrashItem[],
+						)
 					: Promise.resolve(null),
 			]);
 			if (nonce !== libraryRefreshNonce) return;
@@ -1861,6 +1872,22 @@
 		}
 	}
 
+	// Every mobile step below crosses the Tauri IPC bridge into Kotlin, and a
+	// wedged dispatch (e.g. a null content:// fd panics the fs plugin command)
+	// leaves the promise pending forever — the shelf spinner would never
+	// clear. Bound each call so a stuck step degrades into a skip or an
+	// error notice instead.
+	const MOBILE_IPC_TIMEOUT_MS = 20_000;
+	const MOBILE_IMPORT_TIMEOUT_MS = 60_000;
+
+	function withMobileTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error(`${label}超时，请重试`)), MOBILE_IPC_TIMEOUT_MS);
+		});
+		return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+	}
+
 	// Mobile import path: SAF file picking returns content:// URIs that
 	// std::fs cannot read, so each pick is copied into the app cache as a
 	// real file and the existing folder importer runs on the staging dir
@@ -1884,19 +1911,25 @@
 		showAppNotice("正在导入所选文件…");
 		let stagingRoot: string | null = null;
 		try {
-			stagingRoot = await join(await appCacheDir(), `mobile-import-${Date.now()}`);
+			stagingRoot = await withMobileTimeout(
+				(async () => join(await appCacheDir(), `mobile-import-${Date.now()}`))(),
+				"初始化暂存目录",
+			);
 			const stagingDir = await join(stagingRoot, "导入文集");
-			await mkdir(stagingDir, { recursive: true });
-			const usedNames = new Set<string>();
 			let staged = 0;
 			let skipped = 0;
-			for (const [index, uri] of uris.entries()) {
+			for (const uri of uris) {
 				try {
-					// readFile keeps the raw bytes — GB18030-encoded sources would
-					// be corrupted by a text-mode read; the importer decodes itself.
-					const bytes = await readFile(uri);
-					const name = await mobileStagingFileName(uri, index, usedNames);
-					await writeFile(await join(stagingDir, name), bytes);
+					// stage_content_uri streams the content:// document through
+					// ContentResolver into the staging dir — the fs plugin's fd
+					// path can panic and leave the invoke pending forever.
+					await withMobileTimeout(
+						invoke<{ path: string; name: string }>("stage_content_uri", {
+							uri,
+							destDir: stagingDir,
+						}),
+						"读取所选文件",
+					);
 					staged += 1;
 				} catch (error) {
 					console.warn("跳过无法读取的所选文件:", uri, error);
@@ -1907,12 +1940,17 @@
 				showAppNotice("所选文件都无法读取，未导入任何内容");
 				return;
 			}
-			const manifest = await invoke<{ bookId: string }>("import_markdown_folder", { path: stagingDir });
+			const manifest = await Promise.race([
+				invoke<{ bookId: string }>("import_markdown_folder", { path: stagingDir }),
+				new Promise<never>((_, reject) =>
+					setTimeout(() => reject(new Error("导入超时，请查看书架是否已生成书目")), MOBILE_IMPORT_TIMEOUT_MS),
+				),
+			]);
 			await refreshLibrary();
 			if (skipped > 0) {
 				showAppNotice(`已导入，${skipped} 个文件无法读取被跳过`);
 			}
-			await openLibraryBook(manifest.bookId);
+			await withMobileTimeout(openLibraryBook(manifest.bookId), "打开书目");
 		} catch (error) {
 			noticeError("导入失败", error);
 		} finally {
@@ -1921,32 +1959,6 @@
 			// reclaimable cache files behind.
 			if (stagingRoot) void remove(stagingRoot, { recursive: true }).catch(() => {});
 		}
-	}
-
-	// SAF display names are free-form: take the last path segment, drop
-	// leading dots (dot-prefixed files are invisible to the importer), and
-	// force a Markdown extension — `.txt` picks import as `.md` chapters.
-	async function mobileStagingFileName(uri: string, index: number, usedNames: Set<string>): Promise<string> {
-		let displayName = "";
-		try {
-			displayName = (await invoke<string>("file_name_for_uri", { uri })) ?? "";
-		} catch {
-			displayName = "";
-		}
-		let name = (displayName.split(/[\\/]/).pop() ?? "").trim().replace(/^\.+/, "");
-		if (!/\.(md|markdown)$/i.test(name)) {
-			name = name.replace(/\.txt$/i, "");
-			name = name ? `${name}.md` : `chapter-${index + 1}.md`;
-		}
-		if (usedNames.has(name.toLowerCase())) {
-			const stem = name.replace(/\.(md|markdown)$/i, "");
-			const ext = name.slice(stem.length);
-			let n = 2;
-			while (usedNames.has(`${stem}-${n}${ext}`.toLowerCase())) n += 1;
-			name = `${stem}-${n}${ext}`;
-		}
-		usedNames.add(name.toLowerCase());
-		return name;
 	}
 
 	async function chooseLibraryRoot() {
@@ -3824,13 +3836,15 @@
 	// read-side whitelist accepts any existing absolute .md path).
 	async function openMobilePickedFile(uri: string) {
 		try {
-			const bytes = await readFile(uri);
 			const stagingDir = await join(await appCacheDir(), "临时");
-			const name = await mobileStagingFileName(uri, 0, new Set<string>());
-			await mkdir(stagingDir, { recursive: true });
-			const stagedPath = await join(stagingDir, name);
-			await writeFile(stagedPath, bytes);
-			await openFile(stagedPath);
+			const staged = await withMobileTimeout(
+				invoke<{ path: string; name: string }>("stage_content_uri", {
+					uri,
+					destDir: stagingDir,
+				}),
+				"读取所选文件",
+			);
+			await openFile(staged.path);
 		} catch (error) {
 			noticeError("无法打开文件", error);
 		}
