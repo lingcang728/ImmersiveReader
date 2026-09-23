@@ -398,4 +398,26 @@
 			font-size: 15px;
 		}
 	}
+
+	:global(.is-mobile) .toc-overlay {
+		padding-top: 0;
+		align-items: flex-end;
+	}
+	:global(.is-mobile) .toc-palette {
+		width: 100vw;
+		max-width: 100vw;
+		max-height: 80vh;
+		border-radius: 20px 20px 0 0;
+		animation: slideUp 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+		padding-bottom: max(16px, env(safe-area-inset-bottom));
+	}
+	:global(.is-mobile) .toc-input-row {
+		height: 52px;
+		padding: 0 16px;
+	}
+	:global(.is-mobile) .toc-item {
+		min-height: 44px;
+		padding: 10px 14px;
+		font-size: 15px;
+	}
 </style>

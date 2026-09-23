@@ -2919,12 +2919,13 @@ pub fn run() {
                     }
                 }
             }
-            // 17-F3: the snapshot-path reap only runs when the UI asks for a
-            // snapshot — a wedged worker could display "Running" for as long
-            // as the user left the window alone. Sweep on a fixed cadence and
-            // push the events so the row turns Interrupted without waiting
-            // for a refresh trigger.
+            #[cfg(desktop)]
             {
+                // 17-F3: the snapshot-path reap only runs when the UI asks for a
+                // snapshot — a wedged worker could display "Running" for as long
+                // as the user left the window alone. Sweep on a fixed cadence and
+                // push the events so the row turns Interrupted without waiting
+                // for a refresh trigger.
                 let handle = app.handle().clone();
                 std::thread::spawn(move || loop {
                     std::thread::sleep(PODCAST_WORKER_REAP_INTERVAL);
@@ -2945,16 +2946,17 @@ pub fn run() {
                         }
                     }
                 });
-            }
-            // Windows: file path passed as CLI argument
-            let Some(window) = app.get_webview_window("main") else {
-                return Err(std::io::Error::other("main webview window missing").into());
-            };
-            let args: Vec<String> = std::env::args().collect();
-            if let Some(file_path) = initial_markdown_path(&args) {
-                register_opened_markdown(Path::new(&file_path));
-                if let Some(script) = initial_file_eval_script(&file_path) {
-                    let _ = window.eval(script);
+
+                // Windows: file path passed as CLI argument
+                let Some(window) = app.get_webview_window("main") else {
+                    return Err(std::io::Error::other("main webview window missing").into());
+                };
+                let args: Vec<String> = std::env::args().collect();
+                if let Some(file_path) = initial_markdown_path(&args) {
+                    register_opened_markdown(Path::new(&file_path));
+                    if let Some(script) = initial_file_eval_script(&file_path) {
+                        let _ = window.eval(script);
+                    }
                 }
             }
             #[cfg(desktop)]

@@ -386,6 +386,7 @@
 	let lastTapTime = 0;
 	let suppressNextDblClick = false;
 	let singleTapTimer: ReturnType<typeof setTimeout> | null = null;
+	const DOUBLE_TAP_WINDOW_MS = 250;
 
 	function toggleChromeForTouch() {
 		if (chromeState.chromeVisible) {
@@ -403,6 +404,14 @@
 		touchStartTime = Date.now();
 	}
 
+	function handleReaderTouchCancel() {
+		if (singleTapTimer) {
+			clearTimeout(singleTapTimer);
+			singleTapTimer = null;
+		}
+		lastTapTime = 0;
+	}
+
 	function handleReaderTouchEnd(e: TouchEvent) {
 		if (!$currentFilePath || flowReaderSession) return;
 		if (e.changedTouches.length !== 1) return;
@@ -418,6 +427,7 @@
 				clearTimeout(singleTapTimer);
 				singleTapTimer = null;
 			}
+			lastTapTime = 0;
 			if (activeBook && !$focusMode) {
 				if (deltaX < 0) {
 					void navigateBookChapter(1);
@@ -441,7 +451,7 @@
 
 			const now = Date.now();
 			// Double tap to toggle focus mode
-			if (now - lastTapTime < 320) {
+			if (now - lastTapTime < DOUBLE_TAP_WINDOW_MS) {
 				lastTapTime = 0;
 				if (singleTapTimer) {
 					clearTimeout(singleTapTimer);
@@ -506,7 +516,10 @@
 					toggleChromeForTouch();
 					return;
 				}
-			}, 220);
+			}, DOUBLE_TAP_WINDOW_MS);
+		} else {
+			// Movement exceeds tap threshold: reset lastTapTime so dragging/scrolling doesn't combine with a tap
+			lastTapTime = 0;
 		}
 	}
 
@@ -3228,6 +3241,7 @@
 		contentEl?.addEventListener("touchstart", clearOpenAnchor, { passive: true });
 		contentEl?.addEventListener("touchstart", handleReaderTouchStart, { passive: true });
 		contentEl?.addEventListener("touchend", handleReaderTouchEnd, { passive: true });
+		contentEl?.addEventListener("touchcancel", handleReaderTouchCancel, { passive: true });
 
 		const handlePopState = () => {
 			if (programmaticBackCount > 0) {
@@ -3359,11 +3373,13 @@
 			const mode = event.payload?.mode === "cancel_and_discard" ? "cancel_and_discard" : "preserve";
 			void requestExit(mode);
 		});
-		const unlistenClose = appWindow.onCloseRequested((event) => {
-			if (isClosing) return;
-			event.preventDefault();
-			void requestExit("hide");
-		});
+		const unlistenClose = isMobile
+			? Promise.resolve(() => {})
+			: appWindow.onCloseRequested((event) => {
+				if (isClosing) return;
+				event.preventDefault();
+				void requestExit("hide");
+			});
 
 		void refreshLibrary();
 		// F6: one-shot notice when control.db was quarantined + rebuilt this
@@ -3573,6 +3589,7 @@
 			contentEl?.removeEventListener("touchstart", clearOpenAnchor);
 			contentEl?.removeEventListener("touchstart", handleReaderTouchStart);
 			contentEl?.removeEventListener("touchend", handleReaderTouchEnd);
+			contentEl?.removeEventListener("touchcancel", handleReaderTouchCancel);
 			window.removeEventListener("popstate", handlePopState);
 			if (contentLoadFrame !== null) {
 				cancelAnimationFrame(contentLoadFrame);
@@ -3998,7 +4015,7 @@
 			return;
 		}
 		if (e.key === "Enter") {
-			if (isMobile) return;
+			if (isMobile && !e.ctrlKey && !e.metaKey) return;
 			// Shift+Enter inserts a line break (browser default); Enter or
 			// Ctrl+Enter saves.
 			if (e.shiftKey) return;
@@ -5741,7 +5758,9 @@
 	class:layout-wide={windowMaximized}
 	class:is-mobile={isMobile}
 >
-	<WindowResizeHandles />
+	{#if !isMobile}
+		<WindowResizeHandles />
+	{/if}
 
 	<!-- Reading progress indicator (hidden during continuous reading) -->
 	{#if $currentFilePath && !flowReaderSession}
@@ -5779,11 +5798,13 @@
 		on:focusin={onChromeFocusIn}
 		on:focusout={onChromeFocusOut}
 	>
-		<WindowChrome
-			visible={true}
-			overlay={false}
-			onMaximizedChange={handleWindowMaximizedChange}
-		/>
+		{#if !isMobile}
+			<WindowChrome
+				visible={true}
+				overlay={false}
+				onMaximizedChange={handleWindowMaximizedChange}
+			/>
+		{/if}
 
 		{#if showMarkdownContext}
 			<header class="topbar context-bar" role="toolbar" aria-label="阅读工具栏">
@@ -7599,6 +7620,10 @@
 		bottom: calc(14px + env(safe-area-inset-bottom, 0px));
 		font-size: 11.5px;
 		padding: 4px 12px;
+	}
+
+	.app.is-mobile .edit-hint {
+		bottom: calc(28px + env(safe-area-inset-bottom, 0px));
 	}
 
 	.mobile-focus-bar {

@@ -42,8 +42,26 @@ $java = Get-Command 'java.exe' -ErrorAction SilentlyContinue
 if (-not $java -and -not $env:JAVA_HOME) {
     throw "未找到 Java 运行环境。请设置 JAVA_HOME 或将 JDK 添加到 PATH。"
 }
+if (-not $env:JAVA_HOME -and $java) {
+    $javaBin = Split-Path -Parent $java.Source
+    $candidateHome = Split-Path -Parent $javaBin
+    if (Test-Path -LiteralPath (Join-Path $candidateHome 'bin\java.exe')) {
+        $env:JAVA_HOME = $candidateHome
+        Write-Host "自动推导 JAVA_HOME: $env:JAVA_HOME" -ForegroundColor Cyan
+    }
+}
 if ($env:JAVA_HOME -and (Test-Path -LiteralPath $env:JAVA_HOME)) {
     Write-Host "[OK] JAVA_HOME: $env:JAVA_HOME" -ForegroundColor Green
+    if ($java) {
+        $javaVersionOutput = & $java.Source -version 2>&1 | Out-String
+        if ($javaVersionOutput -match 'version "(\d+)') {
+            $majorVersion = [int]$matches[1]
+            if ($majorVersion -gt 21) {
+                Write-Warning "[WARN] 当前 Java 大版本为 JDK $majorVersion。Android Gradle 插件 (AGP 8.x) 最佳兼容为 JDK 17 或 21。"
+                Write-Warning "若 Gradle 报错 'Unsupported class file major version'，建议临时设置 `$env:JAVA_HOME 指向 JDK 17/21。"
+            }
+        }
+    }
 } elseif ($java) {
     Write-Host "[OK] java: $($java.Source)" -ForegroundColor Green
 }
@@ -74,15 +92,22 @@ if ($foundSdk) {
 }
 
 # 4. 检查 Android NDK
-if ($env:ANDROID_HOME) {
+if (-not $env:NDK_HOME -and $env:ANDROID_NDK_HOME) {
+    $env:NDK_HOME = $env:ANDROID_NDK_HOME
+}
+if (-not $env:NDK_HOME -and $env:ANDROID_HOME) {
     $ndkDir = Join-Path $env:ANDROID_HOME 'ndk'
     if (Test-Path -LiteralPath $ndkDir) {
         $latestNdk = Get-ChildItem -Path $ndkDir -Directory | Sort-Object Name -Descending | Select-Object -First 1
         if ($latestNdk) {
             $env:NDK_HOME = $latestNdk.FullName
-            Write-Host "[OK] NDK_HOME: $($latestNdk.FullName)" -ForegroundColor Green
         }
     }
+}
+if ($env:NDK_HOME) {
+    Write-Host "[OK] NDK_HOME: $env:NDK_HOME" -ForegroundColor Green
+} else {
+    Write-Warning "[WARN] 未检测到 Android NDK。Tauri 构建 C/Rust 本地库需要 NDK (建议 NDK r26b+)。"
 }
 
 # 5. 检查 Rust Android Target
@@ -90,19 +115,22 @@ if (-not $SkipToolchainCheck) {
     $rustup = Get-Command 'rustup.exe' -ErrorAction SilentlyContinue
     if ($rustup) {
         $rustTargets = @{
-            'aarch64' = 'aarch64-linux-android'
-            'armv7'   = 'armv7-linux-androideabi'
-            'x86_64'  = 'x86_64-linux-android'
+            'aarch64'   = @('aarch64-linux-android')
+            'armv7'     = @('armv7-linux-androideabi')
+            'x86_64'    = @('x86_64-linux-android')
+            'universal' = @('aarch64-linux-android', 'armv7-linux-androideabi', 'x86_64-linux-android')
         }
-        $targetTriple = $rustTargets[$Target]
-        if ($targetTriple) {
-            Write-Host "检查 Rust target: $targetTriple..."
+        $targetTriples = $rustTargets[$Target]
+        if ($targetTriples) {
             $installedTargets = @(& $rustup.Source target list --installed)
-            if ($installedTargets -notcontains $targetTriple) {
-                Write-Host "正在为 rustup 添加 target: $targetTriple..." -ForegroundColor Yellow
-                & $rustup.Source target add $targetTriple
-            } else {
-                Write-Host "[OK] Rust target 已就绪: $targetTriple" -ForegroundColor Green
+            foreach ($triple in $targetTriples) {
+                Write-Host "检查 Rust target: $triple..."
+                if ($installedTargets -notcontains $triple) {
+                    Write-Host "正在为 rustup 添加 target: $triple..." -ForegroundColor Yellow
+                    & $rustup.Source target add $triple
+                } else {
+                    Write-Host "[OK] Rust target 已就绪: $triple" -ForegroundColor Green
+                }
             }
         }
     }

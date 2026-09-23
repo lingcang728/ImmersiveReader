@@ -147,7 +147,10 @@ fn delete_secret(target: &str) -> Result<(), String> {
 fn secret_file_path(target: &str) -> Result<std::path::PathBuf, String> {
     let locations = crate::storage::StorageLocations::current()?;
     let safe_name = target.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-    Ok(locations.data_root.join("Private").join(format!("{safe_name}.key")))
+    Ok(locations
+        .data_root
+        .join("Private")
+        .join(format!("{safe_name}.key")))
 }
 
 #[cfg(not(windows))]

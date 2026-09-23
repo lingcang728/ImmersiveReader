@@ -26,7 +26,7 @@
 
 	// P2-40: the edge strips sit above app content — they must disappear when
 	// the window is maximized or fullscreen, where they only swallow clicks.
-	let handlesEnabled = true;
+	let handlesEnabled = typeof window !== 'undefined' ? !detectDevice().isMobile : true;
 
 	async function refreshHandleState() {
 		if (typeof window !== 'undefined' && detectDevice().isMobile) {
