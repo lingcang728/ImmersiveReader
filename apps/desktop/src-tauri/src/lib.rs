@@ -17,6 +17,8 @@ mod atomic_file;
 pub mod cache;
 mod contracts;
 pub mod control;
+mod epub;
+mod import_ops;
 mod importer;
 #[cfg(windows)]
 pub mod job_object;
@@ -25,6 +27,7 @@ pub mod migration;
 pub mod podcast;
 mod progress;
 pub mod publish;
+mod reader_db;
 mod reader_http;
 mod reader_preferences;
 mod reader_server;
@@ -506,6 +509,25 @@ fn initial_markdown_path(args: &[String]) -> Option<String> {
     None
 }
 
+/// Non-Markdown counterpart of `initial_markdown_path` — a second-instance
+/// argv tail naming an existing file (`.epub`, `.zip`, folders' files…)
+/// goes to the pending-open queue for `begin_import` instead of `open-file`.
+/// Requiring `is_file` keeps random launcher flags out of the queue.
+fn initial_file_path(args: &[String]) -> Option<String> {
+    if args.len() <= 1 {
+        return None;
+    }
+    let exact = args[1].clone();
+    if !exact.starts_with('-') && std::path::Path::new(&exact).is_file() {
+        return Some(exact);
+    }
+    let joined = args[1..].join(" ");
+    if std::path::Path::new(&joined).is_file() {
+        return Some(joined);
+    }
+    None
+}
+
 /// P3-23: the bootstrap `window.__INITIAL_FILE__` injection. The path goes
 /// through `serde_json::to_string` so quotes/backslashes can never break out
 /// of the JS string literal — interpolating the raw path into eval'd script
@@ -855,10 +877,21 @@ async fn get_storage_usage() -> Result<StorageUsage, String> {
     tauri::async_runtime::spawn_blocking(|| -> Result<StorageUsage, String> {
         let mut locations = storage::StorageLocations::current()?;
         locations.library_root = PathBuf::from(settings::load_settings()?.library_root);
+        // `mut` only under Android (staging dirs fold into the total there).
+        #[allow(unused_mut)]
+        let mut cache_bytes = directory_size(&locations.cache_root)?;
+        // Android: SAF pick staging sits in the private app cache, outside
+        // `Cache\` — count it so the usage bar is honest on mobile.
+        #[cfg(target_os = "android")]
+        if let Ok(base) = storage::android_base_dirs() {
+            for dir in temporary_content::android_staging_dirs(&base.app_cache) {
+                cache_bytes = cache_bytes.saturating_add(directory_size(&dir)?);
+            }
+        }
         Ok(StorageUsage {
             library_bytes: directory_size(&locations.library_root)?,
             data_bytes: directory_size(&locations.data_root)?,
-            cache_bytes: directory_size(&locations.cache_root)?,
+            cache_bytes,
             logs_bytes: directory_size(&locations.logs_root)?,
             backups_bytes: directory_size(&locations.backups_root)?,
             runtime_state_bytes: directory_size(&locations.runtime_state_root)?,
@@ -1910,25 +1943,60 @@ async fn scan_library() -> Result<library::LibraryScan, String> {
 }
 
 #[tauri::command]
-async fn open_book(book_id: String) -> Result<library::BookDetail, String> {
-    tauri::async_runtime::spawn_blocking(move || open_book_detail(&book_id))
-        .await
-        .map_err(|error| error.to_string())?
+async fn open_book(app: tauri::AppHandle, book_id: String) -> Result<library::BookDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (detail, book_root) = open_book_detail_at(&book_id)?;
+        // The whole book dir is granted recursively so chapter assets
+        // (`assets/*`, EPUB `content/*`, covers) resolve via convertFileSrc.
+        let _ = app.asset_protocol_scope().allow_directory(&book_root, true);
+        Ok(detail)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn open_book_detail(book_id: &str) -> Result<library::BookDetail, String> {
+    open_book_detail_at(book_id).map(|(detail, _)| detail)
+}
+
+fn open_book_detail_at(book_id: &str) -> Result<(library::BookDetail, PathBuf), String> {
     let value = settings::load_settings()?;
+    let book_root =
+        library::book_context(Path::new(&value.library_root), book_id).map(|(root, _, _)| root)?;
     let mut detail = library::open_book(Path::new(&value.library_root), book_id)?;
-    detail.task_records =
-        control::ControlDb::open_current()?.task_snapshots_for_book(&detail.manifest.book_id)?;
-    Ok(detail)
+    // Task records are advisory — a busy/missing control.db must not fail a
+    // book open; it degrades to an empty list like unreadable provenance.
+    detail.task_records = control::ControlDb::open_current()
+        .and_then(|control| control.task_snapshots_for_book(&detail.manifest.book_id))
+        .unwrap_or_else(|error| {
+            storage::app_log(
+                "library",
+                &format!("open_book: task records unavailable for {book_id}: {error}"),
+            );
+            Vec::new()
+        });
+    Ok((detail, book_root))
 }
 
 #[tauri::command]
-async fn get_book_chapter_path(book_id: String, chapter_id: String) -> Result<String, String> {
+async fn get_book_chapter_path(
+    app: tauri::AppHandle,
+    book_id: String,
+    chapter_id: String,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let value = settings::load_settings()?;
         let path = library::chapter_path(Path::new(&value.library_root), &book_id, &chapter_id)?;
+        // Same recursive grant as open_book — the chapter's relative
+        // resources resolve against the book root's scope.
+        if let (Ok(canonical_file), Ok(canonical_library)) = (
+            path.canonicalize(),
+            Path::new(&value.library_root).canonicalize(),
+        ) {
+            if let Some(book_root) = book_asset_root(&canonical_file, &canonical_library) {
+                let _ = app.asset_protocol_scope().allow_directory(book_root, true);
+            }
+        }
         Ok(path.to_string_lossy().into_owned())
     })
     .await
@@ -1953,6 +2021,1032 @@ async fn import_markdown_folder(path: String) -> Result<importer::ImportOutcome,
     tauri::async_runtime::spawn_blocking(move || {
         let value = settings::load_settings()?;
         importer::import_markdown_folder(Path::new(&path), Path::new(&value.library_root))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// ===== Import operations (begin/status/cancel) =========================
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportRequest {
+    /// "directory" | "files" | "uris" | "archive".
+    kind: String,
+    /// `directory`/`archive`: the source path.
+    path: Option<String>,
+    /// `files`: absolute paths of picked files.
+    paths: Option<Vec<String>>,
+    /// `uris`: Android `content://` URIs to stage via the plugin.
+    uris: Option<Vec<String>>,
+    /// Optional caller-chosen book title (staged dirs have opaque names).
+    title: Option<String>,
+}
+
+#[tauri::command]
+async fn begin_import(
+    app: tauri::AppHandle,
+    request: ImportRequest,
+) -> Result<import_ops::ImportOperation, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // `app` only feeds the Android `uris` arm — mark it used elsewhere.
+        let _ = &app;
+        let locations = storage::StorageLocations::current_with_library_settings()?;
+        let title = request.title.clone();
+        let label = title.clone().unwrap_or_else(|| "导入".to_string());
+        match request.kind.as_str() {
+            "directory" => {
+                let path = request
+                    .path
+                    .clone()
+                    .ok_or_else(|| "IMPORT_REQUEST_MISSING_PATH".to_string())?;
+                let source = atomic_file::long_path(Path::new(&path));
+                if !source.is_dir() {
+                    return Err("IMPORT_SOURCE_NOT_DIRECTORY".to_string());
+                }
+                let total = import_ops::count_importable_files(&source);
+                import_ops::begin("directory", &label, move |progress| {
+                    progress.set_total(total);
+                    let (cancel, done) = progress.counters();
+                    let outcome = importer::import_markdown_folder_inner(
+                        &source,
+                        &locations.library_root,
+                        title.as_deref(),
+                        Some(cancel),
+                        Some(done),
+                    )?;
+                    serde_json::to_value(&outcome).map_err(|error| error.to_string())
+                })
+            }
+            "files" => {
+                let paths = request
+                    .paths
+                    .clone()
+                    .filter(|paths| !paths.is_empty())
+                    .ok_or_else(|| "IMPORT_REQUEST_MISSING_PATHS".to_string())?;
+                import_ops::begin("files", &label, move |progress| {
+                    import_ops::run_with_staging(&locations, progress.op_id(), |staging| {
+                        import_ops::stage_local_files(&paths, staging, progress)?;
+                        import_ops::route_staged(staging, title.as_deref(), &locations, progress)
+                    })
+                })
+            }
+            "uris" => {
+                let uris = request
+                    .uris
+                    .clone()
+                    .filter(|uris| !uris.is_empty())
+                    .ok_or_else(|| "IMPORT_REQUEST_MISSING_URIS".to_string())?;
+                #[cfg(not(target_os = "android"))]
+                {
+                    let _ = (uris, label, locations, title);
+                    Err("IMPORT_KIND_UNSUPPORTED".to_string())
+                }
+                #[cfg(target_os = "android")]
+                {
+                    let app = app.clone();
+                    import_ops::begin("uris", &label, move |progress| {
+                        import_ops::run_with_staging(&locations, progress.op_id(), |staging| {
+                            let handle = app
+                                .try_state::<ContentReaderHandle>()
+                                .ok_or_else(|| "content reader plugin unavailable".to_string())?;
+                            progress.set_total(uris.len() as u32);
+                            for uri in &uris {
+                                if progress.is_cancelled() {
+                                    return Err(importer::IMPORT_CANCELLED.to_string());
+                                }
+                                handle
+                                    .0
+                                    .run_mobile_plugin::<StagedContentFile>(
+                                        "copyToDir",
+                                        serde_json::json!({
+                                            "uri": uri,
+                                            "dir": staging.to_string_lossy(),
+                                        }),
+                                    )
+                                    .map_err(|error| format!("内容 URI 读取失败：{error}"))?;
+                                progress.add_done(1);
+                            }
+                            import_ops::route_staged(
+                                staging,
+                                title.as_deref(),
+                                &locations,
+                                progress,
+                            )
+                        })
+                    })
+                }
+            }
+            "archive" => {
+                let path = request
+                    .path
+                    .clone()
+                    .ok_or_else(|| "IMPORT_REQUEST_MISSING_PATH".to_string())?;
+                let source = atomic_file::long_path(Path::new(&path));
+                if !source.is_file() {
+                    return Err("IMPORT_SOURCE_NOT_FILE".to_string());
+                }
+                import_ops::begin("archive", &label, move |progress| {
+                    import_ops::run_with_staging(&locations, progress.op_id(), |staging| {
+                        let lower = path.to_ascii_lowercase();
+                        if lower.ends_with(".epub") {
+                            let outcome = epub::import_epub_file(
+                                &source,
+                                &locations.library_root,
+                                title.as_deref(),
+                            )?;
+                            return serde_json::to_value(&outcome)
+                                .map_err(|error| error.to_string());
+                        }
+                        if lower.ends_with(".zip") || lower.ends_with(".cbz") {
+                            let expanded = import_ops::expand_archive(&source, staging)?;
+                            return import_ops::route_staged(
+                                &expanded,
+                                title.as_deref(),
+                                &locations,
+                                progress,
+                            );
+                        }
+                        Err("IMPORT_ARCHIVE_UNSUPPORTED".to_string())
+                    })
+                })
+            }
+            _ => Err("IMPORT_KIND_UNSUPPORTED".to_string()),
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_import_status(op_id: String) -> Result<Option<import_ops::ImportOperation>, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(import_ops::status(&op_id)))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn cancel_import(op_id: String) -> Result<import_ops::ImportOperation, String> {
+    tauri::async_runtime::spawn_blocking(move || import_ops::cancel(&op_id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+// ===== Platform capabilities ===========================================
+
+/// What this build can actually do — the frontend hides entries whose flag
+/// is false rather than discovering failures at invoke time.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformCapabilities {
+    platform: &'static str,
+    /// The tiny_http 连读 surface exists on desktop only.
+    reader_session: bool,
+    /// SAF `content://` staging via the content-reader plugin.
+    content_uri_import: bool,
+    /// EPUB import + chapter serving.
+    epub: bool,
+    /// Volume-key page turning (Android hardware keys).
+    volume_key_capture: bool,
+    /// Reading bundle export/import (zip).
+    reading_bundle: bool,
+}
+
+#[tauri::command]
+fn get_platform_capabilities() -> PlatformCapabilities {
+    #[cfg(target_os = "android")]
+    {
+        return PlatformCapabilities {
+            platform: "android",
+            reader_session: false,
+            content_uri_import: true,
+            epub: true,
+            volume_key_capture: true,
+            reading_bundle: true,
+        };
+    }
+    #[cfg(target_os = "windows")]
+    {
+        PlatformCapabilities {
+            platform: "windows",
+            reader_session: true,
+            content_uri_import: false,
+            epub: true,
+            volume_key_capture: false,
+            reading_bundle: true,
+        }
+    }
+    #[cfg(not(any(target_os = "android", target_os = "windows")))]
+    PlatformCapabilities {
+        platform: "other",
+        reader_session: true,
+        content_uri_import: false,
+        epub: true,
+        volume_key_capture: false,
+        reading_bundle: true,
+    }
+}
+
+/// Volume-key page-turn state: the flag is authoritative for the reader
+/// surface; on Android the value is additionally pushed into the
+/// content-reader plugin best-effort (hardware interception is advisory —
+/// a plugin miss never blocks the toggle).
+static VOLUME_KEY_CAPTURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+async fn set_volume_key_capture(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        VOLUME_KEY_CAPTURE.store(enabled, Ordering::Relaxed);
+        #[cfg(target_os = "android")]
+        {
+            if let Some(handle) = app.try_state::<ContentReaderHandle>() {
+                if let Err(error) = handle.0.run_mobile_plugin::<serde_json::Value>(
+                    "setVolumeKeyCapture",
+                    serde_json::json!({ "enabled": enabled }),
+                ) {
+                    storage::app_log(
+                        "reader",
+                        &format!("setVolumeKeyCapture plugin call failed: {error}"),
+                    );
+                }
+            }
+        }
+        let _ = app;
+        Ok(enabled)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Open-intent URIs queued for the frontend to drain — desktop "open with"
+/// for non-Markdown payloads lands here instead of the Markdown-only
+/// `open-file` event. On Android the Kotlin activity's VIEW-intent URIs
+/// additionally live in the plugin and are merged in on each take.
+fn pending_open_uris() -> &'static Mutex<Vec<String>> {
+    static URIS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    URIS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub(crate) fn queue_pending_open_uri(uri: String) {
+    if let Ok(mut uris) = pending_open_uris().lock() {
+        uris.push(uri);
+    }
+}
+
+#[cfg(target_os = "android")]
+#[derive(serde::Deserialize)]
+struct PluginPendingUris {
+    #[serde(default)]
+    uris: Vec<String>,
+}
+
+#[tauri::command]
+async fn take_pending_open_uris(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // `mut` only under Android (the plugin queue folds into this vec).
+        #[allow(unused_mut)]
+        let mut uris = pending_open_uris()
+            .lock()
+            .map(|mut uris| std::mem::take(&mut *uris))
+            .unwrap_or_default();
+        // The plugin's queue holds URIs from intents that arrived before the
+        // Rust side was ready — drain it every time. A plugin failure must
+        // not eat the local queue (logged, not fatal).
+        #[cfg(target_os = "android")]
+        if let Some(handle) = app.try_state::<ContentReaderHandle>() {
+            match handle.0.run_mobile_plugin::<PluginPendingUris>(
+                "takePendingOpenUris",
+                serde_json::json!({}),
+            ) {
+                Ok(result) => uris.extend(result.uris),
+                Err(error) => storage::app_log(
+                    "app",
+                    &format!("takePendingOpenUris plugin call failed: {error}"),
+                ),
+            }
+        }
+        let _ = app;
+        Ok(uris)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// ===== Readable chapters (Markdown + EPUB) =============================
+
+/// One reader-ready chapter. Markdown books answer from disk directly;
+/// EPUB books route through `epub::read_epub_chapter` (sanitized XHTML).
+/// Either way the book root gets the recursive asset scope grant so
+/// chapter-relative resources render.
+#[tauri::command]
+async fn get_readable_chapter(
+    app: tauri::AppHandle,
+    book_id: String,
+    chapter_id: String,
+) -> Result<epub::ReadableChapter, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = settings::load_settings()?;
+        let (book_root, manifest, _) =
+            library::book_context(Path::new(&value.library_root), &book_id)?;
+        let position = manifest
+            .chapters
+            .iter()
+            .position(|chapter| chapter.id == chapter_id)
+            .ok_or_else(|| format!("Chapter not found: {chapter_id}"))?;
+        let chapter = &manifest.chapters[position];
+        // Recursive grant on the book root covers everything a chapter may
+        // reference — content/, assets/, cover — nothing more is needed.
+        let _ = app.asset_protocol_scope().allow_directory(&book_root, true);
+        if epub::publication_path(&book_root).is_file() {
+            return epub::read_epub_chapter(&book_root, chapter);
+        }
+        // Markdown chapter: enforce the same cap+decode the standalone file
+        // path uses, then hand the reader a ReadableChapter-shaped payload.
+        let file = atomic_file::long_path(
+            &book_root.join(chapter.path.replace('/', std::path::MAIN_SEPARATOR_STR)),
+        );
+        let metadata = fs::metadata(&file).map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("Chapter file is missing".to_string());
+        }
+        if metadata.len() > MAX_MARKDOWN_FILE_BYTES {
+            return Err("MARKDOWN_FILE_TOO_LARGE".to_string());
+        }
+        let bytes = {
+            let file = fs::File::open(&file).map_err(|error| error.to_string())?;
+            let mut bytes = Vec::new();
+            file.take(MAX_MARKDOWN_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            if bytes.len() as u64 > MAX_MARKDOWN_FILE_BYTES {
+                return Err("MARKDOWN_FILE_TOO_LARGE".to_string());
+            }
+            bytes
+        };
+        let (content, _) = decode_markdown_bytes(bytes)?;
+        let resource_dir = Path::new(&chapter.path)
+            .parent()
+            .map(|parent| parent.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        Ok(epub::ReadableChapter {
+            format: "markdown".to_string(),
+            chapter_id: chapter.id.clone(),
+            title: chapter.title.clone(),
+            content,
+            resource_dir,
+            prev_chapter_id: position
+                .checked_sub(1)
+                .map(|index| manifest.chapters[index].id.clone()),
+            next_chapter_id: (position + 1 < manifest.chapters.len())
+                .then(|| manifest.chapters[position + 1].id.clone()),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Resolve a chapter-relative resource href (an image in an EPUB chapter)
+/// to an absolute in-book path the webview can load via convertFileSrc.
+/// Returns `None` for out-of-book or unresolvable hrefs.
+#[tauri::command]
+async fn resolve_book_resource(
+    app: tauri::AppHandle,
+    book_id: String,
+    chapter_id: String,
+    href: String,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = settings::load_settings()?;
+        let (book_root, manifest, _) =
+            library::book_context(Path::new(&value.library_root), &book_id)?;
+        let chapter = manifest
+            .chapters
+            .iter()
+            .find(|chapter| chapter.id == chapter_id)
+            .ok_or_else(|| format!("Chapter not found: {chapter_id}"))?;
+        let chapter_path = book_root.join(chapter.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let Some(resolved) = epub::resolve_book_resource(&book_root, &chapter_path, &href) else {
+            return Ok(None);
+        };
+        let _ = app.asset_protocol_scope().allow_file(&resolved);
+        Ok(Some(resolved.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// ===== Reader state: locators, bookmarks, search (reader.db) ===========
+
+#[tauri::command]
+async fn save_reader_locator(book_id: String, locator_json: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        reader_db::ReaderDb::open_current()?.save_locator(&book_id, &locator_json)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn load_reader_locator(book_id: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        reader_db::ReaderDb::open_current()?.load_locator(&book_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn add_reader_bookmark(
+    book_id: String,
+    bookmark_id: Option<String>,
+    locator_json: String,
+    label: String,
+) -> Result<reader_db::BookmarkRow, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bookmark_id = bookmark_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let db = reader_db::ReaderDb::open_current()?;
+        db.add_bookmark(&book_id, &bookmark_id, &locator_json, &label)?;
+        db.list_bookmarks(&book_id)?
+            .into_iter()
+            .find(|row| row.bookmark_id == bookmark_id)
+            .ok_or_else(|| "Bookmark was not persisted".to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn remove_reader_bookmark(book_id: String, bookmark_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        reader_db::ReaderDb::open_current()?.remove_bookmark(&book_id, &bookmark_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn list_reader_bookmarks(book_id: String) -> Result<Vec<reader_db::BookmarkRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        reader_db::ReaderDb::open_current()?.list_bookmarks(&book_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Full-text search inside one book. The chapter-text index is built lazily
+/// on first search — Markdown reads the chapter files, EPUB goes through
+/// `epub::chapter_plain_text` — then FTS5 (or the LIKE fallback) answers.
+#[tauri::command]
+async fn search_book(
+    book_id: String,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<reader_db::SearchHit>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = reader_db::ReaderDb::open_current()?;
+        if !db.fts_book_indexed(&book_id)? {
+            let value = settings::load_settings()?;
+            let (book_root, manifest, _) =
+                library::book_context(Path::new(&value.library_root), &book_id)?;
+            let is_epub = epub::publication_path(&book_root).is_file();
+            for chapter in &manifest.chapters {
+                let text = if is_epub {
+                    epub::chapter_plain_text(&book_root, chapter)?
+                } else {
+                    let path = atomic_file::long_path(
+                        &book_root.join(chapter.path.replace('/', std::path::MAIN_SEPARATOR_STR)),
+                    );
+                    match fs::metadata(&path) {
+                        Ok(metadata)
+                            if metadata.is_file() && metadata.len() <= MAX_MARKDOWN_FILE_BYTES =>
+                        {
+                            fs::read(&path)
+                                .ok()
+                                .and_then(|bytes| decode_markdown_bytes(bytes).ok())
+                                .map(|(content, _)| content)
+                                .unwrap_or_default()
+                        }
+                        _ => String::new(),
+                    }
+                };
+                db.fts_replace_chapter(&book_id, &chapter.id, &chapter.title, &text)?;
+            }
+        }
+        db.fts_search(&book_id, &query, limit.unwrap_or(50))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// ===== Reading bundle export/import ====================================
+
+/// Bundle shape: `bundle.json` header + `settings.json` +
+/// `reader-preferences.json` + `reader_db.json` + `books/<dir_rel>/…`
+/// (full book directories — the point is library/progress/bookmarks
+/// restoration, so chapter/asset payloads ship wholesale under the 4 GiB
+/// uncompressed guard).
+const BUNDLE_SCHEMA_VERSION: u32 = 1;
+const BUNDLE_MAX_CONTENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// JSON metadata members stay tiny — a multi-MB `settings.json` is hostile.
+const BUNDLE_META_ENTRY_CAP: u64 = 64 * 1024 * 1024;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleExportResult {
+    path: String,
+    books: u32,
+    bytes: u64,
+    issues: Vec<library::LibraryIssue>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleImportResult {
+    books_imported: u32,
+    books_skipped: u32,
+    reader_books: u32,
+    locators: u32,
+    bookmarks: u32,
+    settings_restored: bool,
+    preferences_restored: bool,
+    issues: Vec<library::LibraryIssue>,
+}
+
+/// Collect every regular file under `root` as ("/"-joined rel, abs) pairs —
+/// the bundle walk skips symlinks/reparse points and dot-prefixed CONTROL
+/// dirs (`.trash`, `.incoming`) but keeps dot-prefixed FILES like
+/// `.reading.json`, which is exactly the state a bundle must carry.
+fn bundle_walk_book_files(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0_usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 32 {
+            continue;
+        }
+        for entry in fs::read_dir(&dir).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let file_type = entry.file_type().map_err(|error| error.to_string())?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let metadata = entry.metadata().map_err(|error| error.to_string())?;
+            if file_type.is_dir() {
+                if name.starts_with('.') || crate::atomic_file::is_reparse_point(&metadata) {
+                    continue;
+                }
+                stack.push((entry.path(), depth + 1));
+            } else if file_type.is_file() && !crate::atomic_file::is_reparse_point(&metadata) {
+                let rel = entry
+                    .path()
+                    .strip_prefix(root)
+                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if !rel.is_empty() {
+                    out.push((rel, entry.path()));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every component of a `books/…` member path must be a real directory name
+/// — no empties, dots, separators, drives or device names — or the whole
+/// book entry is refused.
+fn bundle_safe_member_path(member: &str) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in member.split('/') {
+        // `.reading.json` is the one dot-file a bundle legitimately carries.
+        let is_dotfile = component.starts_with('.') && component != ".reading.json";
+        if component.is_empty()
+            || is_dotfile
+            || component == ".."
+            || component.contains('\\')
+            || component.contains(':')
+            || crate::contracts::is_reserved_device_name(component)
+        {
+            return None;
+        }
+        out.push(component);
+    }
+    Some(out)
+}
+
+#[tauri::command]
+async fn export_reading_bundle(dest_path: String) -> Result<BundleExportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Write;
+
+        let locations = storage::StorageLocations::current_with_library_settings()?;
+        let dest = PathBuf::from(&dest_path);
+        if !dest.is_absolute() {
+            return Err("BUNDLE_PATH_NOT_ABSOLUTE".to_string());
+        }
+        let parent = dest
+            .parent()
+            .ok_or_else(|| "BUNDLE_PATH_NO_PARENT".to_string())?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        // A bundle inside the library would ingest itself on the next export.
+        if storage::path_within(&locations.library_root, &dest) {
+            return Err("BUNDLE_DEST_INSIDE_LIBRARY".to_string());
+        }
+        let library_root = atomic_file::long_path(&locations.library_root);
+        let mut manifest_paths = Vec::new();
+        let mut issues = Vec::new();
+        library::collect_manifests(&library_root, 0, &mut manifest_paths, &mut issues, false);
+        manifest_paths.sort();
+
+        // Write to a sibling temp name, then rename — the bundle is either
+        // complete or absent, never a truncated zip at the real path.
+        let tmp = dest.with_file_name(format!(
+            ".{}.tmp-{}",
+            dest.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "bundle".to_string()),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let outcome = (|| -> Result<(u32, u64), String> {
+            let file = fs::File::create(&tmp).map_err(|error| error.to_string())?;
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("bundle.json", options)
+                .map_err(|error| error.to_string())?;
+            serde_json::to_writer(
+                &mut zip,
+                &serde_json::json!({
+                    "schemaVersion": BUNDLE_SCHEMA_VERSION,
+                    "kind": "immersive-reader-bundle",
+                    "appVersion": env!("CARGO_PKG_VERSION"),
+                    "channel": locations.channel,
+                    "createdAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            )
+            .map_err(|error| error.to_string())?;
+            for (member, source) in [
+                ("settings.json", locations.settings_path.clone()),
+                (
+                    "reader-preferences.json",
+                    settings::app_state_dir().join("reader-preferences.json"),
+                ),
+            ] {
+                if let Ok(bytes) = fs::read(atomic_file::long_path(&source)) {
+                    zip.start_file(member, options)
+                        .map_err(|error| error.to_string())?;
+                    zip.write_all(&bytes).map_err(|error| error.to_string())?;
+                }
+            }
+            // reader.db state — index, locators, bookmarks. A missing/unopenable
+            // DB just omits the member (export never fails on it).
+            if let Ok(db) = reader_db::ReaderDb::open_current() {
+                if let Ok(state) = db.export_state() {
+                    zip.start_file("reader_db.json", options)
+                        .map_err(|error| error.to_string())?;
+                    serde_json::to_writer(&mut zip, &state).map_err(|error| error.to_string())?;
+                }
+            }
+            let mut books = 0_u32;
+            let mut total = 0_u64;
+            for manifest_path in manifest_paths {
+                let Some(book_root) = manifest_path.parent() else {
+                    continue;
+                };
+                // Unreadable manifest → issue, and the dir is not a book.
+                if library::read_manifest(&manifest_path).is_err() {
+                    issues.push(library::LibraryIssue {
+                        path: manifest_path.to_string_lossy().into_owned(),
+                        message: "BUNDLE_BOOK_MANIFEST_INVALID".to_string(),
+                    });
+                    continue;
+                }
+                let dir_rel = book_root
+                    .strip_prefix(&library_root)
+                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if dir_rel.is_empty() {
+                    continue;
+                }
+                for (rel, file) in bundle_walk_book_files(book_root)? {
+                    let len = fs::metadata(&file)
+                        .map_err(|error| error.to_string())?
+                        .len();
+                    total = total.saturating_add(len);
+                    if total > BUNDLE_MAX_CONTENT_BYTES {
+                        return Err("BUNDLE_TOO_LARGE".to_string());
+                    }
+                    zip.start_file(format!("books/{dir_rel}/{rel}"), options)
+                        .map_err(|error| error.to_string())?;
+                    let mut input = fs::File::open(&file).map_err(|error| error.to_string())?;
+                    std::io::copy(&mut input, &mut zip).map_err(|error| error.to_string())?;
+                }
+                books += 1;
+            }
+            zip.finish().map_err(|error| error.to_string())?;
+            Ok((books, total))
+        })();
+        match outcome {
+            Ok((books, bytes)) => {
+                if dest.exists() {
+                    fs::remove_file(&dest).map_err(|error| error.to_string())?;
+                }
+                fs::rename(&tmp, &dest).map_err(|error| error.to_string())?;
+                Ok(BundleExportResult {
+                    path: dest.to_string_lossy().into_owned(),
+                    books,
+                    bytes,
+                    issues,
+                })
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&tmp);
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn import_reading_bundle(src_path: String) -> Result<BundleImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read as _;
+
+        let locations = storage::StorageLocations::current_with_library_settings()?;
+        let src = atomic_file::long_path(Path::new(&src_path));
+        let metadata = fs::metadata(&src).map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("BUNDLE_SRC_NOT_FILE".to_string());
+        }
+        if metadata.len() > BUNDLE_MAX_CONTENT_BYTES {
+            return Err("BUNDLE_TOO_LARGE".to_string());
+        }
+        let library_root = atomic_file::long_path(&locations.library_root);
+        let mut issues: Vec<library::LibraryIssue> = Vec::new();
+        let push_issue = |issues: &mut Vec<library::LibraryIssue>, member: &str, code: &str| {
+            issues.push(library::LibraryIssue {
+                path: member.to_string(),
+                message: code.to_string(),
+            });
+        };
+
+        // Staging lives under the swept `手动/.incoming` — same volume as the
+        // final rename, cleaned at startup if we die mid-restore.
+        let staging = atomic_file::long_path(
+            &library_root
+                .join("手动")
+                .join(".incoming")
+                .join(format!("bundle-{}", uuid::Uuid::new_v4())),
+        );
+        fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+
+        let result = (|| -> Result<BundleImportResult, String> {
+            let file = fs::File::open(&src).map_err(|error| error.to_string())?;
+            let mut zip = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+
+            // ---- header gate ------------------------------------------
+            let header: serde_json::Value = (|| {
+                let mut entry = zip
+                    .by_name("bundle.json")
+                    .map_err(|_| "BUNDLE_MANIFEST_MISSING".to_string())?;
+                if entry.size() > BUNDLE_META_ENTRY_CAP {
+                    return Err("BUNDLE_META_TOO_LARGE".to_string());
+                }
+                serde_json::from_reader(&mut entry).map_err(|error| error.to_string())
+            })()?;
+            if header.get("schemaVersion").and_then(|v| v.as_u64())
+                != Some(BUNDLE_SCHEMA_VERSION as u64)
+            {
+                return Err("BUNDLE_SCHEMA_UNSUPPORTED".to_string());
+            }
+
+            // ---- pass 1: meta members + book extraction ---------------
+            let mut settings_bytes: Option<Vec<u8>> = None;
+            let mut prefs_bytes: Option<Vec<u8>> = None;
+            let mut reader_db_bytes: Option<Vec<u8>> = None;
+            let mut total = 0_u64;
+            for index in 0..zip.len() {
+                let mut entry = zip.by_index(index).map_err(|error| error.to_string())?;
+                if entry.is_dir() {
+                    continue;
+                }
+                let Some(name) = entry
+                    .enclosed_name()
+                    .map(|p| p.to_string_lossy().into_owned())
+                else {
+                    continue;
+                };
+                let name = name.as_str();
+                if entry.size() > BUNDLE_MAX_CONTENT_BYTES {
+                    push_issue(&mut issues, name, "BUNDLE_ENTRY_TOO_LARGE");
+                    continue;
+                }
+                match name {
+                    "settings.json" | "reader-preferences.json" | "reader_db.json" => {
+                        if entry.size() > BUNDLE_META_ENTRY_CAP {
+                            push_issue(&mut issues, name, "BUNDLE_META_TOO_LARGE");
+                            continue;
+                        }
+                        let mut bytes = Vec::new();
+                        entry
+                            .take(BUNDLE_META_ENTRY_CAP + 1)
+                            .read_to_end(&mut bytes)
+                            .map_err(|error| error.to_string())?;
+                        match name {
+                            "settings.json" => settings_bytes = Some(bytes),
+                            "reader-preferences.json" => prefs_bytes = Some(bytes),
+                            _ => reader_db_bytes = Some(bytes),
+                        }
+                    }
+                    _ => {
+                        let Some(book_rel) = name.strip_prefix("books/") else {
+                            continue; // unknown top-level members are ignored
+                        };
+                        let Some(rel) = bundle_safe_member_path(book_rel) else {
+                            push_issue(&mut issues, name, "BUNDLE_MEMBER_UNSAFE_PATH");
+                            continue;
+                        };
+                        total = total.saturating_add(entry.size());
+                        if total > BUNDLE_MAX_CONTENT_BYTES {
+                            return Err("BUNDLE_TOO_LARGE".to_string());
+                        }
+                        let target = staging.join(&rel);
+                        if let Some(parent) = target.parent() {
+                            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                        }
+                        let mut out =
+                            fs::File::create(&target).map_err(|error| error.to_string())?;
+                        std::io::copy(&mut entry, &mut out).map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+
+            // ---- validate + place each staged book --------------------
+            let mut staged_manifests = Vec::new();
+            library::collect_manifests(&staging, 0, &mut staged_manifests, &mut issues, false);
+            staged_manifests.sort();
+            // Book ids already on the shelf — bundle entries with a
+            // duplicate bookId are skipped instead of overwriting.
+            let mut existing_ids = std::collections::HashSet::new();
+            let mut shelf_manifests = Vec::new();
+            library::collect_manifests(
+                &library_root,
+                0,
+                &mut shelf_manifests,
+                &mut Vec::new(),
+                false,
+            );
+            for path in &shelf_manifests {
+                if let Ok(manifest) = library::read_manifest(path) {
+                    existing_ids.insert(manifest.book_id);
+                }
+            }
+            let mut books_imported = 0_u32;
+            let mut books_skipped = 0_u32;
+            let mut known_book_ids = std::collections::HashSet::new();
+            for manifest_path in staged_manifests {
+                let Some(staged_root) = manifest_path.parent() else {
+                    continue;
+                };
+                let manifest = match library::read_manifest(&manifest_path) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        push_issue(
+                            &mut issues,
+                            &manifest_path.to_string_lossy(),
+                            &format!("BUNDLE_BOOK_MANIFEST_INVALID: {error}"),
+                        );
+                        continue;
+                    }
+                };
+                if existing_ids.contains(&manifest.book_id) {
+                    books_skipped += 1;
+                    // Its reader state still merges — the shelf copy is the
+                    // same book.
+                    known_book_ids.insert(manifest.book_id.clone());
+                    push_issue(
+                        &mut issues,
+                        &staged_root.to_string_lossy(),
+                        "BUNDLE_BOOK_EXISTS",
+                    );
+                    continue;
+                }
+                // `.reading.json` must validate against THIS manifest — a
+                // corrupt one is dropped (with an issue), never written.
+                let progress_file = staged_root.join(".reading.json");
+                if progress_file.is_file() {
+                    let valid = fs::read_to_string(&progress_file)
+                        .ok()
+                        .and_then(|raw| {
+                            serde_json::from_str::<contracts::ReadingProgress>(&raw).ok()
+                        })
+                        .map(|progress| contracts::validate_reading(&progress, &manifest).is_ok())
+                        .unwrap_or(false);
+                    if !valid {
+                        let _ = fs::remove_file(&progress_file);
+                        push_issue(
+                            &mut issues,
+                            &format!("{}/.reading.json", manifest.book_id),
+                            "BUNDLE_PROGRESS_INVALID",
+                        );
+                    }
+                }
+                // publication.json must parse as a Publication — the epub
+                // reader refuses a malformed sidecar anyway.
+                let publication_file = staged_root.join("publication.json");
+                if publication_file.is_file() {
+                    let valid = fs::read_to_string(&publication_file)
+                        .ok()
+                        .and_then(|raw| serde_json::from_str::<epub::Publication>(&raw).ok())
+                        .is_some();
+                    if !valid {
+                        let _ = fs::remove_file(&publication_file);
+                        push_issue(
+                            &mut issues,
+                            &format!("{}/publication.json", manifest.book_id),
+                            "BUNDLE_PUBLICATION_INVALID",
+                        );
+                    }
+                }
+                // Restore under the bundle's original dir_rel when its
+                // components are safe, else fall back to 手动/<title>.
+                let rel = staged_root
+                    .strip_prefix(&staging)
+                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let target_parent = bundle_safe_member_path(&rel)
+                    .and_then(|rel| rel.parent().map(|p| library_root.join(p)))
+                    .unwrap_or_else(|| library_root.join("手动"));
+                let target_name = staged_root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("imported-book");
+                fs::create_dir_all(&target_parent).map_err(|error| error.to_string())?;
+                let target = importer::unique_target(&target_parent, target_name);
+                fs::rename(staged_root, atomic_file::long_path(&target))
+                    .map_err(|error| error.to_string())?;
+                books_imported += 1;
+                known_book_ids.insert(manifest.book_id.clone());
+            }
+
+            // ---- reader.db merge --------------------------------------
+            let mut merged = reader_db::ReaderDbMergeReport::default();
+            if let Some(bytes) = reader_db_bytes {
+                match serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .map_err(|error| error.to_string())
+                    .and_then(|state| {
+                        reader_db::ReaderDb::open_current()
+                            .and_then(|db| db.import_state(&state, &known_book_ids))
+                    }) {
+                    Ok(report) => merged = report,
+                    Err(error) => push_issue(&mut issues, "reader_db.json", &error),
+                }
+            }
+
+            // ---- settings + reader preferences -------------------------
+            let mut settings_restored = false;
+            if let Some(bytes) = settings_bytes {
+                match serde_json::from_slice::<settings::AppSettings>(&bytes) {
+                    Ok(mut incoming) => {
+                        // The library root is machine-local — never import it.
+                        incoming.library_root =
+                            locations.library_root.to_string_lossy().into_owned();
+                        match settings::save_settings(&incoming) {
+                            Ok(()) => settings_restored = true,
+                            Err(error) => push_issue(&mut issues, "settings.json", &error),
+                        }
+                    }
+                    Err(error) => push_issue(&mut issues, "settings.json", &error.to_string()),
+                }
+            }
+            let mut preferences_restored = false;
+            if let Some(bytes) = prefs_bytes {
+                match serde_json::from_slice::<reader_preferences::ReaderPreferences>(&bytes)
+                    .map_err(|error| error.to_string())
+                    .and_then(|prefs| reader_preferences::save(&prefs))
+                {
+                    Ok(()) => preferences_restored = true,
+                    Err(error) => push_issue(&mut issues, "reader-preferences.json", &error),
+                }
+            }
+
+            Ok(BundleImportResult {
+                books_imported,
+                books_skipped,
+                reader_books: merged.books,
+                locators: merged.locators,
+                bookmarks: merged.bookmarks,
+                settings_restored,
+                preferences_restored,
+                issues,
+            })
+        })();
+        let _ = fs::remove_dir_all(&staging);
+        result
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2049,9 +3143,19 @@ async fn permanently_delete_trash_item(
 
 #[tauri::command]
 async fn list_temporary_content() -> Result<Vec<temporary_content::TemporaryItem>, String> {
-    tauri::async_runtime::spawn_blocking(temporary_content::items)
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(|| {
+        let locations = storage::StorageLocations::current()?;
+        // Only Android stages SAF picks in the private app cache.
+        #[cfg(target_os = "android")]
+        let app_cache = storage::android_base_dirs()
+            .ok()
+            .map(|base| base.app_cache.clone());
+        #[cfg(not(target_os = "android"))]
+        let app_cache: Option<PathBuf> = None;
+        temporary_content::items(&locations, app_cache.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 // P3-24: diagnostics surface, intentionally registered — no frontend caller
@@ -2129,20 +3233,31 @@ async fn start_reader_session(
     book_id: String,
     state: tauri::State<'_, std::sync::Arc<reader_server::ReaderServiceState>>,
 ) -> Result<reader_server::ReaderSessionDescriptor, String> {
-    // Server bind + reader template read are blocking IO — keep off IPC thread.
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let value = settings::load_settings()?;
-        // 12-F4: track atomically against remove_book/delete_book — a session
-        // created during their sweep gap would escape closure and keep
-        // writing into the removed book directory.
-        let _lifecycle = reader_book_lifecycle_lock().lock().ok();
-        let descriptor = reader_server::start_session(&state, &value, &book_id)?;
-        track_reader_session(&state, &book_id, &descriptor.session_id);
-        Ok(descriptor)
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    // The tiny_http 连读 server is a desktop surface — on Android the
+    // backend refuses outright (the frontend hides the entry via
+    // get_platform_capabilities, this is the hard gate behind it).
+    #[cfg(target_os = "android")]
+    {
+        let _ = (book_id, state);
+        return Err("READER_SESSION_UNSUPPORTED_PLATFORM".to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        // Server bind + reader template read are blocking IO — keep off IPC thread.
+        let state = state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let value = settings::load_settings()?;
+            // 12-F4: track atomically against remove_book/delete_book — a session
+            // created during their sweep gap would escape closure and keep
+            // writing into the removed book directory.
+            let _lifecycle = reader_book_lifecycle_lock().lock().ok();
+            let descriptor = reader_server::start_session(&state, &value, &book_id)?;
+            track_reader_session(&state, &book_id, &descriptor.session_id);
+            Ok(descriptor)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
 }
 
 #[tauri::command]
@@ -2851,6 +3966,10 @@ pub fn run() {
         if let Some(file_path) = initial_markdown_path(&args) {
             register_opened_markdown(Path::new(&file_path));
             let _ = app.emit("open-file", file_path);
+        } else if let Some(file_path) = initial_file_path(&args) {
+            // Windows "open with" on .epub/.zip — the frontend drains the
+            // queue via take_pending_open_uris and runs begin_import.
+            queue_pending_open_uri(file_path);
         }
     }));
     #[cfg(desktop)]
@@ -2872,6 +3991,25 @@ pub fn run() {
                             "ContentReaderPlugin",
                         )?;
                         app.manage(ContentReaderHandle(handle));
+                    }
+                    let _ = (app, api);
+                    Ok(())
+                })
+                .build(),
+        )
+        // In-app mobile plugin: Android Keystore-backed secret storage
+        // (SecretsPlugin.kt). Only Android wires a real handle; elsewhere
+        // the credential/file backends in secrets.rs run instead.
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("secrets")
+                .setup(|app, api| {
+                    #[cfg(target_os = "android")]
+                    {
+                        let handle = api.register_android_plugin(
+                            "com.lingcang.immersivereading",
+                            "SecretsPlugin",
+                        )?;
+                        secrets::init_secrets_plugin(handle);
                     }
                     let _ = (app, api);
                     Ok(())
@@ -2917,6 +4055,22 @@ pub fn run() {
             get_book_chapter_path,
             save_book_progress,
             import_markdown_folder,
+            begin_import,
+            get_import_status,
+            cancel_import,
+            get_platform_capabilities,
+            set_volume_key_capture,
+            take_pending_open_uris,
+            get_readable_chapter,
+            resolve_book_resource,
+            save_reader_locator,
+            load_reader_locator,
+            add_reader_bookmark,
+            remove_reader_bookmark,
+            list_reader_bookmarks,
+            search_book,
+            export_reading_bundle,
+            import_reading_bundle,
             remove_book,
             delete_book,
             list_trash,
@@ -2955,6 +4109,24 @@ pub fn run() {
             if let Err(error) = storage::init_android_roots(app.handle()) {
                 eprintln!("Android storage roots init failed: {error}");
                 panic!("failed to initialize Android storage roots: {error}");
+            }
+            #[cfg(target_os = "android")]
+            {
+                // SAF staging cannot outlive the op that created it — the
+                // URI grant dies with process death, so `import-*`,
+                // `mobile-import-*` and `临时` leftovers are always residue.
+                if let Ok(base) = storage::android_base_dirs() {
+                    let removed = temporary_content::sweep_app_cache_staging(&base.app_cache);
+                    if removed > 0 {
+                        storage::app_log(
+                            "app",
+                            &format!("swept {removed} stale app-cache staging dirs"),
+                        );
+                    }
+                }
+                // Move any pre-plugin `Data\Private\*.key` secrets into the
+                // Keystore-backed store before they can be read again.
+                secrets::migrate_file_secrets();
             }
             storage::app_log(
                 "app",
@@ -3156,6 +4328,10 @@ pub fn run() {
                     if is_markdown_path(&path_str) {
                         register_opened_markdown(&path);
                         let _ = app_handle.emit("open-file", path_str);
+                    } else {
+                        // .epub/.zip etc: the frontend drains the queue via
+                        // take_pending_open_uris and runs begin_import.
+                        queue_pending_open_uri(path_str);
                     }
                 }
             }

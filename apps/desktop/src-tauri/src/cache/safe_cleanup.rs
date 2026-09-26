@@ -257,6 +257,25 @@ pub fn clear_safe_cache_at(
                     remove_managed_path(locations, &locations.cache_root.join("GeneralTemporary"))?;
                 result.deleted_items = result.deleted_items.saturating_add(items);
                 result.released_bytes = result.released_bytes.saturating_add(bytes);
+                // Android: SAF pick staging lives in the private app cache
+                // (`import-*`/`mobile-import-*`/`临时`), outside `Cache\` —
+                // a stalled mobile import must still be cleanable here.
+                #[cfg(target_os = "android")]
+                if let Ok(base) = crate::storage::android_base_dirs() {
+                    for dir in crate::temporary_content::android_staging_dirs(&base.app_cache) {
+                        // Containment guard before any removal: only trees
+                        // that still resolve inside the app cache go away.
+                        if !crate::storage::path_within(&base.app_cache, &dir) {
+                            continue;
+                        }
+                        if let Ok((items, bytes)) = tree_metrics(&dir) {
+                            if fs::remove_dir_all(&dir).is_ok() {
+                                result.deleted_items = result.deleted_items.saturating_add(items);
+                                result.released_bytes = result.released_bytes.saturating_add(bytes);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

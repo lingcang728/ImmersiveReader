@@ -65,6 +65,13 @@ pub struct BookDetail {
     pub progress: ReadingProgress,
     pub provenance: Option<BookProvenance>,
     pub task_records: Vec<TaskSnapshot>,
+    /// `publication.json` contents for non-Markdown books (EPUB); `None`
+    /// keeps the wire shape identical for ordinary Markdown books.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication: Option<crate::epub::Publication>,
+    /// Absolute path of the book directory — the EPUB surface resolves
+    /// chapter resources against it (`convertFileSrc` needs a real path).
+    pub book_dir: String,
 }
 
 /// P2-17: per-entry tolerance — a directory/entry that cannot be read is
@@ -77,7 +84,10 @@ pub struct BookDetail {
 /// silently keeping the orphan). `inside_book` marks subtrees beneath a dir
 /// that already yielded a manifest — chapter/asset dirs inside a book are
 /// never books themselves and must not be flagged.
-fn collect_manifests(
+/// `pub(crate)` for the reading-bundle exporter, which walks the same
+/// manifest set a shelf scan does instead of keeping a second divergent
+/// definition of "a book dir".
+pub(crate) fn collect_manifests(
     dir: &Path,
     depth: usize,
     manifests: &mut Vec<PathBuf>,
@@ -213,6 +223,11 @@ pub fn remove_book(root: &Path, book_id: &str) -> Result<String, String> {
     let (book_root, manifest, _) = find_book(root, book_id)?;
     ensure_book_inside_library(root, &book_root)?;
     crate::trash::move_book(root, &book_root, &manifest)?;
+    // The shelf copy is gone — drop the index row (a trash restore keeps
+    // locators/bookmarks, so only the books index is cleared here).
+    if let Ok(db) = crate::reader_db::ReaderDb::open_current() {
+        let _ = db.unindex_book(book_id);
+    }
     Ok(format!("已移出书架：{}（可在回收站恢复）", manifest.title))
 }
 
@@ -235,6 +250,11 @@ pub fn delete_book(root: &Path, book_id: &str) -> Result<String, String> {
     let entry = crate::trash::move_book(root, &book_root, &manifest)?;
     crate::trash::permanently_delete(root, &entry.trash_id, entry.revision)
         .map_err(|error| format!("书籍已移入回收站但最终删除失败：{error}"))?;
+    // Permanent delete drops everything the book owned in reader.db —
+    // index row, locator, bookmarks and indexed chapter text.
+    if let Ok(db) = crate::reader_db::ReaderDb::open_current() {
+        let _ = db.remove_book(book_id);
+    }
     Ok(format!(
         "已永久删除《{}》（{} 篇）",
         manifest.title, chapter_count
@@ -383,9 +403,13 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
     collect_manifests(root, 0, &mut paths, &mut issues, false);
     paths.sort();
     let mut books = Vec::new();
+    let mut live_books: Vec<(PathBuf, Manifest)> = Vec::new();
     for path in paths {
         match load_book_at(&path) {
             Ok((manifest, progress)) => {
+                if let Some(book_root) = path.parent() {
+                    live_books.push((book_root.to_path_buf(), manifest.clone()));
+                }
                 let title = manifest
                     .chapters
                     .iter()
@@ -415,6 +439,7 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
             .cmp(&left.last_read_at)
             .then_with(|| left.title.cmp(&right.title))
     });
+    reconcile_reader_index(root, &live_books);
     Ok(LibraryScan {
         books,
         issues,
@@ -422,7 +447,60 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
     })
 }
 
-fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingProgress), String> {
+/// Index one live book into reader.db: `book_id → dir_rel` where dir_rel is
+/// the `/`-separated path from the library root (the exact shape
+/// `find_book` re-attaches to the root on the next lookup).
+fn index_one_book(
+    db: &crate::reader_db::ReaderDb,
+    normalized_root: &Path,
+    book_root: &Path,
+    manifest: &Manifest,
+) {
+    let Some(dir_rel) = book_root
+        .strip_prefix(normalized_root)
+        .ok()
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .filter(|rel| !rel.is_empty())
+    else {
+        return;
+    };
+    let format = if book_root.join("publication.json").is_file() {
+        crate::epub::Publication::FORMAT_EPUB
+    } else {
+        "markdown"
+    };
+    let _ = db.upsert_book(&manifest.book_id, &dir_rel, &manifest.source, format);
+}
+
+/// C5: keep reader.db's book index honest after every scan — upsert the
+/// live books' dir_rel mappings and drop rows pointing at dirs that
+/// vanished. Entirely best-effort: an unavailable or corrupt reader.db must
+/// never fail a shelf scan.
+fn reconcile_reader_index(normalized_root: &Path, live: &[(PathBuf, Manifest)]) {
+    let Ok(db) = crate::reader_db::ReaderDb::open_current() else {
+        return;
+    };
+    let live_ids: std::collections::HashSet<&str> = live
+        .iter()
+        .map(|(_, manifest)| manifest.book_id.as_str())
+        .collect();
+    if let Ok(indexed) = db.all_books() {
+        for (book_id, dir_rel, _, _) in indexed {
+            let dir = normalized_root.join(dir_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if !live_ids.contains(book_id.as_str()) || !dir.join("manifest.json").is_file() {
+                let _ = db.unindex_book(&book_id);
+            }
+        }
+    }
+    for (book_root, manifest) in live {
+        index_one_book(&db, normalized_root, book_root, manifest);
+    }
+}
+
+fn find_book_by_scan(
+    root: &Path,
+    book_id: &str,
+) -> Result<(PathBuf, Manifest, ReadingProgress), String> {
     // P2-17: a broken sibling directory must not hide a book — skip-and-scan
     // behaviour is already how unreadable manifests are handled below.
     let mut paths = Vec::new();
@@ -452,6 +530,47 @@ fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingPr
     Err(format!("Book not found: {book_id}"))
 }
 
+/// C5 indexed lookup: consult reader.db's `books` index before paying for a
+/// full shelf scan. A stale row (dir gone, manifest unreadable, wrong id)
+/// un-indexes itself and falls through to the scan; a scan hit re-indexes
+/// so the next open is O(1). Any DB failure degrades to the plain scan —
+/// the index is an accelerator, never a gate.
+fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingProgress), String> {
+    let normalized_root = crate::atomic_file::long_path(root);
+    if let Ok(db) = crate::reader_db::ReaderDb::open_current() {
+        match db.book_dir(book_id) {
+            Ok(Some(dir_rel)) => {
+                let book_root =
+                    normalized_root.join(dir_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                let manifest_path = book_root.join("manifest.json");
+                let indexed_hit = manifest_path
+                    .is_file()
+                    .then(|| read_manifest(&manifest_path).ok())
+                    .flatten()
+                    .filter(|manifest| manifest.book_id == book_id)
+                    .and_then(|manifest| {
+                        load_progress(&book_root, &manifest)
+                            .ok()
+                            .map(|progress| (book_root.clone(), manifest, progress))
+                    });
+                match indexed_hit {
+                    Some(found) => return Ok(found),
+                    None => {
+                        let _ = db.unindex_book(book_id);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(_) => {}
+        }
+    }
+    let found = find_book_by_scan(&normalized_root, book_id)?;
+    if let Ok(db) = crate::reader_db::ReaderDb::open_current() {
+        index_one_book(&db, &normalized_root, &found.0, &found.1);
+    }
+    Ok(found)
+}
+
 pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
     let (book_root, manifest, progress) = find_book(root, book_id)?;
     // P3-17: provenance is advisory metadata — a corrupt or mismatched
@@ -466,11 +585,37 @@ pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
             None
         }
     };
+    // `publication.json` presence decides the branch — Markdown books never
+    // touch the epub parser at all.
+    let publication = if crate::epub::publication_path(&book_root).is_file() {
+        match crate::epub::load_publication(&book_root) {
+            Ok(publication) => publication,
+            Err(error) => {
+                crate::storage::app_log(
+                    "library",
+                    &format!(
+                        "open_book: ignoring unreadable publication.json for {}: {error}",
+                        manifest.book_id
+                    ),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     Ok(BookDetail {
         manifest,
         progress,
         provenance,
         task_records: Vec::new(),
+        publication,
+        // Strip the `\\?\` verbatim prefix canonicalize() can produce on
+        // Windows — the frontend joins/compares plain paths.
+        book_dir: book_root
+            .to_string_lossy()
+            .trim_start_matches("\\\\?\\")
+            .to_string(),
     })
 }
 

@@ -30,6 +30,10 @@ mod android_roots {
         /// which returns `null` when shared storage is unavailable — falls
         /// back to `app_data` so the Library always lands somewhere writable.
         pub(crate) documents: PathBuf,
+        /// `app_cache_dir()` → `Context.getCacheDir()` — private cache. SAF
+        /// content-URI staging (`import-*`/`mobile-import-*`/`临时`) lives
+        /// here so half-copied picks die with process death sweeps.
+        pub(crate) app_cache: PathBuf,
         /// Lazy placeholder under the private cache dir. The managed
         /// Zhihu/Podcast runtimes never ship to Android, so tool readiness
         /// probes report "error" here instead of crashing on a bogus path.
@@ -63,6 +67,7 @@ mod android_roots {
                 app_data,
                 app_local_data,
                 documents,
+                app_cache,
                 runtime,
             })
             .map_err(|_| "Android storage roots were already initialized".to_string())

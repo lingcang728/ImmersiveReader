@@ -143,7 +143,11 @@ fn delete_secret(target: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+/// The plaintext `.key` store is a desktop-nonWindows fallback only. On
+/// Android every secret goes through the Keystore-backed `secrets` Kotlin
+/// plugin — and a plugin failure surfaces as an error, never a silent
+/// plaintext write. (`cfg` splits three ways: windows / android / other.)
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn secret_file_path(target: &str) -> Result<std::path::PathBuf, String> {
     let locations = crate::storage::StorageLocations::current()?;
     let safe_name = target.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
@@ -153,7 +157,7 @@ fn secret_file_path(target: &str) -> Result<std::path::PathBuf, String> {
         .join(format!("{safe_name}.key")))
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn read_secret(target: &str) -> Result<Option<Vec<u8>>, String> {
     let path = secret_file_path(target)?;
     if !path.is_file() {
@@ -166,19 +170,159 @@ fn read_secret(target: &str) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn write_secret(target: &str, value: &[u8]) -> Result<(), String> {
     let path = secret_file_path(target)?;
     crate::atomic_file::write(&path, value)
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn delete_secret(target: &str) -> Result<(), String> {
     let path = secret_file_path(target)?;
     if path.is_file() {
         std::fs::remove_file(&path).map_err(|e| format!("failed to delete secret: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "android")]
+mod android_store {
+    //! Android Keystore-backed secrets via the `secrets` mobile plugin
+    //! (SecretsPlugin.kt). The `PluginHandle` needs a live AppHandle, so it
+    //! is captured once during `Builder::setup` into this OnceLock — the
+    //! same pattern `storage::android_roots` uses for path roots.
+
+    static HANDLE: std::sync::OnceLock<tauri::plugin::PluginHandle<tauri::Wry>> =
+        std::sync::OnceLock::new();
+
+    pub(crate) fn init(handle: tauri::plugin::PluginHandle<tauri::Wry>) {
+        let _ = HANDLE.set(handle);
+    }
+
+    fn handle() -> Result<&'static tauri::plugin::PluginHandle<tauri::Wry>, String> {
+        HANDLE
+            .get()
+            .ok_or_else(|| "SECRETS_PLUGIN_UNAVAILABLE".to_string())
+    }
+
+    #[derive(serde::Deserialize)]
+    struct SecretReadResult {
+        /// Null/absent when the key is not stored.
+        value: Option<String>,
+    }
+
+    pub(crate) fn read_secret(target: &str) -> Result<Option<Vec<u8>>, String> {
+        let result = handle()?
+            .run_mobile_plugin::<SecretReadResult>(
+                "secretsRead",
+                serde_json::json!({ "key": target }),
+            )
+            .map_err(|error| format!("SECRETS_PLUGIN_READ_FAILED: {error}"))?;
+        Ok(result
+            .value
+            .filter(|value| !value.is_empty())
+            .map(String::into_bytes))
+    }
+
+    pub(crate) fn write_secret(target: &str, value: &[u8]) -> Result<(), String> {
+        let text = String::from_utf8(value.to_vec())
+            .map_err(|_| "API key must be valid UTF-8".to_string())?;
+        if text.trim().is_empty() {
+            return Err("API key cannot be empty".to_string());
+        }
+        handle()?
+            .run_mobile_plugin::<serde_json::Value>(
+                "secretsWrite",
+                serde_json::json!({ "key": target, "value": text }),
+            )
+            .map_err(|error| format!("SECRETS_PLUGIN_WRITE_FAILED: {error}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_secret(target: &str) -> Result<(), String> {
+        handle()?
+            .run_mobile_plugin::<serde_json::Value>(
+                "secretsDelete",
+                serde_json::json!({ "key": target }),
+            )
+            .map_err(|error| format!("SECRETS_PLUGIN_DELETE_FAILED: {error}"))?;
+        Ok(())
+    }
+
+    /// One-time migration of the pre-plugin plaintext store: every
+    /// `Data\Private\<safe-target>.key` that maps to a known target is read,
+    /// written into Keystore, then deleted best-effort. Migration failures
+    /// are logged, never fatal — and the plaintext file is left in place if
+    /// the plugin write did not succeed.
+    pub(crate) fn migrate_file_secrets() {
+        use crate::settings::AppChannel;
+
+        let Ok(locations) = crate::storage::StorageLocations::current() else {
+            return;
+        };
+        let dir = locations.data_root.join("Private");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        let targets = [
+            super::deepseek_target(&AppChannel::Production),
+            super::deepseek_target(&AppChannel::Qa(String::new())),
+        ];
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("key") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // The file name is the target with unsafe chars replaced by '_'
+            // — recover which known target it was written for.
+            let Some(target) = targets.iter().find(|target| {
+                target.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_") == stem
+            }) else {
+                continue;
+            };
+            match std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| write_secret(target, &bytes))
+            {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&path);
+                    crate::storage::app_log(
+                        "secrets",
+                        &format!("migrated plaintext secret {stem}.key into Android Keystore"),
+                    );
+                }
+                Err(error) => {
+                    crate::storage::app_log(
+                        "secrets",
+                        &format!("plaintext secret migration failed for {stem}: {error}"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) use android_store::init as init_secrets_plugin;
+#[cfg(target_os = "android")]
+pub(crate) use android_store::migrate_file_secrets;
+
+#[cfg(target_os = "android")]
+fn read_secret(target: &str) -> Result<Option<Vec<u8>>, String> {
+    android_store::read_secret(target)
+}
+
+#[cfg(target_os = "android")]
+fn write_secret(target: &str, value: &[u8]) -> Result<(), String> {
+    android_store::write_secret(target, value)
+}
+
+#[cfg(target_os = "android")]
+fn delete_secret(target: &str) -> Result<(), String> {
+    android_store::delete_secret(target)
 }
 
 pub fn deepseek_status(channel: &AppChannel) -> Result<SecretStatus, String> {
