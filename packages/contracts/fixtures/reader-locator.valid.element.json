@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "bookId": "epub:0123456789abcdef",
+  "chapterId": "epub-ch-1",
+  "anchor": { "kind": "element", "path": "body/section[2]/p[4]" },
+  "ratio": 0,
+  "updated": "2026-07-10T12:34:56+08:00"
+}

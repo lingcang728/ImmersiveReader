@@ -7,6 +7,8 @@ import {
   calculateOverallProgress,
   isSafeRelativePath,
   parseManifest,
+  parsePublication,
+  parseReaderLocator,
   parseReadingState,
   resolveCurrent,
   validateReadingState,
@@ -34,6 +36,12 @@ const manifestFixture = (): MutableManifest =>
 
 const readingFixture = (): Record<string, unknown> =>
   structuredClone(loadFixture("reading.valid.json")) as Record<string, unknown>;
+
+const publicationFixture = (): Record<string, unknown> =>
+  structuredClone(loadFixture("publication.valid.json")) as Record<string, unknown>;
+
+const locatorFixture = (): Record<string, unknown> =>
+  structuredClone(loadFixture("reader-locator.valid.json")) as Record<string, unknown>;
 
 const parseFixtureManifest = (): BookManifest => parseManifest(loadFixture("manifest.valid.json"));
 
@@ -252,11 +260,49 @@ test("path safety mirrors the shared segment ruleset", () => {
   }
 });
 
+test("parses the shared publication fixture and rejects cross-field violations", () => {
+  const publication = parsePublication(loadFixture("publication.valid.json"));
+  assert.equal(publication.format, "epub");
+  assert.equal(publication.nav[0]?.children?.[0]?.chapterId, "epub-ch-0");
+
+  // nav ⊆ spine is a validator rule JSON Schema cannot express — the
+  // schema leg passes this fixture, so it stays out of expectations.json
+  // (same convention as manifest.invalid.path-collision.json).
+  const dangling = publicationFixture();
+  (dangling["nav"] as Record<string, unknown>[])[0]!["chapterId"] = "ghost-chapter";
+  assert.throws(() => parsePublication(dangling), ContractParseError);
+
+  const duplicateSpine = publicationFixture();
+  duplicateSpine["spine"] = ["epub-ch-0", "epub-ch-0"];
+  assert.throws(() => parsePublication(duplicateSpine), ContractParseError);
+});
+
+test("parses all three locator anchor kinds and rejects bad ones", () => {
+  const text = parseReaderLocator(loadFixture("reader-locator.valid.json"));
+  assert.deepEqual(text.anchor, { kind: "text", quote: "正文 第一章", offset: 0 });
+  const element = parseReaderLocator(loadFixture("reader-locator.valid.element.json"));
+  assert.equal(element.anchor.kind, "element");
+  const ratio = parseReaderLocator(loadFixture("reader-locator.valid.ratio.json"));
+  assert.equal(ratio.anchor.kind, "ratio");
+
+  const bogus = locatorFixture();
+  bogus["anchor"] = { kind: "bogus" };
+  assert.throws(() => parseReaderLocator(bogus), ContractParseError);
+
+  // Unknown fields inside an anchor variant are rejected — mirrors the
+  // schema's per-variant additionalProperties: false.
+  const extra = locatorFixture();
+  extra["anchor"] = { kind: "ratio", path: "x" };
+  assert.throws(() => parseReaderLocator(extra), ContractParseError);
+});
+
 type FixtureExpectation = {
   readonly fixture: string;
   readonly contract:
     | "manifest"
     | "reading"
+    | "publication"
+    | "reader-locator"
     | "provenance"
     | "publish-transaction"
     | "task-event"
@@ -264,12 +310,12 @@ type FixtureExpectation = {
   readonly expect: "valid" | "invalid";
 };
 
-// This package only ships manifest/reading validators — provenance,
-// publish-transaction, task-event and worker-fatal fixtures are verified by
-// the JSON schema (via scripts/verify_contract_parity.py) and the Rust
-// parity suite instead; worker-fatal additionally has a producer leg that
-// validates the podcast worker's real fatal-line emitter.
-const TS_PARITY_CONTRACTS = new Set(["manifest", "reading"]);
+// Provenance, publish-transaction, task-event and worker-fatal fixtures are
+// verified by the JSON schema (via scripts/verify_contract_parity.py) and the
+// Rust parity suite instead — this package ships no parsers for them;
+// worker-fatal additionally has a producer leg that validates the podcast
+// worker's real fatal-line emitter.
+const TS_PARITY_CONTRACTS = new Set(["manifest", "reading", "publication", "reader-locator"]);
 
 // P1-22 parity: the Rust suite (contracts.rs::shared_fixtures_match_*) runs this
 // exact table against the same fixtures — the two implementations can never
@@ -286,6 +332,12 @@ test("shared fixtures produce the same verdicts as schema and Rust", () => {
       const data = loadFixture(fixture);
       if (contract === "manifest") {
         return parseManifest(data);
+      }
+      if (contract === "publication") {
+        return parsePublication(data);
+      }
+      if (contract === "reader-locator") {
+        return parseReaderLocator(data);
       }
       const state = parseReadingState(data);
       validateReadingState(state, manifest);

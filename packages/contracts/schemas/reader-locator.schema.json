@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://immersive-reader.local/schemas/reader-locator-v1.json",
+  "title": "Immersive Reader Reader Locator v1",
+  "description": "Last-read position record stored per book (reader.db reader_locators.locator_json). Mirrors ReaderLocator/ReaderAnchor in apps/desktop/src-tauri/src/contracts.rs and parseReaderLocator in src/index.ts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "bookId", "chapterId", "anchor", "ratio", "updated"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "bookId": { "type": "string", "minLength": 1 },
+    "chapterId": { "type": "string", "minLength": 1 },
+    "anchor": {
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["kind", "path"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "element" },
+            "path": { "type": "string", "minLength": 1, "description": "DOM element path inside the chapter document, e.g. body/p[3] — not a filesystem path." }
+          }
+        },
+        {
+          "required": ["kind", "quote", "offset"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "text" },
+            "quote": { "type": "string", "minLength": 1 },
+            "offset": { "type": "integer", "minimum": 0, "description": "Code-point offset into the chapter's plain text." }
+          }
+        },
+        {
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "ratio" }
+          }
+        }
+      ]
+    },
+    "ratio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Scroll fraction inside the chapter — fallback when the anchor misses."
+    },
+    "updated": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$" }
+  }
+}

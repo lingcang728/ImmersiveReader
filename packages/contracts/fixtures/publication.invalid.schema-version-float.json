@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1.5,
+  "format": "epub",
+  "epubVersion": "3",
+  "title": "测试书",
+  "nav": [],
+  "spine": ["epub-ch-0"],
+  "resources": {},
+  "unsupported": []
+}

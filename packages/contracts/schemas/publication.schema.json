@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://immersive-reader.local/schemas/publication-v1.json",
+  "title": "Immersive Reader Publication v1",
+  "description": "publication.json sidecar written next to manifest.json for non-Markdown books (currently EPUB). Mirrors Publication/NavItem in apps/desktop/src-tauri/src/epub.rs and parsePublication in src/index.ts. Cross-field rules that JSON Schema cannot express — nav chapterId ⊆ spine — live in the validators (Rust validate_publication, TS parsePublication).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "format", "epubVersion", "title", "nav", "spine", "resources", "unsupported"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "format": { "const": "epub" },
+    "epubVersion": { "enum": ["2", "3"], "description": "Major version of the OPF package document." },
+    "title": { "type": "string", "minLength": 1 },
+    "creator": { "type": "string", "minLength": 1 },
+    "language": { "type": "string", "minLength": 1 },
+    "cover": { "$ref": "#/$defs/relativePath" },
+    "nav": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/navItem" }
+    },
+    "spine": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Spine order as chapter ids; mirrors manifest.chapters order."
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/relativePath" },
+      "description": "Manifest item id → book-relative path inside the book dir."
+    },
+    "unsupported": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Declared-but-unrendered features: fixed-layout / media-overlay / scripted."
+    }
+  },
+  "$defs": {
+    "navItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "chapterId"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "chapterId": { "type": "string", "minLength": 1 },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/navItem" } }
+      }
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Forward-slash relative path; every segment must be non-empty, not . or .., free of \\ NUL : < > | ? *, not a reserved device basename (CON/PRN/AUX/NUL/COM1-9/LPT1-9 case-insensitively, before the first .), and not end in . or space. Mirrors isSafeRelativePath (TS) and is_safe_relative_path (Rust).",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?=[\\s\\S]*\\S)(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ](?:/(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[^\\\\/:*?<>|\\u0000]*[^\\\\/:*?<>|\\u0000. ])*$"
+    }
+  }
+}

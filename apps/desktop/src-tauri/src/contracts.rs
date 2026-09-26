@@ -65,7 +65,9 @@ where
 /// Schema/TS reject an explicit `null` on optional string fields — the key
 /// must be omitted instead. `Option<String>` would silently accept `null` as
 /// `None`; reject it so the read paths agree.
-fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+pub(crate) fn deserialize_optional_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -255,6 +257,171 @@ pub fn validate_reading(progress: &ReadingProgress, manifest: &Manifest) -> Resu
     Ok(())
 }
 
+/// `publication.json` sidecar validation — the Rust-side contract twin of
+/// `validate_manifest`/`validate_reading`. There is no TS twin yet (the
+/// frontend never reads `publication.json` directly; it consumes commands
+/// that answer already-validated data), so this stays a Rust-only gate until
+/// the fixture set grows a `publication.valid.json`.
+pub fn validate_publication(publication: &crate::epub::Publication) -> Result<(), String> {
+    if publication.schema_version != 1 {
+        return Err("Unsupported publication schema version".to_string());
+    }
+    if publication.format != crate::epub::Publication::FORMAT_EPUB {
+        return Err(format!(
+            "Unsupported publication format: {}",
+            publication.format
+        ));
+    }
+    if !matches!(publication.epub_version.as_str(), "2" | "3") {
+        return Err(format!(
+            "Unsupported EPUB version: {}",
+            publication.epub_version
+        ));
+    }
+    if publication.title.trim().is_empty() {
+        return Err("Publication title is required".to_string());
+    }
+    for (field, value) in [
+        ("creator", &publication.creator),
+        ("language", &publication.language),
+    ] {
+        if value.as_deref().is_some_and(|text| text.trim().is_empty()) {
+            return Err(format!("Publication {field} must not be blank"));
+        }
+    }
+    if let Some(cover) = publication.cover.as_deref() {
+        if !is_safe_relative_path(cover) {
+            return Err(format!("Unsafe cover path: {cover}"));
+        }
+    }
+    if publication.spine.is_empty() {
+        return Err("Publication spine must contain at least one chapter".to_string());
+    }
+    let mut spine_ids = HashSet::new();
+    for id in &publication.spine {
+        if id.trim().is_empty() {
+            return Err("Publication spine contains a blank chapter id".to_string());
+        }
+        if !spine_ids.insert(id.as_str()) {
+            return Err(format!("Duplicate spine chapter id: {id}"));
+        }
+    }
+    let mut nav_stack: Vec<&crate::epub::NavItem> = publication.nav.iter().collect();
+    while let Some(item) = nav_stack.pop() {
+        if item.title.trim().is_empty() || item.chapter_id.trim().is_empty() {
+            return Err("Nav item title and chapterId are required".to_string());
+        }
+        if !spine_ids.contains(item.chapter_id.as_str()) {
+            return Err(format!(
+                "Nav item references a chapter outside the spine: {}",
+                item.chapter_id
+            ));
+        }
+        nav_stack.extend(item.children.iter());
+    }
+    for (key, path) in &publication.resources {
+        if key.trim().is_empty() {
+            return Err("Publication resource id must not be blank".to_string());
+        }
+        if !is_safe_relative_path(path) {
+            return Err(format!("Unsafe resource path: {path}"));
+        }
+    }
+    if publication
+        .unsupported
+        .iter()
+        .any(|tag| tag.trim().is_empty())
+    {
+        return Err("Publication unsupported flags must not be blank".to_string());
+    }
+    Ok(())
+}
+
+/// Anchor variants of `ReaderLocator` — mirrors `ReaderAnchor` in
+/// `packages/contracts/src/index.ts` and the `anchor` oneOf in
+/// `reader-locator.schema.json`. Internally tagged by `kind`; serde's
+/// `deny_unknown_fields` cannot combine with internal tagging, so unknown
+/// fields inside an anchor variant are tolerated here while the schema and
+/// TS legs still reject them (the same documented asymmetry as
+/// `BookProvenance`/`PublishTransaction`).
+// TODO(reader): `ReaderLocator`/`ReaderAnchor`/`validate_reader_locator` are
+// the shared contract legs for the reader.db locator JSON — today
+// `reader_db::save_locator` stores the payload opaquely, so nothing outside
+// tests constructs them yet. Wire the validator into the save/load commands
+// when the reader surface lands.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ReaderAnchor {
+    /// DOM element path inside the chapter document (e.g. `body/p[3]`) —
+    /// a document path, not a filesystem path, so no safe-path rules apply.
+    Element { path: String },
+    /// Text-quote anchor: `quote` is the matched text, `offset` its
+    /// code-point index into the chapter's plain text.
+    Text {
+        quote: String,
+        #[serde(deserialize_with = "deserialize_u64")]
+        offset: u64,
+    },
+    /// Pure scroll-ratio restore point.
+    Ratio,
+}
+
+/// Last-read position record stored per book in reader.db
+/// (`reader_locators.locator_json`). Mirrors `ReaderLocator` in
+/// `packages/contracts/src/index.ts`.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderLocator {
+    #[serde(deserialize_with = "deserialize_schema_version")]
+    pub schema_version: u32,
+    pub book_id: String,
+    pub chapter_id: String,
+    pub anchor: ReaderAnchor,
+    /// Scroll fraction 0..=1 — the fallback when the anchor misses.
+    pub ratio: f64,
+    /// RFC-3339 date-time of the last locator write.
+    pub updated: String,
+}
+
+/// `ReaderLocator` validation — the Rust twin of `parseReaderLocator` (TS)
+/// and `reader-locator.schema.json`. There is no manifest cross-check: the
+/// record is stored per book and `chapter_id` is shape-checked only.
+#[allow(dead_code)]
+pub fn validate_reader_locator(locator: &ReaderLocator) -> Result<(), String> {
+    if locator.schema_version != 1 {
+        return Err("Unsupported locator schema version".to_string());
+    }
+    if locator.book_id.trim().is_empty() {
+        return Err("Locator bookId is required".to_string());
+    }
+    if locator.chapter_id.trim().is_empty() {
+        return Err("Locator chapterId is required".to_string());
+    }
+    match &locator.anchor {
+        ReaderAnchor::Element { path } => {
+            if path.trim().is_empty() {
+                return Err("Locator element anchor path is required".to_string());
+            }
+        }
+        ReaderAnchor::Text { quote, .. } => {
+            if quote.trim().is_empty() {
+                return Err("Locator text anchor quote is required".to_string());
+            }
+        }
+        ReaderAnchor::Ratio => {}
+    }
+    if !locator.ratio.is_finite() || !(0.0..=1.0).contains(&locator.ratio) {
+        return Err("Locator ratio must be between 0 and 1".to_string());
+    }
+    if !is_rfc3339_date_time(&locator.updated) {
+        return Err("Locator updated must be an RFC-3339 date-time".to_string());
+    }
+    Ok(())
+}
+
 fn fixed_digits(value: &str, digits: usize) -> Option<u32> {
     if value.len() == digits && value.bytes().all(|byte| byte.is_ascii_digit()) {
         value.parse().ok()
@@ -436,7 +603,10 @@ pub fn is_safe_relative_path(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_manifest, validate_reading, Manifest, ReadingProgress};
+    use super::{
+        validate_manifest, validate_publication, validate_reader_locator, validate_reading,
+        Manifest, ReaderLocator, ReadingProgress,
+    };
 
     fn fixture_manifest() -> Manifest {
         let raw = include_str!("../../../../packages/contracts/fixtures/manifest.valid.json");
@@ -714,6 +884,68 @@ mod tests {
         assert!(serde_json::from_value::<Manifest>(value).is_err());
     }
 
+    #[test]
+    fn accepts_shared_publication_fixture() {
+        let publication: crate::epub::Publication = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/publication.valid.json"
+        ))
+        .expect("fixture must deserialize");
+        assert!(validate_publication(&publication).is_ok());
+    }
+
+    #[test]
+    fn rejects_bad_publication_fields() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/publication.valid.json"
+        ))
+        .expect("fixture json");
+        value["format"] = serde_json::Value::from("pdf");
+        let accepted = serde_json::from_value::<crate::epub::Publication>(value)
+            .map(|publication| validate_publication(&publication).is_ok())
+            .unwrap_or(false);
+        assert!(!accepted);
+
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/publication.valid.json"
+        ))
+        .expect("fixture json");
+        // A nav entry pointing outside the spine — a cross-field rule JSON
+        // Schema cannot express; the validator must catch it.
+        value["nav"][0]["chapterId"] = serde_json::Value::from("ghost-chapter");
+        let publication: crate::epub::Publication =
+            serde_json::from_value(value).expect("shape still deserializes");
+        assert!(validate_publication(&publication).is_err());
+    }
+
+    #[test]
+    fn accepts_shared_reader_locator_fixture() {
+        let locator: ReaderLocator = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/reader-locator.valid.json"
+        ))
+        .expect("fixture must deserialize");
+        assert!(validate_reader_locator(&locator).is_ok());
+    }
+
+    #[test]
+    fn rejects_bad_reader_locator_fields() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/reader-locator.valid.json"
+        ))
+        .expect("fixture json");
+        value["ratio"] = serde_json::Value::from(1.5_f64);
+        let locator: ReaderLocator =
+            serde_json::from_value(value).expect("shape still deserializes");
+        assert!(validate_reader_locator(&locator).is_err());
+
+        // Unknown anchor kind fails at deserialize time, before validation.
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/reader-locator.valid.json"
+        ))
+        .expect("fixture json");
+        value["anchor"] = serde_json::json!({ "kind": "bogus" });
+        assert!(serde_json::from_value::<ReaderLocator>(value).is_err());
+    }
+
     #[derive(serde::Deserialize)]
     struct FixtureExpectation {
         fixture: String,
@@ -757,6 +989,15 @@ mod tests {
                 // 01-F5: the acquisition wire contract — full struct
                 // deserialize, exactly what the emitted TaskEvent is.
                 "task-event" => serde_json::from_str::<crate::tasks::TaskEvent>(&text).is_ok(),
+                // EPUB sidecar + locator legs: full strict deserialize
+                // (deny_unknown_fields) plus the semantic validators — the
+                // same two gates the import/save paths run.
+                "publication" => serde_json::from_str::<crate::epub::Publication>(&text)
+                    .map(|value| validate_publication(&value).is_ok())
+                    .unwrap_or(false),
+                "reader-locator" => serde_json::from_str::<ReaderLocator>(&text)
+                    .map(|value| validate_reader_locator(&value).is_ok())
+                    .unwrap_or(false),
                 // 01-F5: the worker's fatal NDJSON record. The host reads
                 // fields piecemeal, so the leg mirrors that: type=="fatal",
                 // errorCode inside the TaskErrorCode domain, message a

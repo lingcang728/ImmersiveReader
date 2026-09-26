@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "format": "epub",
+  "epubVersion": "3",
+  "title": "测试书",
+  "creator": "作者",
+  "language": "zh-CN",
+  "cover": "content/OEBPS/images/cover.png",
+  "nav": [
+    {
+      "title": "第一章",
+      "chapterId": "epub-ch-0",
+      "children": [
+        { "title": "1.1 节", "chapterId": "epub-ch-0" }
+      ]
+    },
+    { "title": "第二章", "chapterId": "epub-ch-1" }
+  ],
+  "spine": ["epub-ch-0", "epub-ch-1"],
+  "resources": {
+    "cover-img": "content/OEBPS/images/cover.png",
+    "body-font": "content/OEBPS/fonts/main.otf"
+  },
+  "unsupported": ["media-overlay"]
+}

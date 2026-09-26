@@ -37,5 +37,19 @@
   { "fixture": "worker-fatal.valid.json", "contract": "worker-fatal", "schema": "worker-fatal.schema.json", "expect": "valid" },
   { "fixture": "worker-fatal.invalid.type.json", "contract": "worker-fatal", "schema": "worker-fatal.schema.json", "expect": "invalid" },
   { "fixture": "worker-fatal.invalid.missing-error-code.json", "contract": "worker-fatal", "schema": "worker-fatal.schema.json", "expect": "invalid" },
-  { "fixture": "worker-fatal.invalid.unknown-error-code.json", "contract": "worker-fatal", "schema": "worker-fatal.schema.json", "expect": "invalid" }
+  { "fixture": "worker-fatal.invalid.unknown-error-code.json", "contract": "worker-fatal", "schema": "worker-fatal.schema.json", "expect": "invalid" },
+  { "fixture": "publication.valid.json", "contract": "publication", "expect": "valid" },
+  { "fixture": "publication.invalid.format.json", "contract": "publication", "expect": "invalid" },
+  { "fixture": "publication.invalid.schema-version.json", "contract": "publication", "expect": "invalid" },
+  { "fixture": "publication.invalid.schema-version-float.json", "contract": "publication", "expect": "invalid" },
+  { "fixture": "publication.invalid.empty-spine.json", "contract": "publication", "expect": "invalid" },
+  { "fixture": "publication.invalid.resource-path.json", "contract": "publication", "expect": "invalid" },
+  { "fixture": "publication.invalid.unknown.json", "contract": "publication", "expect": "invalid" },
+  { "fixture": "reader-locator.valid.json", "contract": "reader-locator", "expect": "valid" },
+  { "fixture": "reader-locator.valid.element.json", "contract": "reader-locator", "expect": "valid" },
+  { "fixture": "reader-locator.valid.ratio.json", "contract": "reader-locator", "expect": "valid" },
+  { "fixture": "reader-locator.invalid.anchor-kind.json", "contract": "reader-locator", "expect": "invalid" },
+  { "fixture": "reader-locator.invalid.anchor-missing-field.json", "contract": "reader-locator", "expect": "invalid" },
+  { "fixture": "reader-locator.invalid.ratio.json", "contract": "reader-locator", "expect": "invalid" },
+  { "fixture": "reader-locator.invalid.updated.json", "contract": "reader-locator", "expect": "invalid" }
 ]

@@ -463,3 +463,223 @@ export function calculateOverallProgress(manifest: BookManifest, state: ReadingS
     chapterIds.has(state.current) && !readIds.has(state.current) ? state.position : 0;
   return Math.min(1, (readIds.size + currentContribution) / manifest.chapters.length);
 }
+
+// ---------------------------------------------------------------------------
+// EPUB contracts — publication.json sidecar + reader.db locator record.
+// Mirrors `Publication`/`NavItem` in apps/desktop/src-tauri/src/epub.rs and
+// `ReaderLocator`/`ReaderAnchor` in contracts.rs. Keep in lockstep.
+// ---------------------------------------------------------------------------
+
+/** One navigation entry (EPUB 3 nav.xhtml or EPUB 2 NCX). */
+export type EpubNavItem = {
+  readonly title: string;
+  /** Chapter id in `manifest.chapters` this entry opens. */
+  readonly chapterId: string;
+  readonly children?: readonly EpubNavItem[];
+};
+
+/**
+ * `publication.json` — versioned sidecar describing a non-Markdown book;
+ * books lacking the file keep being treated as Markdown.
+ */
+export type Publication = {
+  readonly schemaVersion: 1;
+  /** Always "epub" for this revision. */
+  readonly format: "epub";
+  /** "2" or "3" as declared by the OPF package version. */
+  readonly epubVersion: "2" | "3";
+  readonly title: string;
+  readonly creator?: string;
+  readonly language?: string;
+  /** Safe-relative path to the cover image inside the book dir, if any. */
+  readonly cover?: string;
+  readonly nav: readonly EpubNavItem[];
+  /** Spine order as chapter ids; mirrors `manifest.chapters` order. */
+  readonly spine: readonly string[];
+  /** Format-specific extras (resource map id→book-relative path). */
+  readonly resources: Readonly<Record<string, string>>;
+  /** Declared-but-unrendered features: fixed-layout / media-overlay / scripted. */
+  readonly unsupported: readonly string[];
+};
+
+/**
+ * Where inside a chapter the locator points. `element` is a DOM element path
+ * (a document path, not a filesystem path — the relative-path rules do NOT
+ * apply), `text` is a quote plus its code-point offset into the chapter's
+ * plain text, and `ratio` is the bare scroll-position fallback.
+ */
+export type ReaderAnchor =
+  | { readonly kind: "element"; readonly path: string }
+  | { readonly kind: "text"; readonly quote: string; readonly offset: number }
+  | { readonly kind: "ratio" };
+
+/** Last-read position record stored per book in reader.db. */
+export type ReaderLocator = {
+  readonly schemaVersion: 1;
+  readonly bookId: string;
+  readonly chapterId: string;
+  readonly anchor: ReaderAnchor;
+  /** Scroll fraction 0..1 — fallback when the anchor misses. */
+  readonly ratio: number;
+  /** RFC-3339 date-time of the last locator write. */
+  readonly updated: string;
+};
+
+function parseNavItem(value: unknown, field: string): EpubNavItem {
+  const record = requireRecord(value, field);
+  rejectUnknownFields(record, ["title", "chapterId", "children"], field);
+  if (record.children !== undefined && !Array.isArray(record.children)) {
+    throw new ContractParseError(`${field}.children`, "must be an array");
+  }
+  return {
+    title: requireString(record.title, `${field}.title`),
+    chapterId: requireString(record.chapterId, `${field}.chapterId`),
+    ...(record.children === undefined
+      ? {}
+      : {
+          children: (record.children as readonly unknown[]).map((child, index) =>
+            parseNavItem(child, `${field}.children[${index}]`),
+          ),
+        }),
+  };
+}
+
+/**
+ * Mirrors `Publication` deserialization + `validate_publication` in
+ * contracts.rs — shape plus the cross-field rule JSON Schema cannot express:
+ * every nav `chapterId` must appear in `spine`.
+ */
+export function parsePublication(value: unknown): Publication {
+  const record = requireRecord(value, "publication");
+  rejectUnknownFields(
+    record,
+    [
+      "schemaVersion",
+      "format",
+      "epubVersion",
+      "title",
+      "creator",
+      "language",
+      "cover",
+      "nav",
+      "spine",
+      "resources",
+      "unsupported",
+    ],
+    "publication",
+  );
+  if (record.format !== "epub") {
+    throw new ContractParseError("format", "must be epub");
+  }
+  if (record.epubVersion !== "2" && record.epubVersion !== "3") {
+    throw new ContractParseError("epubVersion", "must be 2 or 3");
+  }
+  if (!Array.isArray(record.nav)) {
+    throw new ContractParseError("nav", "must be an array");
+  }
+  if (!Array.isArray(record.spine) || record.spine.length === 0) {
+    throw new ContractParseError("spine", "must contain at least one chapter id");
+  }
+  const spine = record.spine.map((item, index) => requireString(item, `spine[${index}]`));
+  if (new Set(spine).size !== spine.length) {
+    throw new ContractParseError("spine", "must not contain duplicate chapter ids");
+  }
+  const spineIds = new Set(spine);
+  const nav = record.nav.map((item, index) => parseNavItem(item, `nav[${index}]`));
+  const checkNavRefs = (items: readonly EpubNavItem[]): void => {
+    for (const item of items) {
+      if (!spineIds.has(item.chapterId)) {
+        throw new ContractParseError(
+          "nav",
+          `chapterId references a chapter outside the spine: ${item.chapterId}`,
+        );
+      }
+      checkNavRefs(item.children ?? []);
+    }
+  };
+  checkNavRefs(nav);
+  if (record.resources === undefined || !isRecord(record.resources)) {
+    throw new ContractParseError("resources", "must be an object");
+  }
+  const resources: Record<string, string> = {};
+  for (const [key, path] of Object.entries(record.resources)) {
+    if (!/\P{White_Space}/u.test(key)) {
+      throw new ContractParseError("resources", "resource id must be a non-empty string");
+    }
+    resources[key] = requireRelativePath(path, `resources.${key}`);
+  }
+  if (!Array.isArray(record.unsupported)) {
+    throw new ContractParseError("unsupported", "must be an array");
+  }
+  const unsupported = record.unsupported.map((item, index) =>
+    requireString(item, `unsupported[${index}]`),
+  );
+  const creator =
+    record.creator === undefined ? undefined : requireString(record.creator, "creator");
+  const language =
+    record.language === undefined ? undefined : requireString(record.language, "language");
+  const cover =
+    record.cover === undefined
+      ? undefined
+      : requireRelativePath(record.cover, "cover");
+  return {
+    schemaVersion: requireSchemaV1(record.schemaVersion, "schemaVersion"),
+    format: record.format,
+    epubVersion: record.epubVersion,
+    title: requireString(record.title, "title"),
+    ...(creator === undefined ? {} : { creator }),
+    ...(language === undefined ? {} : { language }),
+    ...(cover === undefined ? {} : { cover }),
+    nav,
+    spine,
+    resources,
+    unsupported,
+  };
+}
+
+function parseReaderAnchor(value: unknown, field: string): ReaderAnchor {
+  const record = requireRecord(value, field);
+  switch (record.kind) {
+    case "element":
+      rejectUnknownFields(record, ["kind", "path"], field);
+      return { kind: "element", path: requireString(record.path, `${field}.path`) };
+    case "text":
+      rejectUnknownFields(record, ["kind", "quote", "offset"], field);
+      return {
+        kind: "text",
+        quote: requireString(record.quote, `${field}.quote`),
+        offset: requireNonNegativeInteger(record.offset, `${field}.offset`),
+      };
+    case "ratio":
+      rejectUnknownFields(record, ["kind"], field);
+      return { kind: "ratio" };
+    default:
+      throw new ContractParseError(`${field}.kind`, "must be element, text, or ratio");
+  }
+}
+
+/**
+ * Mirrors `ReaderLocator` deserialization + `validate_reader_locator` in
+ * contracts.rs. There is no manifest cross-check — `chapterId` is
+ * shape-checked only (the record is stored per book).
+ */
+export function parseReaderLocator(value: unknown): ReaderLocator {
+  const record = requireRecord(value, "readerLocator");
+  rejectUnknownFields(
+    record,
+    ["schemaVersion", "bookId", "chapterId", "anchor", "ratio", "updated"],
+    "readerLocator",
+  );
+  const ratio = requireNonNegativeNumber(record.ratio, "ratio");
+  if (ratio > 1) {
+    throw new ContractParseError("ratio", "must be between 0 and 1");
+  }
+  return {
+    schemaVersion: requireSchemaV1(record.schemaVersion, "schemaVersion"),
+    bookId: requireString(record.bookId, "bookId"),
+    chapterId: requireString(record.chapterId, "chapterId"),
+    anchor: parseReaderAnchor(record.anchor, "anchor"),
+    ratio,
+    updated: requireIsoDateTime(record.updated, "updated"),
+  };
+}

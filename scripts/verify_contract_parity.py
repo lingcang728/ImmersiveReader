@@ -22,6 +22,13 @@ Rust readers are intentionally more tolerant than the schemas (all-Option
 fields, no ``deny_unknown_fields``) so old journals still load; only fixtures
 where every leg's verdict agrees are listed.
 
+``publication``/``reader-locator`` (EPUB) run all three legs — JSON schema,
+TS ``parsePublication``/``parseReaderLocator``, and Rust
+``serde_json`` + ``validate_publication``/``validate_reader_locator`` inside
+the same parity test. Cross-field rules a schema cannot express (nav
+chapterId ⊆ spine) are covered by dedicated Rust/TS unit tests rather than
+fixture rows.
+
 Cross-process task contracts (01-F5) are covered the same way:
 
   - ``task-event`` — the ``acquisition://task-event`` wire shape; the Rust
@@ -53,9 +60,13 @@ FIXTURE_ROOT = CONTRACTS_ROOT / "fixtures"
 CONTRACT_SCHEMA = {
     "manifest": "manifest.schema.json",
     "reading": "reading.schema.json",
+    "publication": "publication.schema.json",
+    "reader-locator": "reader-locator.schema.json",
 }
-# The TS library only ships manifest/reading validators; settings fixtures are
-# covered by schema + Rust legs.
+# Settings fixtures are covered by schema + Rust legs only — the TS library
+# has no settings parser. The four CONTRACT_SCHEMA contracts all have TS
+# validators (parseManifest / parseReadingState / parsePublication /
+# parseReaderLocator), so they also run the TS leg.
 TS_CONTRACTS = frozenset(CONTRACT_SCHEMA)
 
 
@@ -75,7 +86,13 @@ def schema_verdict(schema: Path, fixture: Path) -> bool:
 TS_RUNNER = """
 import { readFileSync } from "node:fs";
 const [moduleUrl, fixturesDir, entriesJson] = process.argv.slice(1);
-const { parseManifest, parseReadingState, validateReadingState } = await import(moduleUrl);
+const {
+  parseManifest,
+  parsePublication,
+  parseReaderLocator,
+  parseReadingState,
+  validateReadingState,
+} = await import(moduleUrl);
 const manifest = parseManifest(
   JSON.parse(readFileSync(`${fixturesDir}/manifest.valid.json`, "utf8")),
 );
@@ -85,6 +102,10 @@ for (const entry of JSON.parse(entriesJson)) {
     const data = JSON.parse(readFileSync(`${fixturesDir}/${entry.fixture}`, "utf8"));
     if (entry.contract === "manifest") {
       parseManifest(data);
+    } else if (entry.contract === "publication") {
+      parsePublication(data);
+    } else if (entry.contract === "reader-locator") {
+      parseReaderLocator(data);
     } else {
       const state = parseReadingState(data);
       validateReadingState(state, manifest);
