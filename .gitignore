@@ -45,6 +45,9 @@ runtime.__previous__/
 # DPAPI-encrypted updater key backups (see apps/desktop/scripts/package-and-install.ps1)
 **/*.dpapi
 # Local signing/test certificates must never be committed
+**/keystore.properties
+**/*.keystore
+**/*.jks
 **/*.cer
 **/*.crt
 **/*.msi

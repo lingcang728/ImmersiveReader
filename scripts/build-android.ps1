@@ -193,35 +193,47 @@ try {
     }
 
     Write-Host "执行构建命令: $tauriCli ($($buildArgs -join ' '))"
+    # Only collect APKs produced by THIS build: record a start watermark and
+    # match the variant/ABI directory layout gradle emits (apk/<abi>/<type>/).
+    $buildStartedAt = Get-Date
     & $tauriCli $buildArgs
 
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "==================================================" -ForegroundColor Green
-        Write-Host "  APK 打包成功！" -ForegroundColor Green
-        Write-Host "==================================================" -ForegroundColor Green
-        
-        # 查找并输出 APK 位置
-        $apkSearchPath = Join-Path $srcTauriDir 'gen\android\app\build\outputs\apk'
-        if (Test-Path -LiteralPath $apkSearchPath) {
-            $apks = Get-ChildItem -Path $apkSearchPath -Filter '*.apk' -Recurse
-            $mobileOut = Join-Path $repoRoot 'output\mobile'
-            $appVersion = (Get-Content -LiteralPath (Join-Path $desktopDir 'package.json') -Raw | ConvertFrom-Json).version
-            New-Item -ItemType Directory -Force -Path $mobileOut | Out-Null
-            foreach ($apk in $apks) {
-                $hash = (Get-FileHash -LiteralPath $apk.FullName -Algorithm SHA256).Hash
-                $sizeMb = [math]::Round($apk.Length / 1MB, 2)
-                # app-<abi>-<type>.apk -> ImmersiveReader_<ver>_android-<abi>-<type>.apk
-                $suffix = $apk.BaseName -replace '^app-', ''
-                $targetName = "ImmersiveReader_${appVersion}_android-${suffix}.apk"
-                Write-Host "产物文件: $($apk.FullName)" -ForegroundColor Yellow
-                Write-Host "文件大小: $sizeMb MB" -ForegroundColor Yellow
-                Write-Host "SHA-256:  $hash" -ForegroundColor Yellow
-                Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $mobileOut $targetName) -Force
-                Write-Host "已收纳到: $(Join-Path $mobileOut $targetName)" -ForegroundColor Green
-            }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri Android 构建失败，退出码: $LASTEXITCODE"
+    }
+
+    Write-Host "==================================================" -ForegroundColor Green
+    Write-Host "  APK 打包成功！" -ForegroundColor Green
+    Write-Host "==================================================" -ForegroundColor Green
+
+    $apkSearchPath = Join-Path $srcTauriDir 'gen\android\app\build\outputs\apk'
+    $expectedType = if ($Release) { 'release' } else { 'debug' }
+    $apks = @()
+    if (Test-Path -LiteralPath $apkSearchPath) {
+        $apks = Get-ChildItem -Path $apkSearchPath -Filter '*.apk' -Recurse | Where-Object {
+            # Freshness: file written after this build started, and path inside
+            # the expected build-type directory (apk/<abi>/<type>/app-*.apk).
+            ($_.LastWriteTime -ge $buildStartedAt.AddSeconds(-10)) -and
+            ($_.FullName -match [regex]::Escape("apk") + '[\\/][^\\/]+[\\/]' + $expectedType + '[\\/]')
         }
-    } else {
-        Write-Host "Tauri Android 构建退出码: $LASTEXITCODE" -ForegroundColor Red
+    }
+    if (-not $apks -or $apks.Count -eq 0) {
+        throw "构建成功但未找到本次产出的 $expectedType APK（$apkSearchPath），请检查 gradle 输出目录。"
+    }
+    $mobileOut = Join-Path $repoRoot 'output\mobile'
+    $appVersion = (Get-Content -LiteralPath (Join-Path $desktopDir 'package.json') -Raw | ConvertFrom-Json).version
+    New-Item -ItemType Directory -Force -Path $mobileOut | Out-Null
+    foreach ($apk in $apks) {
+        $hash = (Get-FileHash -LiteralPath $apk.FullName -Algorithm SHA256).Hash
+        $sizeMb = [math]::Round($apk.Length / 1MB, 2)
+        # app-<abi>-<type>.apk -> ImmersiveReader_<ver>_android-<abi>-<type>.apk
+        $suffix = $apk.BaseName -replace '^app-', ''
+        $targetName = "ImmersiveReader_${appVersion}_android-${suffix}.apk"
+        Write-Host "产物文件: $($apk.FullName)" -ForegroundColor Yellow
+        Write-Host "文件大小: $sizeMb MB" -ForegroundColor Yellow
+        Write-Host "SHA-256:  $hash" -ForegroundColor Yellow
+        Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $mobileOut $targetName) -Force
+        Write-Host "已收纳到: $(Join-Path $mobileOut $targetName)" -ForegroundColor Green
     }
 } finally {
     Pop-Location
