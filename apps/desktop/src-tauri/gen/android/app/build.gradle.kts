@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -13,6 +14,22 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Release signing is opt-in: drop a keystore.properties (storeFile /
+// storePassword / keyAlias / keyPassword) at the repo root or next to
+// src-tauri and release builds pick it up. A missing file must not break
+// configuration — release then keeps the default (debug) signing.
+val keystorePropertiesFile = listOf(
+    File(rootDir, "../../../../../keystore.properties"), // ImmersiveReader/keystore.properties
+    File(rootDir, "../../keystore.properties"), // src-tauri/keystore.properties
+).firstOrNull { it.isFile }
+
+val keystoreProperties = Properties().apply {
+    keystorePropertiesFile?.inputStream()?.use { load(it) }
+}
+
+// -PqaBuild=true produces a side-by-side QA package.
+val qaBuild = project.findProperty("qaBuild")?.toString().toBoolean()
+
 android {
     compileSdk = 36
     namespace = "com.lingcang.immersivereading"
@@ -23,6 +40,23 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        if (qaBuild) {
+            applicationIdSuffix = ".qa"
+            versionNameSuffix = "-qa"
+        }
+    }
+    if (keystorePropertiesFile != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = keystoreProperties.getProperty("storeFile")?.let { path ->
+                    val storePath = File(path)
+                    if (storePath.isAbsolute) storePath else File(keystorePropertiesFile.parentFile, path)
+                }
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -43,6 +77,14 @@ android {
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
                     .toList().toTypedArray()
             )
+            if (keystorePropertiesFile != null) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "keystore.properties not found at the repo root or src-tauri; " +
+                        "the release build keeps the default signing configuration",
+                )
+            }
         }
     }
     kotlinOptions {
@@ -61,6 +103,7 @@ dependencies {
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
+    implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("com.google.android.material:material:1.12.0")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")

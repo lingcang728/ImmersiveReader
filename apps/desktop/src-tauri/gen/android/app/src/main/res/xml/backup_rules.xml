@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Keystore-wrapped secrets must never leave the device in a backup: the
+     AndroidKeyStore key cannot be re-derived on restore, so a restored
+     blob would be undecryptable garbage. Databases and the app's private
+     files dir are excluded the same way. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="ir_secrets.xml" />
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="Private" />
+    <exclude domain="root" path="Private" />
+</full-backup-content>
