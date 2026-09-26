@@ -50,16 +50,23 @@ if (-not $env:JAVA_HOME -and $java) {
         Write-Host "自动推导 JAVA_HOME: $env:JAVA_HOME" -ForegroundColor Cyan
     }
 }
+# `java -version` prints to stderr; under ErrorActionPreference=Stop a raw
+# `2>&1` merge raises NativeCommandError. Go through cmd /c so stderr stays
+# a plain string.
+function Get-JavaMajorVersion([string]$javaExe) {
+    if (-not $javaExe -or -not (Test-Path -LiteralPath $javaExe)) { return $null }
+    $out = cmd /c "`"$javaExe`" -version 2>&1" | Out-String
+    if ($out -match 'version "(\d+)') { return [int]$matches[1] }
+    return $null
+}
+
 if ($env:JAVA_HOME -and (Test-Path -LiteralPath $env:JAVA_HOME)) {
     Write-Host "[OK] JAVA_HOME: $env:JAVA_HOME" -ForegroundColor Green
     if ($java) {
-        $javaVersionOutput = & $java.Source -version 2>&1 | Out-String
-        if ($javaVersionOutput -match 'version "(\d+)') {
-            $majorVersion = [int]$matches[1]
-            if ($majorVersion -gt 21) {
-                Write-Warning "[WARN] 当前 Java 大版本为 JDK $majorVersion。Android Gradle 插件 (AGP 8.x) 最佳兼容为 JDK 17 或 21。"
-                Write-Warning "若 Gradle 报错 'Unsupported class file major version'，建议临时设置 `$env:JAVA_HOME 指向 JDK 17/21。"
-            }
+        $majorVersion = Get-JavaMajorVersion $java.Source
+        if ($majorVersion -and $majorVersion -gt 21) {
+            Write-Warning "[WARN] 当前 Java 大版本为 JDK $majorVersion。Android Gradle 插件 (AGP 8.x) 最佳兼容为 JDK 17 或 21。"
+            Write-Warning "若 Gradle 报错 'Unsupported class file major version'，建议临时设置 `$env:JAVA_HOME 指向 JDK 17/21。"
         }
     }
 } elseif ($java) {
@@ -68,11 +75,7 @@ if ($env:JAVA_HOME -and (Test-Path -LiteralPath $env:JAVA_HOME)) {
 
 # 2.5 AGP 8.x 需要 JDK 17/21：JAVA_HOME 缺失或指向更高版本时，自动切换到 G:\build_cache 下的 JDK 21
 $javaHomeExe = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\java.exe' } else { $null }
-$javaHomeMajor = $null
-if ($javaHomeExe -and (Test-Path -LiteralPath $javaHomeExe)) {
-    $javaHomeOut = & $javaHomeExe -version 2>&1 | Out-String
-    if ($javaHomeOut -match 'version "(\d+)') { $javaHomeMajor = [int]$matches[1] }
-}
+$javaHomeMajor = Get-JavaMajorVersion $javaHomeExe
 if (-not $env:JAVA_HOME -or -not $javaHomeMajor -or $javaHomeMajor -gt 21) {
     $jdk21 = Get-ChildItem -LiteralPath 'G:\build_cache' -Directory -Filter 'jdk-21*' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
     if ($jdk21 -and (Test-Path -LiteralPath (Join-Path $jdk21.FullName 'bin\java.exe'))) {
@@ -210,12 +213,13 @@ try {
     $expectedType = if ($Release) { 'release' } else { 'debug' }
     $apks = @()
     if (Test-Path -LiteralPath $apkSearchPath) {
-        $apks = Get-ChildItem -Path $apkSearchPath -Filter '*.apk' -Recurse | Where-Object {
+        # @() forces an array: under StrictMode a single FileInfo has no .Count.
+        $apks = @(Get-ChildItem -Path $apkSearchPath -Filter '*.apk' -Recurse | Where-Object {
             # Freshness: file written after this build started, and path inside
             # the expected build-type directory (apk/<abi>/<type>/app-*.apk).
             ($_.LastWriteTime -ge $buildStartedAt.AddSeconds(-10)) -and
             ($_.FullName -match [regex]::Escape("apk") + '[\\/][^\\/]+[\\/]' + $expectedType + '[\\/]')
-        }
+        })
     }
     if (-not $apks -or $apks.Count -eq 0) {
         throw "构建成功但未找到本次产出的 $expectedType APK（$apkSearchPath），请检查 gradle 输出目录。"
