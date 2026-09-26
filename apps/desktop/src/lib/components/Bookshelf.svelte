@@ -3,6 +3,7 @@
 	import { findChapterIndexById, type BookDetail, type BookSummary, type LibraryIssue, type TemporaryItem } from '$lib/library/books';
 	import type { TaskEvent, TaskSnapshot } from '$lib/tasks/sync';
 	import { detectDevice } from '$lib/platform/device';
+	import { platformCapabilities } from '$lib/platform/capabilities';
 	import TaskQueue from './TaskQueue.svelte';
 	import './bookshelf.css';
 
@@ -514,9 +515,11 @@
 							<div>
 								<button class="act-secondary" on:click={() => onOpenDetails(book.bookId)}>详情</button>
 								<button class="act-primary" on:click={() => onOpenBook(book.bookId)}>阅读</button>
-								<button class="act-secondary" on:click={() => onFlowBook(book.bookId)}
-									>连读 ↗</button
-								>
+								{#if $platformCapabilities.readerSessions}
+									<button class="act-secondary" on:click={() => onFlowBook(book.bookId)}
+										>连读 ↗</button
+									>
+								{/if}
 							</div>
 						</div>
 					</article>

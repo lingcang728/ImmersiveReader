@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
 	createChapterNavigationKeyLatch,
+	isSwipeExcludedTarget,
 	readingScrollIntentForKey,
 	resolveChapterBoundaryScroll,
 	resolveFocusStep,
-	resolveReadingScroll
+	resolveReadingScroll,
+	SWIPE_EXCLUDE_SELECTOR
 } from "./navigation";
 
 describe("reading keyboard navigation", () => {
@@ -171,5 +173,40 @@ describe("reading keyboard navigation", () => {
 			type: "chapter",
 			direction: 1
 		});
+	});
+});
+
+describe("isSwipeExcludedTarget", () => {
+	// Duck-typed fixtures: the predicate only needs `.closest`, which keeps
+	// these tests runnable in the plain node environment.
+	const excluded = { closest: () => ({ tag: "PRE" }) };
+	const clear = { closest: () => null };
+
+	it("excludes targets whose ancestor chain matches the swipe selector", () => {
+		expect(isSwipeExcludedTarget(excluded)).toBe(true);
+	});
+
+	it("admits targets with no matching ancestor", () => {
+		expect(isSwipeExcludedTarget(clear)).toBe(false);
+	});
+
+	it("rejects null/undefined and non-element targets", () => {
+		expect(isSwipeExcludedTarget(null)).toBe(false);
+		expect(isSwipeExcludedTarget(undefined)).toBe(false);
+		expect(isSwipeExcludedTarget({})).toBe(false);
+	});
+
+	it("climbs through text nodes via parentElement", () => {
+		const textNode = { parentElement: excluded };
+		expect(isSwipeExcludedTarget(textNode)).toBe(true);
+		const orphanText = { parentElement: null };
+		expect(isSwipeExcludedTarget(orphanText)).toBe(false);
+	});
+
+	it("keeps focus HUD and context bar out of swipe handling", () => {
+		expect(SWIPE_EXCLUDE_SELECTOR).toContain(".mobile-focus-bar");
+		expect(SWIPE_EXCLUDE_SELECTOR).toContain(".context-bar");
+		expect(SWIPE_EXCLUDE_SELECTOR).toContain("pre");
+		expect(SWIPE_EXCLUDE_SELECTOR).toContain(".table-scroll");
 	});
 });

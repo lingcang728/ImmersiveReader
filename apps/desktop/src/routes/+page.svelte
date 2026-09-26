@@ -5,7 +5,6 @@
 	import { stableRequestId } from "$lib/requestId";
 	import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 	import { open } from "@tauri-apps/plugin-dialog";
-	import { remove } from "@tauri-apps/plugin-fs";
 	import { appCacheDir, join } from "@tauri-apps/api/path";
 	import { openUrl } from "@tauri-apps/plugin-opener";
 	import { checkForDesktopUpdate } from "$lib/update/service";
@@ -53,6 +52,24 @@
 		autoFocusMode,
 	} from "$lib/stores/app";
 	import { detectDevice, volumeKeyPaging, touchZonesEnabled, type DeviceInfo } from "$lib/platform/device";
+	import {
+		platformCapabilities,
+		refreshPlatformCapabilities,
+	} from "$lib/platform/capabilities";
+	import {
+		beginImport,
+		cancelImport,
+		getImportStatus,
+		importPhaseLabel,
+		isTerminalImportState,
+		suggestedImportTitle,
+		uriLooksLikeMarkdown,
+		type BeginImportArgs,
+		type ImportStatus,
+	} from "$lib/platform/importOps";
+	import EpubReader from "$lib/epub/EpubReader.svelte";
+	import { getReaderLocator, saveReaderLocator } from "$lib/epub/ipc";
+	import type { Publication, ReaderLocator } from "$lib/epub/types";
 	import { flowThemeVars } from "$lib/theme/themes";
 	import SearchBar from "$lib/components/SearchBar.svelte";
 	import TocPanel from "$lib/components/TocPanel.svelte";
@@ -107,6 +124,7 @@
 	} from "$lib/reading/cursor";
 	import {
 		createChapterNavigationKeyLatch,
+		isSwipeExcludedTarget,
 		readingScrollIntentForKey,
 		resolveChapterBoundaryScroll,
 		resolveFocusStep,
@@ -313,12 +331,27 @@
 	let deviceInfo: DeviceInfo = detectDevice();
 	$: isMobile = deviceInfo.isMobile;
 
+	// EPUB reader surface — mounted when a BookDetail carries
+	// `publication.format === "epub"`. Kept outside $currentFilePath so the
+	// markdown pipeline, watcher and save path never see an epub book.
+	// `bookDir` is resolved eagerly: older backends omit BookDetail.bookDir,
+	// so it is derived from a chapter's absolute path minus its relative one.
+	let epubSession: {
+		detail: BookDetail;
+		bookDir: string;
+		publication: Publication;
+		locator: ReaderLocator | null;
+	} | null = null;
+
 	let mobileHistoryDepth = 0;
 	let programmaticBackCount = 0;
 
 	function computeMobileLayerCount(): number {
 		let count = 0;
 		if ($currentFilePath) count++;
+		// EPUB sits on the same "reader" rung as flow/markdown: below focus
+		// mode and overlays, above the bare bookshelf.
+		if (epubSession) count++;
 		if (flowReaderSession) count++;
 		if ($focusMode) count++;
 		if (selectedBookDetail !== null) count++;
@@ -348,14 +381,17 @@
 			mobileHistoryDepth = targetDepth;
 		} else if (targetDepth < mobileHistoryDepth) {
 			const toPop = mobileHistoryDepth - targetDepth;
+			// B1: bump the count BEFORE the pops dispatch — popstate handlers
+			// fire synchronously per entry, so the counter must already reflect
+			// every expected event or they get mistaken for user Back presses
+			// and run the layer-close ladder a second time.
 			programmaticBackCount += toPop;
 			mobileHistoryDepth = targetDepth;
 			try {
-				if (toPop === 1) {
-					history.back();
-				} else {
-					history.go(-toPop);
-				}
+				// `history.go(-n)` with n>1 collapses into a single navigation,
+				// so some engines deliver fewer popstate events than entries
+				// popped; the popstate handler drains leftovers via mmbookDepth.
+				history.go(-toPop);
 			} catch {
 				programmaticBackCount = Math.max(0, programmaticBackCount - toPop);
 			}
@@ -377,18 +413,50 @@
 			navigationGuardOpen,
 			$focusMode,
 			flowReaderSession,
+			epubSession,
 			$currentFilePath
 		];
 		syncMobileHistory();
 	}
 
+	// B5: the Android bridge intercepts hardware volume presses only while a
+	// surface that consumes them is mounted and the user opted in. EPUB has
+	// its own surface (no volume paging), so capture stays markdown-only.
+	let volumeKeyCaptureActive = false;
+	$: {
+		const volumeCaptureWanted =
+			isMobile &&
+			$platformCapabilities.volumeKeyBridge &&
+			$volumeKeyPaging &&
+			!!$currentFilePath;
+		if (volumeCaptureWanted !== volumeKeyCaptureActive) {
+			volumeKeyCaptureActive = volumeCaptureWanted;
+			void invoke("set_volume_key_capture", {
+				enabled: volumeCaptureWanted,
+			}).catch(() => {});
+		}
+	}
+
 	let touchStartX = 0;
 	let touchStartY = 0;
 	let touchStartTime = 0;
+	// B2: the element the gesture began on — the eligibility decision lives
+	// there, not on the (possibly moved) touchend target.
+	let touchStartTarget: EventTarget | null = null;
+	// Set false by any second finger or scrollable-x start; checked at end.
+	let touchGestureValid = false;
+	// Horizontal chapter swipes only make sense when the gesture began on a
+	// plain text surface — not inside a pre/table/media/control.
+	let touchSwipeEligible = false;
 	let lastTapTime = 0;
 	let suppressNextDblClick = false;
+	// B4: after a tap we handled, the browser still synthesizes a click ~on
+	// the same node; swallow it so it cannot double-fire article actions
+	// (focus block selection, podcast-original toggles, lightbox).
+	let suppressTapClickUntil = 0;
 	let singleTapTimer: ReturnType<typeof setTimeout> | null = null;
 	const DOUBLE_TAP_WINDOW_MS = 250;
+	const TAP_CLICK_SUPPRESS_MS = 500;
 
 	function toggleChromeForTouch() {
 		if (chromeState.chromeVisible) {
@@ -398,24 +466,84 @@
 		}
 	}
 
-	function handleReaderTouchStart(e: TouchEvent) {
-		if (!$currentFilePath || flowReaderSession) return;
-		if (e.touches.length !== 1) return;
-		touchStartX = e.touches[0].clientX;
-		touchStartY = e.touches[0].clientY;
-		touchStartTime = Date.now();
-	}
-
-	function handleReaderTouchCancel() {
+	function cancelPendingTap() {
 		if (singleTapTimer) {
 			clearTimeout(singleTapTimer);
 			singleTapTimer = null;
 		}
+	}
+
+	/**
+	 * True when the touch started inside an element that can scroll
+	 * horizontally right now (wide table, code block, carousel…). In that
+	 * case a horizontal drag belongs to that element, never to chapter nav.
+	 */
+	function startsInHorizontalScroller(target: EventTarget | null): boolean {
+		let el =
+			target instanceof HTMLElement
+				? target
+				: target instanceof Node
+					? target.parentElement
+					: null;
+		let hops = 0;
+		while (el && el !== contentEl && hops < 8) {
+			if (el.scrollWidth - el.clientWidth > 8) {
+				const ox = getComputedStyle(el).overflowX;
+				if (ox === "auto" || ox === "scroll") return true;
+			}
+			el = el.parentElement;
+			hops++;
+		}
+		return false;
+	}
+
+	function resetTouchGesture() {
+		touchStartTarget = null;
+		touchGestureValid = false;
+		touchSwipeEligible = false;
+		cancelPendingTap();
+	}
+
+	function handleReaderTouchStart(e: TouchEvent) {
+		if (!$currentFilePath || flowReaderSession || epubSession) {
+			resetTouchGesture();
+			return;
+		}
+		// B2: a second finger (pinch/zoom/text-selection) invalidates any
+		// in-flight tap or swipe candidate outright.
+		if (e.touches.length !== 1) {
+			touchGestureValid = false;
+			cancelPendingTap();
+			lastTapTime = 0;
+			return;
+		}
+		const touch = e.touches[0];
+		touchStartX = touch.clientX;
+		touchStartY = touch.clientY;
+		touchStartTime = Date.now();
+		touchStartTarget = e.target;
+		touchGestureValid = true;
+		// Eligibility for horizontal chapter swipes is decided once, at start:
+		// interactive/h-scrollable surfaces keep ownership of the gesture for
+		// its whole lifetime, even if the touch point later wanders outside.
+		touchSwipeEligible =
+			!isSwipeExcludedTarget(touchStartTarget) &&
+			!startsInHorizontalScroller(touchStartTarget);
+	}
+
+	function handleReaderTouchCancel() {
+		resetTouchGesture();
 		lastTapTime = 0;
 	}
 
 	function handleReaderTouchEnd(e: TouchEvent) {
-		if (!$currentFilePath || flowReaderSession) return;
+		if (!$currentFilePath || flowReaderSession || epubSession) return;
+		// A remaining finger means the lifted one was part of a multi-touch
+		// gesture — it is neither a tap nor a swipe.
+		if (!touchGestureValid || e.touches.length > 0) {
+			if (e.touches.length === 0) resetTouchGesture();
+			return;
+		}
 		if (e.changedTouches.length !== 1) return;
 		const touchEndX = e.changedTouches[0].clientX;
 		const touchEndY = e.changedTouches[0].clientY;
@@ -423,13 +551,17 @@
 		const deltaY = touchEndY - touchStartY;
 		const elapsed = Date.now() - touchStartTime;
 
-		// 1. Horizontal swipe gesture for chapter navigation
-		if (Math.abs(deltaX) > 60 && Math.abs(deltaY) < 45 && elapsed < 400) {
-			if (singleTapTimer) {
-				clearTimeout(singleTapTimer);
-				singleTapTimer = null;
-			}
+		// 1. Horizontal swipe gesture for chapter navigation — only when the
+		// gesture began on an eligible (non-widget, non-x-scrollable) surface.
+		if (
+			touchSwipeEligible &&
+			Math.abs(deltaX) > 60 &&
+			Math.abs(deltaY) < 45 &&
+			elapsed < 400
+		) {
+			cancelPendingTap();
 			lastTapTime = 0;
+			touchGestureValid = false;
 			if (activeBook && !$focusMode) {
 				if (deltaX < 0) {
 					void navigateBookChapter(1);
@@ -444,10 +576,12 @@
 		// 2. Tap gesture (small movement, short duration)
 		if (Math.abs(deltaX) < 14 && Math.abs(deltaY) < 14 && elapsed < 350) {
 			if (typeof window !== "undefined" && window.getSelection()?.toString().trim()) {
+				touchGestureValid = false;
 				return;
 			}
 			const target = e.target as HTMLElement | null;
 			if (target && target.closest("button, a, input, [data-no-tap], .mobile-focus-bar, .context-bar")) {
+				touchGestureValid = false;
 				return;
 			}
 
@@ -455,31 +589,31 @@
 			// Double tap to toggle focus mode
 			if (now - lastTapTime < DOUBLE_TAP_WINDOW_MS) {
 				lastTapTime = 0;
-				if (singleTapTimer) {
-					clearTimeout(singleTapTimer);
-					singleTapTimer = null;
-				}
+				cancelPendingTap();
 				if ($currentFilePath && !flowReaderSession) {
 					suppressNextDblClick = true;
+					suppressTapClickUntil = now + TAP_CLICK_SUPPRESS_MS;
 					setTimeout(() => {
 						suppressNextDblClick = false;
 					}, 450);
 					void toggleFocusMode(!$focusMode);
+					touchGestureValid = false;
 					return;
 				}
 			}
 			lastTapTime = now;
 
-			if (singleTapTimer) {
-				clearTimeout(singleTapTimer);
-				singleTapTimer = null;
-			}
+			cancelPendingTap();
 
 			const tapX = touchEndX;
 			const capturedTarget = target;
+			touchGestureValid = false;
 
 			singleTapTimer = setTimeout(() => {
 				singleTapTimer = null;
+				// The tap is real now (no second tap arrived) — the gesture is
+				// ours, so suppress the synthesized click that follows.
+				suppressTapClickUntil = Date.now() + TAP_CLICK_SUPPRESS_MS;
 
 				// Zone-based touch navigation or sentence selection
 				if ($touchZonesEnabled && typeof window !== "undefined") {
@@ -522,6 +656,7 @@
 		} else {
 			// Movement exceeds tap threshold: reset lastTapTime so dragging/scrolling doesn't combine with a tap
 			lastTapTime = 0;
+			touchGestureValid = false;
 		}
 	}
 
@@ -570,14 +705,65 @@
 	let queuedChapterNavigation: { direction: -1 | 1; offsetPx: number } | null = null;
 	let chapterBoundaryRestoreGeneration = 0;
 	const chapterNavigationKeyLatch = createChapterNavigationKeyLatch();
-	let preloadedChapter: {
-		bookId: string;
-		index: number;
+	// C8-lite: rendered chapter cache. openBookChapter consults it before
+	// touching IPC and every chapter open fills it; preloadNextBookChapter
+	// warms the next entry near the chapter end. LRU-bounded by utf-16 byte
+	// estimate (html + source dominate) so marathon sessions over huge
+	// chapters cannot grow memory without limit.
+	const CHAPTER_CACHE_BUDGET_BYTES = 64 * 1024 * 1024;
+	type CachedChapter = {
 		path: string;
 		result: { content: string; encoding: string };
 		rendered: RenderedMarkdownDocument;
-	} | null = null;
+		bytes: number;
+	};
+	const chapterRenderCache = new Map<string, CachedChapter>();
+	let chapterRenderCacheBytes = 0;
 	let chapterPreloadInFlight: Promise<void> | null = null;
+
+	function chapterCacheKey(bookId: string, index: number) {
+		return `${bookId}:${index}`;
+	}
+
+	function getCachedChapter(bookId: string, index: number): CachedChapter | null {
+		const key = chapterCacheKey(bookId, index);
+		const entry = chapterRenderCache.get(key);
+		if (!entry) return null;
+		// LRU refresh: a just-read chapter must outlive older entries.
+		chapterRenderCache.delete(key);
+		chapterRenderCache.set(key, entry);
+		return entry;
+	}
+
+	function putCachedChapter(
+		bookId: string,
+		index: number,
+		entry: Omit<CachedChapter, "bytes">,
+	) {
+		const bytes = (entry.rendered.html.length + entry.result.content.length) * 2;
+		// Larger than the whole budget: caching it would only evict everything.
+		if (bytes > CHAPTER_CACHE_BUDGET_BYTES) return;
+		const key = chapterCacheKey(bookId, index);
+		const existing = chapterRenderCache.get(key);
+		if (existing) {
+			chapterRenderCache.delete(key);
+			chapterRenderCacheBytes -= existing.bytes;
+		}
+		chapterRenderCache.set(key, { ...entry, bytes });
+		chapterRenderCacheBytes += bytes;
+		while (chapterRenderCacheBytes > CHAPTER_CACHE_BUDGET_BYTES) {
+			const oldestKey = chapterRenderCache.keys().next().value;
+			if (oldestKey === undefined || oldestKey === key) break;
+			const evicted = chapterRenderCache.get(oldestKey);
+			chapterRenderCache.delete(oldestKey);
+			chapterRenderCacheBytes -= evicted?.bytes ?? 0;
+		}
+	}
+
+	function clearChapterRenderCache() {
+		chapterRenderCache.clear();
+		chapterRenderCacheBytes = 0;
+	}
 	let zoomIndicatorText = "";
 	let zoomIndicatorTimer: ReturnType<typeof setTimeout> | null = null;
 	type DurableReaderPreferences = {
@@ -602,6 +788,10 @@
 	// shared by all callers instead of stacking one IPC per event.
 	let acquisitionSnapshotInFlight: Promise<void> | null = null;
 	function refreshAcquisitionSnapshot(): Promise<void> {
+		// C6: the Zhihu/podcast task engines are desktop-only — on mobile the
+		// snapshot IPC does not exist, so skip the whole machinery instead of
+		// surfacing "无法同步任务队列" on every resume.
+		if (!$platformCapabilities.taskAcquisition) return Promise.resolve();
 		if (acquisitionSnapshotInFlight) return acquisitionSnapshotInFlight;
 		const nonce = ++taskRefreshNonce;
 		acquisitionSnapshotInFlight = (async () => {
@@ -635,9 +825,12 @@
 	]);
 	let taskPollTimer: ReturnType<typeof setInterval> | null = null;
 	$: {
-		const hasActiveTask = acquisitionTasks.some((task) =>
-			ACTIVE_LIFECYCLE_STATES.has(task.lifecycleState)
-		);
+		const hasActiveTask =
+			!isMobile &&
+			$platformCapabilities.taskAcquisition &&
+			acquisitionTasks.some((task) =>
+				ACTIVE_LIFECYCLE_STATES.has(task.lifecycleState)
+			);
 		if (hasActiveTask && taskPollTimer === null) {
 			taskPollTimer = setInterval(() => {
 				void refreshAcquisitionSnapshot();
@@ -1117,8 +1310,10 @@
 	}
 
 	function syncChromeSurface() {
+		// EPUB shares the 'flow' immersive slot in the chrome machine: hidden
+		// chrome by default, activity wakes the top-edge hotzone.
 		const surface = deriveChromeSurface({
-			flowActive: !!flowReaderSession,
+			flowActive: !!flowReaderSession || !!epubSession,
 			focusMode: $focusMode,
 			fileOpen: !!$currentFilePath,
 			workflowOpen: podcastWorkflowOpen || zhihuWorkflowOpen,
@@ -1215,7 +1410,9 @@
 	// The rendered shell is the final authority: bookshelf/workflow/trash
 	// surfaces always reserve space for the window bar. This second guard keeps
 	// a transient reader state from ever placing the homepage underneath it.
-	$: librarySurface = !flowReaderSession && !$currentFilePath;
+	// EPUB is an immersive reading surface — the bookshelf chrome must not
+	// count it as "library" just because $currentFilePath stays empty.
+	$: librarySurface = !flowReaderSession && !$currentFilePath && !epubSession;
 	$: chromeVisible = librarySurface ? true : chromeState.chromeVisible;
 	$: chromeOverlay = !librarySurface && isOverlaySurface(chromeState.surface);
 	$: showMarkdownContext =
@@ -1240,6 +1437,7 @@
 	$: {
 		// Keep surface in sync with mode flags without fighting explicit dispatches mid-transition.
 		void flowReaderSession;
+		void epubSession;
 		void $focusMode;
 		void $currentFilePath;
 		void podcastWorkflowOpen;
@@ -1737,6 +1935,8 @@
 	let firstOpenHintVisible = false;
 	let firstOpenHintTimer: ReturnType<typeof setTimeout> | null = null;
 	function maybeShowFirstOpenHint() {
+		// B8: the hint lists keyboard shortcuts — meaningless on touch.
+		if (isMobile) return;
 		try {
 			if (localStorage.getItem("mmbook-hint-shown")) return;
 			localStorage.setItem("mmbook-hint-shown", "1");
@@ -1849,27 +2049,159 @@
 		}
 	}
 
+	// ===== Async backend import (A2/A8/A9) =====
+	// The backend owns the whole operation: begin_import returns an
+	// operation id, get_import_status reports progress/issues, cancel_import
+	// requests cooperative cancellation. The frontend only renders status —
+	// content:// URIs are read by the backend through the content provider,
+	// so the old "stage each SAF pick into the cache then run the folder
+	// importer" dance (with its wedged-IPC failure mode) is gone.
+	type PendingImportRequest =
+		| { kind: "directory"; path: string }
+		| { kind: "files"; paths: string[] }
+		| { kind: "uris"; uris: string[] };
+
+	const IMPORT_POLL_MS = 400;
+	const IMPORT_POLL_FAILURE_LIMIT = 5;
+
+	let importBusy = false;
+	let importStatus: ImportStatus | null = null;
+	let activeImportOperationId: string | null = null;
+	let pendingImportTitle: { request: PendingImportRequest; draft: string } | null = null;
+
+	async function runImport(request: PendingImportRequest, title?: string) {
+		if (importBusy) return;
+		importBusy = true;
+		importFolderBusy = true;
+		try {
+			const args: BeginImportArgs = { kind: request.kind };
+			if (request.kind === "directory") args.path = request.path;
+			else if (request.kind === "files") args.paths = request.paths;
+			else args.uris = request.uris;
+			if (title) args.title = title;
+			const { operationId } = await beginImport(args);
+			activeImportOperationId = operationId;
+			importStatus = {
+				operationId,
+				state: "pending",
+				phase: "pending",
+				totalFiles: 0,
+				completedFiles: 0,
+				currentFile: null,
+				issues: [],
+				bookId: null,
+				error: null,
+			};
+			await pollImportUntilTerminal(operationId);
+		} catch (error) {
+			noticeError("导入失败", error);
+			importStatus = null;
+			activeImportOperationId = null;
+		} finally {
+			importBusy = false;
+			importFolderBusy = false;
+		}
+	}
+
+	// Sequential status polling — consecutive get_import_status failures are
+	// tolerated (transient IPC hiccups) but a persistent outage ends the wait
+	// rather than pinning the card forever.
+	async function pollImportUntilTerminal(operationId: string) {
+		let failures = 0;
+		while (activeImportOperationId === operationId) {
+			try {
+				const status = await getImportStatus(operationId);
+				if (activeImportOperationId !== operationId) return;
+				failures = 0;
+				importStatus = status;
+				if (isTerminalImportState(status.state)) {
+					activeImportOperationId = null;
+					await finishImport(status);
+					return;
+				}
+			} catch (error) {
+				failures += 1;
+				console.warn("import status poll failed:", error);
+				if (failures >= IMPORT_POLL_FAILURE_LIMIT) {
+					activeImportOperationId = null;
+					if (importStatus) {
+						importStatus = {
+							...importStatus,
+							state: "failed",
+							error: "导入状态查询失败，请查看书架确认结果",
+						};
+					}
+					return;
+				}
+			}
+			await new Promise((resolve) => setTimeout(resolve, IMPORT_POLL_MS));
+		}
+	}
+
+	async function finishImport(status: ImportStatus) {
+		if (status.state === "completed") {
+			await refreshLibrary();
+			const issueNote =
+				status.issues.length > 0 ? `，${status.issues.length} 个文件存在问题` : "";
+			showAppNotice(`导入完成${issueNote}`);
+			if (status.bookId) {
+				try {
+					await openLibraryBook(status.bookId);
+				} catch (error) {
+					console.warn("open imported book failed:", error);
+				}
+			}
+		} else if (status.state === "cancelled") {
+			showAppNotice("已取消导入");
+		} else {
+			noticeError("导入失败", status.error ?? "未知错误");
+		}
+	}
+
+	async function cancelActiveImport() {
+		const operationId = activeImportOperationId;
+		if (!operationId) return;
+		try {
+			await cancelImport(operationId);
+		} catch (error) {
+			console.warn("cancel_import failed:", error);
+		}
+	}
+
+	function dismissImportStatus() {
+		importStatus = null;
+	}
+
+	function promptImportTitle(request: PendingImportRequest) {
+		if (importBusy || pendingImportTitle) return;
+		const uris = request.kind === "uris" ? request.uris
+			: request.kind === "files" ? request.paths
+			: [request.path];
+		pendingImportTitle = { request, draft: suggestedImportTitle(uris) };
+	}
+
+	function confirmImportTitle() {
+		const pending = pendingImportTitle;
+		if (!pending) return;
+		pendingImportTitle = null;
+		void runImport(pending.request, pending.draft.trim() || undefined);
+	}
+
+	function cancelImportTitle() {
+		pendingImportTitle = null;
+	}
+
 	async function importFolderToLibrary() {
-		if (importFolderBusy) return;
+		if (importFolderBusy || importBusy || pendingImportTitle) return;
 		// Android: the dialog plugin has no folder picker — fall back to a
-		// multi-file pick and stage the content:// URIs into the app cache.
+		// multi-file pick; the URIs are handed to the backend importer.
 		if (isMobile) {
 			await importPickedFilesToLibrary();
 			return;
 		}
 		const selected = await open({ directory: true, multiple: false, title: "选择 Markdown 文件夹" });
 		if (!selected || Array.isArray(selected)) return;
-		importFolderBusy = true;
-		showAppNotice("正在导入文件夹…");
-		try {
-			const manifest = await invoke<{ bookId: string }>("import_markdown_folder", { path: selected });
-			await refreshLibrary();
-			await openLibraryBook(manifest.bookId);
-		} catch (error) {
-			noticeError("导入失败", error);
-		} finally {
-			importFolderBusy = false;
-		}
+		promptImportTitle({ kind: "directory", path: selected });
 	}
 
 	// Every mobile step below crosses the Tauri IPC bridge into Kotlin, and a
@@ -1878,7 +2210,6 @@
 	// clear. Bound each call so a stuck step degrades into a skip or an
 	// error notice instead.
 	const MOBILE_IPC_TIMEOUT_MS = 20_000;
-	const MOBILE_IMPORT_TIMEOUT_MS = 60_000;
 
 	function withMobileTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1888,17 +2219,21 @@
 		return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 	}
 
-	// Mobile import path: SAF file picking returns content:// URIs that
-	// std::fs cannot read, so each pick is copied into the app cache as a
-	// real file and the existing folder importer runs on the staging dir
-	// (whose name becomes the book title).
+	// Mobile import: SAF picking returns content:// URIs that are handed
+	// straight to begin_import — the backend reads them through the content
+	// resolver. A lone markdown pick still opens for immediate reading.
 	async function importPickedFilesToLibrary() {
 		// The picker Activity can fail to launch at all (no file manager) —
 		// cancellation resolves null, but a launch failure rejects.
 		const selected = await open({
 			multiple: true,
-			title: "选择要导入的 Markdown 文件",
-			filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+			title: "选择要导入的文件",
+			filters: [
+				{
+					name: "书籍与文档",
+					extensions: ["md", "markdown", "txt", "epub", "zip"],
+				},
+			],
 		}).catch((error) => {
 			noticeError("无法打开文件选择器", error);
 			return null;
@@ -1907,57 +2242,43 @@
 			(uri): uri is string => typeof uri === "string" && uri.length > 0,
 		);
 		if (uris.length === 0) return;
-		importFolderBusy = true;
-		showAppNotice("正在导入所选文件…");
-		let stagingRoot: string | null = null;
+		if (uris.length === 1 && uriLooksLikeMarkdown(uris[0])) {
+			await openMobilePickedFile(uris[0]);
+			return;
+		}
+		promptImportTitle({ kind: "uris", uris });
+	}
+
+	// A9: ACTION_VIEW / SEND intents land in a backend queue — drain on mount
+	// and on every resume so a cold or warm open both reach the document.
+	let pendingUriDrainActive = false;
+	async function drainPendingOpenUris() {
+		if (pendingUriDrainActive) return;
+		if (!deviceInfo.isAndroid && !$platformCapabilities.openWith) return;
+		pendingUriDrainActive = true;
 		try {
-			stagingRoot = await withMobileTimeout(
-				(async () => join(await appCacheDir(), `mobile-import-${Date.now()}`))(),
-				"初始化暂存目录",
-			);
-			const stagingDir = await join(stagingRoot, "导入文集");
-			let staged = 0;
-			let skipped = 0;
+			const uris = await invoke<string[]>("take_pending_open_uris");
+			if (!Array.isArray(uris) || uris.length === 0) return;
+			const markdownUris: string[] = [];
+			const importUris: string[] = [];
 			for (const uri of uris) {
-				try {
-					// stage_content_uri streams the content:// document through
-					// ContentResolver into the staging dir — the fs plugin's fd
-					// path can panic and leave the invoke pending forever.
-					await withMobileTimeout(
-						invoke<{ path: string; name: string }>("stage_content_uri", {
-							uri,
-							destDir: stagingDir,
-						}),
-						"读取所选文件",
-					);
-					staged += 1;
-				} catch (error) {
-					console.warn("跳过无法读取的所选文件:", uri, error);
-					skipped += 1;
-				}
+				if (typeof uri !== "string" || !uri) continue;
+				if (uriLooksLikeMarkdown(uri)) markdownUris.push(uri);
+				else importUris.push(uri);
 			}
-			if (staged === 0) {
-				showAppNotice("所选文件都无法读取，未导入任何内容");
-				return;
+			// A lone markdown pick opens for immediate reading; anything else
+			// (epub, zip, opaque URIs, or a multi-pick) goes through the import
+			// pipeline so it lands in the library as a book.
+			if (markdownUris.length === 1 && importUris.length === 0) {
+				await openMobilePickedFile(markdownUris[0]);
+			} else {
+				promptImportTitle({ kind: "uris", uris: [...markdownUris, ...importUris] });
 			}
-			const manifest = await Promise.race([
-				invoke<{ bookId: string }>("import_markdown_folder", { path: stagingDir }),
-				new Promise<never>((_, reject) =>
-					setTimeout(() => reject(new Error("导入超时，请查看书架是否已生成书目")), MOBILE_IMPORT_TIMEOUT_MS),
-				),
-			]);
-			await refreshLibrary();
-			if (skipped > 0) {
-				showAppNotice(`已导入，${skipped} 个文件无法读取被跳过`);
-			}
-			await withMobileTimeout(openLibraryBook(manifest.bookId), "打开书目");
 		} catch (error) {
-			noticeError("导入失败", error);
+			// Older backends lack the command — keep it silent.
+			console.warn("pending open uris drain failed:", error);
 		} finally {
-			importFolderBusy = false;
-			// The staging dir is single-use; a failed sweep just leaves
-			// reclaimable cache files behind.
-			if (stagingRoot) void remove(stagingRoot, { recursive: true }).catch(() => {});
+			pendingUriDrainActive = false;
 		}
 	}
 
@@ -1984,7 +2305,10 @@
 		if (!ok) return;
 		try {
 			const message = await invoke<string>("remove_book", { bookId });
-			if (activeBook?.manifest.bookId === bookId) {
+			if (
+				activeBook?.manifest.bookId === bookId ||
+				epubSession?.detail.manifest.bookId === bookId
+			) {
 				await returnToBookshelf();
 			} else {
 				await refreshLibrary();
@@ -2006,7 +2330,10 @@
 		if (!again) return;
 		try {
 			const message = await invoke<string>("delete_book", { bookId });
-			if (activeBook?.manifest.bookId === bookId) {
+			if (
+				activeBook?.manifest.bookId === bookId ||
+				epubSession?.detail.manifest.bookId === bookId
+			) {
 				await returnToBookshelf();
 			} else {
 				await refreshLibrary();
@@ -2268,6 +2595,12 @@
 					detail.progress = { ...detail.progress, ...(shadow.bookProgress as typeof detail.progress) };
 				}
 			}
+			// EPUB books mount the dedicated reader — branch before any
+			// markdown chapter-path resolution.
+			if (detail.publication?.format === "epub") {
+				await openEpubBook(detail, chapterIndex);
+				return;
+			}
 			const index =
 				chapterIndex !== undefined &&
 				chapterIndex >= 0 &&
@@ -2317,12 +2650,20 @@
 	}
 
 	function preloadNextBookChapter(): Promise<void> {
-		if (!activeBook || activeChapterIndex < 0 || readingProgress < 0.84 || preloadedChapter) {
+		// C9: a hidden page renders nothing — skip the file read + markdown
+		// render while the document is in the background.
+		if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+			return Promise.resolve();
+		}
+		if (!activeBook || activeChapterIndex < 0 || readingProgress < 0.84) {
 			return Promise.resolve();
 		}
 		const index = activeChapterIndex + 1;
 		const chapter = activeBook.manifest.chapters[index];
 		if (!chapter) return Promise.resolve();
+		if (getCachedChapter(activeBook.manifest.bookId, index)) {
+			return Promise.resolve();
+		}
 		// Every scroll event past 84% re-enters here; without an in-flight guard
 		// each one would repeat the chapter file read + full markdown render
 		// while the first preload is still awaiting its IPC calls.
@@ -2333,8 +2674,8 @@
 				const path = await invoke<string>("get_book_chapter_path", { bookId, chapterId: chapter.id });
 				const result = await invoke<{ content: string; encoding: string }>("read_markdown_file", { path });
 				const rendered = await renderMarkdownForUi(result.content, { speculative: true });
-				if (activeBook?.manifest.bookId === bookId && activeChapterIndex + 1 === index) {
-					preloadedChapter = { bookId, index, path, result, rendered };
+				if (activeBook?.manifest.bookId === bookId) {
+					putCachedChapter(bookId, index, { path, result, rendered });
 				}
 			} catch {
 				// The normal open path will show a concrete error if the next chapter is unavailable.
@@ -2412,9 +2753,7 @@
 				await invoke("save_book_progress", { bookId: activeBook.manifest.bookId, progress });
 				ackProgressShadow(shadowKey);
 			}
-			const cached = preloadedChapter?.bookId === activeBook.manifest.bookId && preloadedChapter.index === index
-				? preloadedChapter
-				: null;
+			const cached = getCachedChapter(activeBook.manifest.bookId, index);
 			const path = cached?.path ?? await invoke<string>("get_book_chapter_path", {
 				bookId: activeBook.manifest.bookId,
 				chapterId: chapter.id,
@@ -2426,11 +2765,11 @@
 				suppressRecent: true,
 				skipFlush: true,
 				preloaded: cached ? { result: cached.result, rendered: cached.rendered } : undefined,
+				cacheChapter: { bookId: activeBook.manifest.bookId, index },
 			});
 			if (!opened) return;
 			activeChapterIndex = index;
 			tocItems = chapterTocItems(activeBook.manifest.chapters);
-			preloadedChapter = null;
 			updateWindowTitle(`${activeBook.manifest.title} · ${chapter.title}`);
 			if (restoreBoundary && contentEl) {
 				// activeChapterIndex changes the seam below the article. Apply
@@ -2505,9 +2844,10 @@
 		void navigateBookChapter(direction, offsetPx);
 	}
 
-	async function returnToBookshelf() {
-		if ((await requestNavigationGuard("返回书架")) === "cancel") return;
-		await flushSaveState();
+	// Tear down whichever reading surface is mounted (markdown file, book
+	// chapter, EPUB session) back to the bare bookshelf. Shared by
+	// returnToBookshelf and by open paths that swap surfaces directly.
+	function teardownReadingSurface() {
 		// Invalidate any in-flight openFile/worker render before tearing the
 		// surface down — otherwise a slow render can repopulate the reader
 		// after the bookshelf is already shown.
@@ -2516,21 +2856,115 @@
 		dropStaleMarkdownRenders();
 		resetReaderSurfaceForBookshelf();
 		activeBook = null;
-		trashOpen = false;
 		activeChapterIndex = -1;
 		cancelChapterBoundaryRestore();
 		inFlightChapterDirection = null;
 		queuedChapterNavigation = null;
-		preloadedChapter = null;
+		clearChapterRenderCache();
 		isTemporaryReading = false;
+		epubSession = null;
 		$currentFilePath = "";
 		$markdownSource = "";
 		$renderedHtml = "";
+		articleChunks = [];
+		pendingArticleChunks = [];
+		articleMountGeneration += 1;
 		fileName = "";
 		tocItems = [];
 		readingProgress = 0;
 		updateWindowTitle("");
+	}
+
+	async function returnToBookshelf() {
+		if ((await requestNavigationGuard("返回书架")) === "cancel") return;
+		await flushSaveState();
+		teardownReadingSurface();
+		trashOpen = false;
 		await refreshLibrary();
+	}
+
+	// ===== EPUB reader surface =====
+	// An EPUB book mounts its own reader layer: it never goes through
+	// openFile / get_book_chapter_path / the markdown save path, and
+	// $currentFilePath stays empty for the session's whole lifetime.
+	// The backend may omit BookDetail.bookDir — derive the book root from a
+	// chapter's absolute path minus its manifest-relative path instead.
+	async function resolveEpubBookDir(detail: BookDetail): Promise<string> {
+		if (detail.bookDir) return detail.bookDir;
+		const chapter = detail.manifest.chapters.find((c) => !!c.path);
+		if (!chapter) return "";
+		try {
+			const chapterPath = await invoke<string>("get_book_chapter_path", {
+				bookId: detail.manifest.bookId,
+				chapterId: chapter.id,
+			});
+			const rel = chapter.path.replace(/\\/g, "/").replace(/^\/+/, "");
+			// canonicalize() may answer a \\?\ verbatim path — strip that
+			// prefix (it becomes "//?/" after separator normalization).
+			const abs = chapterPath.replace(/\\/g, "/").replace(/^\/\/\?\//, "");
+			if (abs.endsWith("/" + rel)) {
+				return abs.slice(0, abs.length - rel.length - 1);
+			}
+			return "";
+		} catch {
+			return "";
+		}
+	}
+
+	async function openEpubBook(detail: BookDetail, chapterIndex?: number): Promise<boolean> {
+		const publication = detail.publication;
+		if (!publication || publication.format !== "epub") return false;
+		const bookId = detail.manifest.bookId;
+		const bookDir = await resolveEpubBookDir(detail);
+		if (!bookDir) {
+			showAppNotice("这本书缺少 EPUB 数据目录");
+			return false;
+		}
+		// Same discipline as openFile: an open flow session gets closed before
+		// the EPUB layer mounts, never stacked beneath it.
+		if (flowReaderSession) {
+			const session = flowReaderSession;
+			flowReaderSession = null;
+			void invoke("close_reader_session", { sessionId: session.sessionId }).catch(() => {});
+		}
+		await flushSaveState();
+		teardownReadingSurface();
+		let locator: ReaderLocator | null = null;
+		const chapterId =
+			chapterIndex !== undefined
+				? detail.manifest.chapters[chapterIndex]?.id ?? publication.spine[chapterIndex]
+				: undefined;
+		if (chapterId) {
+			// Detail-dialog chapter clicks start at the top of that chapter.
+			locator = {
+				schemaVersion: 1,
+				bookId,
+				chapterId,
+				anchor: { kind: "ratio" },
+				ratio: 0,
+				updated: new Date().toISOString(),
+			};
+		} else {
+			try {
+				locator = await getReaderLocator(bookId);
+			} catch {
+				locator = null;
+			}
+		}
+		selectedBookDetail = null;
+		epubSession = { detail, bookDir, publication, locator };
+		updateWindowTitle(detail.manifest.title);
+		return true;
+	}
+
+	function handleEpubLocator(locator: ReaderLocator) {
+		const session = epubSession;
+		if (!session || locator.bookId !== session.detail.manifest.bookId) return;
+		void saveReaderLocator(locator.bookId, locator).catch(() => {});
+	}
+
+	function closeEpubSession() {
+		void returnToBookshelf();
 	}
 
 	function resetReaderSurfaceForBookshelf() {
@@ -2749,6 +3183,12 @@
 				}
 				return;
 			}
+
+			// The EPUB reader owns its key surface — mod+f search, arrow
+			// navigation, Escape, font-scale all have dedicated handlers in
+			// EpubReader. The markdown shortcuts below (including the Esc
+			// ladder and mod+f) must not double-handle them.
+			if (epubSession) return;
 
 			if (readingCursorState.active) {
 				dispatchReadingCursor({ type: "keyboard" });
@@ -3014,6 +3454,15 @@
 					pulseStatusLine();
 				}
 
+				if ($currentFilePath) {
+					// B6: refresh the crash shadow during scrolling (throttled),
+					// not only when the debounced IPC save eventually fires.
+					const now = Date.now();
+					if (now - lastShadowStageAt >= 1000) {
+						lastShadowStageAt = now;
+						stageReadingShadow(scrollTop);
+					}
+				}
 				if ($currentFilePath && !saveStateTimer) {
 					saveStateTimer = setTimeout(() => {
 						saveStateTimer = null;
@@ -3158,6 +3607,13 @@
 		};
 
 		const handleContentClick = (e: MouseEvent) => {
+			// B4: a tap already consumed by the touch pipeline (zone paging,
+			// chrome toggle, focus pick) still produces a synthesized click on
+			// the same node — swallow it so actions never double-fire.
+			if (Date.now() < suppressTapClickUntil) {
+				e.preventDefault();
+				return;
+			}
 			const target = e.target as HTMLElement | null;
 			if (!target || !contentEl.querySelector(".article")?.contains(target)) return;
 
@@ -3242,17 +3698,70 @@
 			// openFile will handle canceling any active edit
 			openFile(event.payload);
 		});
-		const unlistenTaskEvents = listenManaged<TaskEvent>("acquisition://task-event", (event) => {
-			receiveTaskEvent(event.payload);
-		});
+		// C6: the acquisition engine only exists on desktop builds — on mobile
+		// the subscription can never fire and snapshot polling would just burn
+		// failing IPC calls.
+		const unlistenTaskEvents = $platformCapabilities.taskAcquisition
+			? listenManaged<TaskEvent>("acquisition://task-event", (event) => {
+					receiveTaskEvent(event.payload);
+				})
+			: () => {};
 		const refreshTasksOnResume = () => {
-			if (document.visibilityState === "visible") {
-				void refreshAcquisitionSnapshot();
-			}
+			if (document.visibilityState !== "visible") return;
+			void refreshAcquisitionSnapshot();
+			// Android delivers ACTION_VIEW/SEND documents through
+			// take_pending_open_uris — drain on resume, not only on mount.
+			void drainPendingOpenUris();
+			void refreshPlatformCapabilities();
 		};
 		window.addEventListener("focus", refreshTasksOnResume);
 		document.addEventListener("visibilitychange", refreshTasksOnResume);
 		void refreshAcquisitionSnapshot();
+		void refreshPlatformCapabilities();
+		void drainPendingOpenUris();
+
+		// B6: mobile webviews can be frozen/killed without a beforeunload —
+		// pagehide and the transition to hidden are the reliable save points.
+		const flushOnPageHide = () => {
+			void flushSaveState();
+		};
+		const flushOnVisibilityHidden = () => {
+			if (document.visibilityState === "hidden") void flushSaveState();
+		};
+		window.addEventListener("pagehide", flushOnPageHide);
+		document.addEventListener("visibilitychange", flushOnVisibilityHidden);
+
+		// B5: Android re-dispatches captured hardware volume presses as a
+		// CustomEvent (see the Kotlin volume-key bridge). No keyup exists —
+		// each event is exactly one press, so no latch bookkeeping.
+		const handleVolumeKeyEvent = (event: Event) => {
+			if (!isMobile || !$volumeKeyPaging || epubSession) return;
+			const dir = (event as CustomEvent<{ dir?: number }>).detail?.dir;
+			if (dir !== -1 && dir !== 1) return;
+			const eventKey = dir === -1 ? "AudioVolumeUp" : "AudioVolumeDown";
+			if (
+				$currentFilePath &&
+				$focusMode &&
+				!isTextInputTarget(document.activeElement)
+			) {
+				const chapterDirection = moveFocus(dir);
+				if (chapterDirection !== null) {
+					navigateBookChapterFromKey(eventKey, chapterDirection);
+				}
+				return;
+			}
+			if (
+				$currentFilePath &&
+				!editingParagraph &&
+				!$searchOpen &&
+				!$tocOpen &&
+				!$settingsOpen &&
+				!lightboxSrc
+			) {
+				handleReadingScrollIntent({ direction: dir, kind: "page" }, eventKey);
+			}
+		};
+		window.addEventListener("ir:volume-key", handleVolumeKeyEvent);
 
 		const handleReadingCursorPointerMove = () => {
 			if (!readingCursorState.active || readingCursorMoveFrame !== null) return;
@@ -3364,12 +3873,30 @@
 		contentEl?.addEventListener("touchend", handleReaderTouchEnd, { passive: true });
 		contentEl?.addEventListener("touchcancel", handleReaderTouchCancel, { passive: true });
 
-		const handlePopState = () => {
+		const handlePopState = (event: PopStateEvent) => {
+			// B1: reconcile against the recorded depth of the entry we landed
+			// on. `history.go(-n)` collapses into a single popstate in real
+			// engines, so `programmaticBackCount` can exceed the number of
+			// events that will ever fire — drain it when the landed entry
+			// confirms we already reached the target, otherwise the leftovers
+			// would silently eat the user's next real Back press.
+			const eventDepth =
+				typeof event.state?.mmbookDepth === "number"
+					? event.state.mmbookDepth
+					: null;
 			if (programmaticBackCount > 0) {
 				programmaticBackCount--;
+				if (eventDepth !== null && eventDepth <= mobileHistoryDepth) {
+					programmaticBackCount = 0;
+				}
 				return;
 			}
-			mobileHistoryDepth = Math.max(0, mobileHistoryDepth - 1);
+			// A real user Back (or Forward) press. Trust the landed entry over
+			// our counter — they can drift after uncaught pushState failures.
+			mobileHistoryDepth =
+				eventDepth !== null
+					? Math.max(0, eventDepth)
+					: Math.max(0, mobileHistoryDepth - 1);
 			if (actionConfirm !== null) {
 				chooseActionConfirm(false);
 			} else if (navigationGuardOpen) {
@@ -3398,6 +3925,10 @@
 				void toggleFocusMode(false);
 			} else if (flowReaderSession) {
 				void closeFlowReader();
+			} else if (epubSession) {
+				// EPUB surface closes between the flow-reader and markdown-file
+				// rungs — mirrors its position in computeMobileLayerCount.
+				void returnToBookshelf();
 			} else if ($currentFilePath) {
 				void returnToBookshelf();
 			}
@@ -3582,10 +4113,13 @@
 		let fileMissingNotified = false;
 		const fileWatchTimer = window.setInterval(async () => {
 			pollTick += 1;
+			// C9: a hidden page pays zero attention to the file — the next
+			// visible tick picks up any missed mtime change anyway.
+			if (document.visibilityState === "hidden") return;
 			if (!document.hasFocus() && pollTick % 5 !== 0) return;
 			if (fileWatchInFlight) return;
-			// 连读会话期间不要触发 openFile —— 它会把精读面盖到 iframe 之上。
-			if (flowReaderSession) return;
+			// 连读/EPUB 会话期间不要触发 openFile —— 它会把精读面盖到它们之上。
+			if (flowReaderSession || epubSession) return;
 			fileWatchInFlight = true;
 			const path = $currentFilePath ?? "";
 			const navigationAtStart: NavigationSnapshot = {
@@ -3689,6 +4223,16 @@
 			unlistenClose.then(fn => fn());
 			window.removeEventListener("focus", refreshTasksOnResume);
 			document.removeEventListener("visibilitychange", refreshTasksOnResume);
+			document.removeEventListener("visibilitychange", flushOnVisibilityHidden);
+			window.removeEventListener("pagehide", flushOnPageHide);
+			window.removeEventListener("ir:volume-key", handleVolumeKeyEvent);
+			// Release the hardware-volume interception before the surface
+			// tears down — leaving capture on would swallow volume keys
+			// system-wide after unmount.
+			if (volumeKeyCaptureActive) {
+				volumeKeyCaptureActive = false;
+				void invoke("set_volume_key_capture", { enabled: false }).catch(() => {});
+			}
 			window.removeEventListener("keydown", handleKeydown);
 			window.removeEventListener("keyup", handleKeyup);
 			window.removeEventListener("blur", handleWindowBlur);
@@ -3850,6 +4394,96 @@
 		}
 	}
 
+	// ===== Progressive article mounting (C8-lite) =====
+	// Mounting a multi-MB rendered chapter with one innerHTML write blocks
+	// the main thread for seconds on low-end phones while the visible screen
+	// is only a few blocks deep. Split large documents into top-level chunks:
+	// mount a small first chunk synchronously, then append the rest one
+	// animation frame at a time so input/touch stay responsive.
+	const PROGRESSIVE_MOUNT_MIN_CHARS = 384 * 1024;
+	const FIRST_CHUNK_MAX_NODES = 8;
+	const FIRST_CHUNK_MAX_CHARS = 48 * 1024;
+	const LATER_CHUNK_MAX_NODES = 48;
+	const LATER_CHUNK_MAX_CHARS = 160 * 1024;
+
+	let articleChunks: string[] = [];
+	let pendingArticleChunks: string[] = [];
+	let articleMountGeneration = 0;
+
+	function splitArticleHtmlIntoChunks(html: string): string[] {
+		if (
+			html.length < PROGRESSIVE_MOUNT_MIN_CHARS ||
+			typeof document === "undefined"
+		) {
+			return [html];
+		}
+		const template = document.createElement("template");
+		template.innerHTML = html;
+		const nodes = Array.from(template.content.childNodes);
+		if (nodes.length <= FIRST_CHUNK_MAX_NODES + 1) return [html];
+		const chunks: string[] = [];
+		let group: ChildNode[] = [];
+		let groupChars = 0;
+		const flushGroup = () => {
+			if (group.length === 0) return;
+			const holder = document.createElement("template");
+			holder.content.append(...group);
+			chunks.push(holder.innerHTML);
+			group = [];
+			groupChars = 0;
+		};
+		for (const node of nodes) {
+			const isFirstChunk = chunks.length === 0;
+			const maxNodes = isFirstChunk ? FIRST_CHUNK_MAX_NODES : LATER_CHUNK_MAX_NODES;
+			const maxChars = isFirstChunk ? FIRST_CHUNK_MAX_CHARS : LATER_CHUNK_MAX_CHARS;
+			const nodeChars =
+				node instanceof Element
+					? node.outerHTML.length
+					: (node.textContent ?? "").length;
+			if (
+				group.length > 0 &&
+				(group.length >= maxNodes || groupChars + nodeChars > maxChars)
+			) {
+				flushGroup();
+			}
+			group.push(node);
+			groupChars += nodeChars;
+		}
+		flushGroup();
+		return chunks.length > 1 ? chunks : [html];
+	}
+
+	// Starts a progressive mount: chunk 0 mounts through the template right
+	// away, the rest via settleArticleMount frames.
+	function beginArticleMount(html: string) {
+		articleMountGeneration += 1;
+		const chunks = splitArticleHtmlIntoChunks(html);
+		articleChunks = chunks.slice(0, 1);
+		pendingArticleChunks = chunks.slice(1);
+	}
+
+	// Appends remaining chunks one frame at a time. Returns false when a newer
+	// navigation superseded this mount — the caller must then skip scroll
+	// restore / focus entry because the document belongs to a stale load.
+	async function settleArticleMount(token: string): Promise<boolean> {
+		while (pendingArticleChunks.length > 0) {
+			if (currentLoadToken !== token) return false;
+			await new Promise<void>((resolve) =>
+				requestAnimationFrame(() => resolve()),
+			);
+			if (currentLoadToken !== token) return false;
+			const next = pendingArticleChunks[0];
+			pendingArticleChunks = pendingArticleChunks.slice(1);
+			articleChunks = [...articleChunks, next];
+			await tick();
+			wrapArticleTables();
+			// Growing scrollHeight shifts the restored position — re-anchor
+			// while the open-anchor window is still live.
+			if (openAnchor) restoreViewportAnchor(openAnchor);
+		}
+		return currentLoadToken === token;
+	}
+
 	type OpenFileOptions = {
 		suppressFailureNotice?: boolean;
 		bookChapter?: boolean;
@@ -3862,6 +4496,9 @@
 			result: { content: string; encoding: string };
 			rendered: RenderedMarkdownDocument;
 		};
+		// C8-lite: when set, a freshly loaded+rendered chapter is stored in the
+		// LRU cache so backward navigation skips IPC + re-render.
+		cacheChapter?: { bookId: string; index: number };
 	};
 
 	async function openFile(path: string, options: OpenFileOptions = {}): Promise<boolean> {
@@ -3886,6 +4523,9 @@
 				console.warn("Failed to close flow reader session:", err);
 			});
 		}
+		// A markdown open always replaces the EPUB surface too — the EPUB
+		// reader owns its locator persistence, so there is nothing to flush.
+		epubSession = null;
 
 		if ($currentFilePath && !options.skipFlush) {
 			await flushSaveState();
@@ -3894,7 +4534,7 @@
 		if (!options.bookChapter) {
 			activeBook = null;
 			activeChapterIndex = -1;
-			preloadedChapter = null;
+			clearChapterRenderCache();
 			isTemporaryReading = true;
 		} else {
 			isTemporaryReading = false;
@@ -3944,7 +4584,9 @@
 			);
 			$markdownSource = result.content;
 			fileEncoding = result.encoding;
-			$renderedHtml = resolveRenderedHtmlAssets(rendered.html, path);
+			const resolvedHtml = resolveRenderedHtmlAssets(rendered.html, path);
+			beginArticleMount(resolvedHtml);
+			$renderedHtml = resolvedHtml;
 			tocItems = rendered.toc;
 			frontMatterEntries = rendered.frontMatter;
 			void tick().then(() => renderMermaidBlocks());
@@ -3994,6 +4636,13 @@
 			}
 
 			loadSucceeded = true;
+			if (options.cacheChapter) {
+				putCachedChapter(options.cacheChapter.bookId, options.cacheChapter.index, {
+					path,
+					result,
+					rendered,
+				});
+			}
 			if (!options.suppressRecent) recordRecentFile(path, nextFileName);
 			maybeShowFirstOpenHint();
 
@@ -4011,7 +4660,9 @@
 			}
 			if (loadSucceeded && currentLoadToken === loadToken) {
 				await tick();
-				if (currentLoadToken === loadToken) {
+				// C8-lite: settle pending progressive chunks before applying
+				// scroll/focus state — a ratio restore needs the full height.
+				if (await settleArticleMount(loadToken)) {
 					if (contentEl && scrollRestore) {
 						const maxScrollTop = Math.max(0, contentEl.scrollHeight - contentEl.clientHeight);
 						const targetScrollTop =
@@ -4278,11 +4929,18 @@
 
 	async function refreshRenderedMarkdownAfterEdit(scrollPos: number) {
 		const rendered = await renderMarkdownForUi($markdownSource);
-		$renderedHtml = resolveRenderedHtmlAssets(rendered.html, $currentFilePath);
+		const resolvedHtml = resolveRenderedHtmlAssets(rendered.html, $currentFilePath);
+		beginArticleMount(resolvedHtml);
+		$renderedHtml = resolvedHtml;
 		tocItems = rendered.toc;
 		frontMatterEntries = rendered.frontMatter;
 		await tick();
 		wrapArticleTables();
+		// Edited documents can be huge too — finish mounting all chunks before
+		// restoring scroll/reindexing so indices cover the whole article.
+		if (pendingArticleChunks.length > 0) {
+			if (!(await settleArticleMount(currentLoadToken))) return;
+		}
 		if (contentEl) contentEl.scrollTop = scrollPos;
 		reindexAfterArticleDomChange();
 		void renderMermaidBlocks();
@@ -4507,7 +5165,7 @@
 	// saveState fires every few seconds while scrolling — surface a failure once
 	// (not per tick) so a dead backend can't silently drop reading progress.
 	let saveStateFailureNotified = false;
-	async function saveState() {
+	async function saveStateNow() {
 		if (!$currentFilePath || !contentEl) return;
 		const shadowKey = activeBook
 			? `book:${activeBook.manifest.bookId}`
@@ -4540,12 +5198,60 @@
 		}
 	}
 
+	// B6: serialize saves. Overlapping save_reading_state / save_book_progress
+	// invokes could resolve out of order and ack a shadow for the wrong
+	// payload. Each call queues one run behind the in-flight one; the queued
+	// run re-reads live scroll state so the tail write always carries the
+	// freshest position, never a stale capture.
+	let saveStateTail: Promise<void> = Promise.resolve();
+	function saveState(): Promise<void> {
+		const run = saveStateTail.then(() => saveStateNow());
+		saveStateTail = run.catch(() => {});
+		return run;
+	}
+
 	async function flushSaveState() {
 		if (saveStateTimer) {
 			clearTimeout(saveStateTimer);
 			saveStateTimer = null;
 		}
+		// Appends behind any in-flight save and resolves after our own run —
+		// callers that await this see the latest scroll position persisted.
 		await saveState();
+	}
+
+	// B6: localStorage crash shadow staged while scrolling, not only inside
+	// the debounced IPC save — a kill between the scroll and the 5s flush
+	// used to lose the whole session's progress.
+	let lastShadowStageAt = 0;
+	function stageReadingShadow(scrollTop: number) {
+		const shadowKey = activeBook
+			? `book:${activeBook.manifest.bookId}`
+			: `file:${$currentFilePath}`;
+		if (activeBook && activeChapterIndex >= 0) {
+			const chapter = activeBook.manifest.chapters[activeChapterIndex];
+			if (chapter) {
+				const isLast =
+					activeChapterIndex === activeBook.manifest.chapters.length - 1;
+				const completed =
+					readingProgress >= 0.999 || (isLast && readingProgress >= 0.95);
+				stageProgressShadow(shadowKey, {
+					scrollPosition: scrollTop,
+					progressRatio: readingProgress,
+					bookProgress: nextReadingState(
+						activeBook.progress,
+						chapter.id,
+						readingProgress,
+						completed,
+					),
+				});
+			}
+			return;
+		}
+		stageProgressShadow(shadowKey, {
+			scrollPosition: scrollTop,
+			progressRatio: readingProgress,
+		});
 	}
 
 	function getArticleElement() {
@@ -5389,6 +6095,44 @@
 		return null;
 	}
 
+	// B3: mobile HUD focus step. One tap advances one unit; at the chapter
+	// edge it crosses into the adjacent chapter and shows a short status so
+	// the boundary reads as a transition, not a dead button.
+	let mobileFocusNotice = "";
+	let mobileFocusNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function showMobileFocusNotice(text: string) {
+		mobileFocusNotice = text;
+		if (mobileFocusNoticeTimer) clearTimeout(mobileFocusNoticeTimer);
+		mobileFocusNoticeTimer = setTimeout(() => {
+			mobileFocusNoticeTimer = null;
+			mobileFocusNotice = "";
+		}, 2400);
+	}
+
+	function stepFocusMobile(direction: -1 | 1) {
+		const chapterDirection = moveFocus(direction);
+		if (chapterDirection === null) {
+			mobileFocusNotice = "";
+			return;
+		}
+		if (!activeBook) {
+			showMobileFocusNotice(chapterDirection > 0 ? "已到文档末尾" : "已到文档开头");
+			return;
+		}
+		const target = activeBook.manifest.chapters[activeChapterIndex + chapterDirection];
+		if (!target) {
+			showMobileFocusNotice(chapterDirection > 0 ? "已到全书末尾" : "已到全书开头");
+			return;
+		}
+		showMobileFocusNotice(
+			chapterDirection > 0 ? `进入下一篇 · ${target.title}` : `返回上一篇 · ${target.title}`,
+		);
+		// Focus index for the incoming chapter: the boundary restore places
+		// the caret at the seam; focus lands on the first/last unit.
+		void navigateBookChapter(chapterDirection);
+	}
+
 	// Queue one focus step per accumulated wheel threshold crossing and flush
 	// them inside a single animation frame — running moveFocus per input event
 	// rewrites the blur window and issues a scrollTo each time.
@@ -5990,7 +6734,7 @@
 					<button
 						class="icon-btn"
 						on:click={startEditAtReadingPosition}
-						title="编辑当前段落 (E)"
+						title={isMobile ? "编辑当前段落" : `编辑当前段落 (E)`}
 						aria-label="编辑当前段落"
 					>
 						<svg
@@ -6009,7 +6753,7 @@
 						class="icon-btn"
 						class:active={$tocOpen}
 						on:click={() => ($tocOpen = !$tocOpen)}
-						title="目录 ({modLabel}T)"
+						title={isMobile ? "目录" : `目录 (${modLabel}T)`}
 						aria-label="目录"
 						aria-expanded={$tocOpen}
 						aria-controls="toc-panel"
@@ -6029,7 +6773,7 @@
 						class="icon-btn"
 						class:active={$searchOpen}
 						on:click={() => ($searchOpen = !$searchOpen)}
-						title="搜索 ({modLabel}F)"
+						title={isMobile ? "搜索" : `搜索 (${modLabel}F)`}
 						aria-label="搜索"
 						aria-expanded={$searchOpen}
 						aria-controls="search-panel"
@@ -6050,7 +6794,7 @@
 						class="icon-btn"
 						class:active={$settingsOpen}
 						on:click={() => ($settingsOpen = !$settingsOpen)}
-						title="设置 ({modLabel},)"
+						title={isMobile ? "设置" : `设置 (${modLabel},)`}
 						aria-label="设置"
 						aria-expanded={$settingsOpen}
 						aria-controls="settings-panel"
@@ -6069,8 +6813,9 @@
 							/>
 						</svg>
 					</button>
+					{#if !isMobile}
 					<button
-						class="icon-btn"
+						class="icon-btn hint-toggle-btn"
 						class:active={firstOpenHintVisible}
 						on:click={() => (firstOpenHintVisible = !firstOpenHintVisible)}
 						title="快捷键"
@@ -6090,6 +6835,7 @@
 							<path d="M12 17h.01" stroke-linecap="round" />
 						</svg>
 					</button>
+				{/if}
 				</div>
 			</header>
 		{:else if showFlowContext}
@@ -6159,8 +6905,31 @@
 		</WorkflowDialogShell>
 	{/if}
 
+	{#if pendingImportTitle}
+		<WorkflowDialogShell
+			titleId="import-title-heading"
+			descriptionId="import-title-desc"
+			title="导入书名"
+			maxWidth="420px"
+			onClose={cancelImportTitle}
+		>
+			<label class="wf-field">
+				<span class="wf-label">合集 / 书籍名称</span>
+				<input
+					type="text"
+					bind:value={pendingImportTitle.draft}
+					placeholder="输入书名"
+				/>
+			</label>
+			<div slot="footer" class="navigation-guard-actions">
+				<button type="button" class="wf-primary" on:click={confirmImportTitle}>开始导入</button>
+				<button type="button" class="wf-quiet" on:click={cancelImportTitle}>取消</button>
+			</div>
+		</WorkflowDialogShell>
+	{/if}
+
 	<!-- Main content -->
-	<ReaderWorkspace flowActive={!!flowReaderSession} bind:element={contentEl}>
+	<ReaderWorkspace flowActive={!!flowReaderSession || !!epubSession} bind:element={contentEl}>
 		{#if flowReaderSession}
 			<section class="flow-reader-workspace" aria-label="连续阅读">
 				<iframe
@@ -6178,6 +6947,19 @@
 						postFlowTheme();
 					}}
 				></iframe>
+			</section>
+		{:else if epubSession}
+			<!-- EPUB 是独立阅读层：自有滚动/快捷键/搜索，不经过 Markdown 管线 -->
+			<section class="epub-reader-workspace" aria-label="EPUB 阅读">
+				<EpubReader
+					bookId={epubSession.detail.manifest.bookId}
+					bookDir={epubSession.bookDir}
+					publication={epubSession.publication}
+					{isMobile}
+					initialLocator={epubSession.locator}
+					onExit={closeEpubSession}
+					onLocator={handleEpubLocator}
+				/>
 			</section>
 		{:else if trashOpen}
 			<TrashPanel
@@ -6212,7 +6994,7 @@
 						{/each}
 					</div>
 				{/if}
-				{@html $renderedHtml}
+				{#each articleChunks as chunk, index (index)}{@html chunk}{/each}
 				{#if activeBook}
 					<div class="book-seam" aria-live="polite">
 						{#if activeChapterIndex < activeBook.manifest.chapters.length - 1}
@@ -6321,7 +7103,7 @@
 		<div class="edit-hint">{isMobile ? '点击空白处保存 · 软键盘回车换行' : 'Enter 保存 · Shift+Enter 换行 · Esc 取消'}</div>
 	{/if}
 
-	{#if firstOpenHintVisible && !editingParagraph && !$focusMode}
+	{#if firstOpenHintVisible && !isMobile && !editingParagraph && !$focusMode}
 		<div class="first-hint">
 			<span>{modLabel}T 目录 · {modLabel}F 搜索 · F11 专注 · E 编辑段落 · {modLabel}滚轮 字号</span>
 			<button
@@ -6446,10 +7228,58 @@
 		</div>
 	{/if}
 
+	<!-- Async import progress card (A2): backend-driven status with issues -->
+	{#if importStatus}
+		<div class="import-status-card" role="status" aria-live="polite">
+			<div class="import-status-head">
+				<span class="import-status-phase">{importPhaseLabel(importStatus)}</span>
+				{#if importStatus.totalFiles > 0}
+					<span class="import-status-count">{importStatus.completedFiles}/{importStatus.totalFiles}</span>
+				{/if}
+			</div>
+			{#if importStatus.totalFiles > 0}
+				<div class="import-progress" aria-hidden="true">
+					<div
+						class="import-progress-fill"
+						style="width: {Math.min(100, Math.round((importStatus.completedFiles / Math.max(1, importStatus.totalFiles)) * 100))}%"
+					></div>
+				</div>
+			{/if}
+			{#if importStatus.currentFile}
+				<div class="import-current" title={importStatus.currentFile}>{importStatus.currentFile}</div>
+			{/if}
+			{#if importStatus.issues.length > 0}
+				<ul class="import-issues">
+					{#each importStatus.issues.slice(0, 4) as issue}
+						<li>{issue.message}{issue.path ? ` · ${issue.path}` : ""}</li>
+					{/each}
+					{#if importStatus.issues.length > 4}
+						<li>…另有 {importStatus.issues.length - 4} 项</li>
+					{/if}
+				</ul>
+			{/if}
+			{#if importStatus.error}
+				<div class="import-error">{importStatus.error}</div>
+			{/if}
+			<div class="import-status-actions">
+				{#if !isTerminalImportState(importStatus.state)}
+					<button type="button" class="import-btn" on:click={() => void cancelActiveImport()}>取消导入</button>
+				{:else}
+					<button type="button" class="import-btn" on:click={dismissImportStatus}>关闭</button>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
 	<!-- Mobile Focus Mode Navigation HUD (OPPO Find X9 & mobile devices) -->
 	{#if $focusMode && isMobile && $currentFilePath && !flowReaderSession}
+		{#if mobileFocusNotice}
+			<div class="mobile-focus-notice" role="status" aria-live="polite">
+				{mobileFocusNotice}
+			</div>
+		{/if}
 		<div class="mobile-focus-bar" role="toolbar" aria-label="手机专注模式导航">
-			<button class="mobile-focus-btn" on:click={() => moveFocus(-1)} aria-label="上一句">
+			<button class="mobile-focus-btn" on:click={() => stepFocusMobile(-1)} aria-label="上一句">
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
 					<path d="m18 15-6-6-6 6"/>
 				</svg>
@@ -6458,7 +7288,7 @@
 			<div class="mobile-focus-counter" aria-live="polite">
 				{lastFocusedIdx >= 0 ? lastFocusedIdx + 1 : 1} / {focusUnits.length || 1}
 			</div>
-			<button class="mobile-focus-btn" on:click={() => moveFocus(1)} aria-label="下一句">
+			<button class="mobile-focus-btn" on:click={() => stepFocusMobile(1)} aria-label="下一句">
 				<span>下一句</span>
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
 					<path d="m6 9 6 6 6-6"/>
@@ -7793,6 +8623,12 @@
 
 	/* Shortcut hint pill is wider than a phone viewport — cap it and let the
 	   text span ellipsize instead of bleeding past both screen edges. */
+	/* B8: the shortcut-help button and its pill both describe keyboard
+	   shortcuts — on touch devices neither makes sense. */
+	.app.is-mobile .hint-toggle-btn {
+		display: none;
+	}
+
 	.app.is-mobile .first-hint {
 		max-width: calc(100vw - 24px);
 	}
@@ -7886,6 +8722,164 @@
 		color: var(--danger);
 		font-size: 12px;
 		margin-left: 4px;
+	}
+
+	/* Comfortable touch targets — 44px minimum on the focus HUD buttons. */
+	.app.is-mobile .mobile-focus-btn {
+		min-height: 44px;
+		padding: 10px 12px;
+	}
+
+	/* B3: transient cross-chapter status shown above the focus bar. */
+	.mobile-focus-notice {
+		position: fixed;
+		bottom: calc(78px + env(safe-area-inset-bottom, 0px));
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 96;
+		max-width: calc(100vw - 48px);
+		padding: 8px 16px;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border: 1px solid var(--hr);
+		box-shadow: 0 8px 28px rgba(0, 0, 0, 0.26);
+		color: var(--text);
+		font-size: 12.5px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		animation: fadeIn 0.18s ease;
+		pointer-events: none;
+	}
+
+	/* A2: async backend import progress — bottom-anchored card on both
+	   mobile and desktop; sits above the reader surface but below modals. */
+	.import-status-card {
+		position: fixed;
+		bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+		right: calc(16px + env(safe-area-inset-right, 0px));
+		z-index: 92;
+		width: min(340px, calc(100vw - 32px));
+		display: grid;
+		gap: 8px;
+		padding: 14px 16px;
+		border-radius: 14px;
+		background: color-mix(in srgb, var(--bg-secondary) 94%, transparent);
+		backdrop-filter: blur(18px);
+		-webkit-backdrop-filter: blur(18px);
+		border: 1px solid var(--hr);
+		box-shadow: 0 14px 44px rgba(0, 0, 0, 0.3);
+		animation: fadeIn 0.2s ease;
+		font-size: 12.5px;
+	}
+
+	.import-status-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 12px;
+		color: var(--text);
+		font-weight: 600;
+	}
+
+	.import-status-count {
+		font-variant-numeric: tabular-nums;
+		color: var(--text-secondary);
+		font-weight: 500;
+	}
+
+	.import-progress {
+		height: 4px;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--text) 12%, transparent);
+		overflow: hidden;
+	}
+
+	.import-progress-fill {
+		height: 100%;
+		border-radius: inherit;
+		background: var(--link);
+		transition: width 0.25s ease;
+	}
+
+	.import-current {
+		color: var(--text-secondary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		direction: rtl;
+		text-align: left;
+	}
+
+	.import-issues {
+		margin: 0;
+		padding-left: 18px;
+		color: var(--text-secondary);
+		display: grid;
+		gap: 3px;
+		max-height: 96px;
+		overflow: auto;
+	}
+
+	.import-error {
+		color: var(--danger);
+		line-height: 1.4;
+	}
+
+	.import-status-actions {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.import-btn {
+		border: 1px solid var(--hr);
+		border-radius: 8px;
+		background: transparent;
+		color: var(--text);
+		font: inherit;
+		padding: 7px 14px;
+		cursor: pointer;
+		min-height: 36px;
+	}
+
+	.app.is-mobile .import-btn {
+		min-height: 44px;
+	}
+
+	.import-btn:active {
+		background: color-mix(in srgb, var(--text) 10%, transparent);
+	}
+
+	/* EPUB mounts inside the same workspace shell as the markdown article —
+	   it fills the pane and owns its own scrolling. */
+	.epub-reader-workspace {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+
+	.epub-reader-workspace :global(.epub-reader) {
+		flex: 1;
+		min-height: 0;
+	}
+
+	/* Remote images blocked by the no-network rule render as a visible
+	   placeholder card instead of a transparent 1px pixel. */
+	.article :global(img.remote-blocked) {
+		display: block;
+		width: min(360px, 100%);
+		height: auto;
+		aspect-ratio: 16 / 5;
+		object-fit: cover;
+		margin: 0.6em auto;
+		border: 1px dashed color-mix(in srgb, var(--text-secondary) 55%, transparent);
+		border-radius: 10px;
+		background: color-mix(in srgb, var(--text) 6%, transparent);
+		opacity: 0.85;
 	}
 
 	@media (max-width: 768px) {

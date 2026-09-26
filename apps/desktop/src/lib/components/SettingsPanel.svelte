@@ -16,6 +16,8 @@
 		READING_WIDTHS,
 	} from "$lib/stores/app";
 	import { volumeKeyPaging, touchZonesEnabled, detectDevice } from "$lib/platform/device";
+	import { platformCapabilities } from "$lib/platform/capabilities";
+	import { open, save } from "@tauri-apps/plugin-dialog";
 	import { getThemePairs } from "$lib/theme/themes";
 	import { checkForDesktopUpdate, downloadAndInstallDesktopUpdate, updateState } from "$lib/update/service";
 	import WorkflowDialogShell from "./WorkflowDialogShell.svelte";
@@ -254,6 +256,54 @@
 				: "备份中没有可恢复的内容";
 		} catch (error) {
 			panelNotice = `恢复失败：${reportError("状态恢复", error)}`;
+		} finally {
+			actionBusy = false;
+		}
+	}
+
+	async function exportReadingBundle() {
+		if (actionBusy) return;
+		try {
+			const destPath = await save({
+				title: "导出阅读数据",
+				defaultPath: "immersive-reader-bundle.irb",
+				filters: [{ name: "阅读数据包", extensions: ["irb", "zip"] }],
+			});
+			if (!destPath) return;
+			actionBusy = true;
+			await invoke("export_reading_bundle", { destPath });
+			panelNotice = "阅读数据已导出";
+		} catch (error) {
+			panelNotice = `导出失败：${reportError("导出阅读数据", error)}`;
+		} finally {
+			actionBusy = false;
+		}
+	}
+
+	async function importReadingBundle(confirmed = false, srcPath?: string) {
+		if (actionBusy) return;
+		if (!srcPath) {
+			const picked = await open({
+				title: "导入阅读数据",
+				multiple: false,
+				filters: [{ name: "阅读数据包", extensions: ["irb", "zip", "json"] }],
+			});
+			if (typeof picked !== "string" || !picked) return;
+			srcPath = picked;
+		}
+		if (!confirmed) {
+			confirmRequest = {
+				message: "导入阅读数据会覆盖当前的阅读进度、书签与设置。继续？",
+				proceed: () => void importReadingBundle(true, srcPath),
+			};
+			return;
+		}
+		actionBusy = true;
+		try {
+			await invoke("import_reading_bundle", { srcPath });
+			panelNotice = "阅读数据已导入；建议重启应用使全部状态生效";
+		} catch (error) {
+			panelNotice = `导入失败：${reportError("导入阅读数据", error)}`;
 		} finally {
 			actionBusy = false;
 		}
@@ -581,30 +631,32 @@
 						<span class="toggle-slider" aria-hidden="true"></span>
 					</label>
 				</div>
-				<div class="typo-row">
-					<span class="typo-label">音量键翻页</span>
-					<label class="toggle-switch" title="使用手机上下音量键翻页或切换专注句子">
-						<input
-							type="checkbox"
-							aria-label="使用手机上下音量键翻页或切换专注句子"
-							checked={$volumeKeyPaging}
-							on:change={() => ($volumeKeyPaging = !$volumeKeyPaging)}
-						/>
-						<span class="toggle-slider" aria-hidden="true"></span>
-					</label>
-				</div>
-				<div class="typo-row">
-					<span class="typo-label">触控区域翻页</span>
-					<label class="toggle-switch" title="点击屏幕左右侧翻页，中央点击唤出控制栏">
-						<input
-							type="checkbox"
-							aria-label="点击屏幕左右侧翻页，中央点击唤出控制栏"
-							checked={$touchZonesEnabled}
-							on:change={() => ($touchZonesEnabled = !$touchZonesEnabled)}
-						/>
-						<span class="toggle-slider" aria-hidden="true"></span>
-					</label>
-				</div>
+				{#if isMobile && $platformCapabilities.volumeKeyBridge}
+					<div class="typo-row">
+						<span class="typo-label">音量键翻页</span>
+						<label class="toggle-switch" title="使用手机上下音量键翻页或切换专注句子">
+							<input
+								type="checkbox"
+								aria-label="使用手机上下音量键翻页或切换专注句子"
+								checked={$volumeKeyPaging}
+								on:change={() => ($volumeKeyPaging = !$volumeKeyPaging)}
+							/>
+							<span class="toggle-slider" aria-hidden="true"></span>
+						</label>
+					</div>
+					<div class="typo-row">
+						<span class="typo-label">触控区域翻页</span>
+						<label class="toggle-switch" title="点击屏幕左右侧翻页，中央点击唤出控制栏">
+							<input
+								type="checkbox"
+								aria-label="点击屏幕左右侧翻页，中央点击唤出控制栏"
+								checked={$touchZonesEnabled}
+								on:change={() => ($touchZonesEnabled = !$touchZonesEnabled)}
+							/>
+							<span class="toggle-slider" aria-hidden="true"></span>
+						</label>
+					</div>
+				{/if}
 			</div>
 
 			{#if !isMobile}
@@ -645,25 +697,29 @@
 			{/if}
 
 			<div class="settings-title section-title">AI 服务与书库</div>
-			<div class="credential-row">
-				<span>
-					{#if secretStatus?.configured}
-						DeepSeek 已配置{#if secretStatus.maskedHint}（{secretStatus.maskedHint}）{/if}
-					{:else}
-						未配置 DeepSeek Key
-					{/if}
-				</span>
-				{#if secretStatus?.configured}<button type="button" class="mini-btn danger" disabled={actionBusy} on:click={() => void deleteApiKey()}>删除</button>{/if}
-			</div>
-			<div class="credential-form">
-				<input type="password" bind:value={apiKey} autocomplete="new-password" placeholder="输入 Key（不会显示或写入磁盘）" aria-label="DeepSeek API Key" />
-				<button type="button" class="mini-btn" disabled={actionBusy || !apiKey.trim()} on:click={() => void saveApiKey()}>保存</button>
-			</div>
+			{#if $platformCapabilities.secretStore}
+				<div class="credential-row">
+					<span>
+						{#if secretStatus?.configured}
+							DeepSeek 已配置{#if secretStatus.maskedHint}（{secretStatus.maskedHint}）{/if}
+						{:else}
+							未配置 DeepSeek Key
+						{/if}
+					</span>
+					{#if secretStatus?.configured}<button type="button" class="mini-btn danger" disabled={actionBusy} on:click={() => void deleteApiKey()}>删除</button>{/if}
+				</div>
+				<div class="credential-form">
+					<input type="password" bind:value={apiKey} autocomplete="new-password" placeholder="输入 Key（不会显示或写入磁盘）" aria-label="DeepSeek API Key" />
+					<button type="button" class="mini-btn" disabled={actionBusy || !apiKey.trim()} on:click={() => void saveApiKey()}>保存</button>
+				</div>
+			{/if}
 			{#if locations}
 				<div class="status-card library-card">
 					<strong>当前书库</strong>
 					<span title={locations.libraryRoot}>{locations.libraryRoot}</span>
-					<button type="button" class="mini-btn" on:click={() => revealDirectory("library")}>打开</button>
+					{#if $platformCapabilities.revealDirectory}
+						<button type="button" class="mini-btn" on:click={() => revealDirectory("library")}>打开</button>
+					{/if}
 				</div>
 			{/if}
 
@@ -687,7 +743,9 @@
 									</div>
 									<div class="path-actions">
 										<button type="button" class="mini-btn" on:click={() => copyPath(row[2])}>复制</button>
-										<button type="button" class="mini-btn" on:click={() => revealDirectory(row[0])}>打开</button>
+										{#if $platformCapabilities.revealDirectory}
+											<button type="button" class="mini-btn" on:click={() => revealDirectory(row[0])}>打开</button>
+										{/if}
 									</div>
 								</div>
 							{/each}
@@ -701,6 +759,10 @@
 						<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void clearCache()}>安全清理缓存</button>
 						<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void previewMigration()}>刷新迁移预览</button>
 						<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void createStateBackup()}>创建状态备份</button>
+						{#if $platformCapabilities.exportBundle}
+							<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void exportReadingBundle()}>导出阅读数据</button>
+							<button type="button" class="action-btn" disabled={actionBusy} on:click={() => void importReadingBundle()}>导入阅读数据</button>
+						{/if}
 					</div>
 					{#if migrationPreview}
 						<div class="status-card">

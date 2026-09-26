@@ -49,4 +49,15 @@
 		outline: 2px solid var(--link);
 		outline-offset: 2px;
 	}
+	/* Mobile: 44×44 touch target (platform HIG minimum). */
+	:global(.is-mobile) .back-btn {
+		width: 44px;
+		height: 44px;
+	}
+	@media (max-width: 768px) {
+		.back-btn {
+			width: 44px;
+			height: 44px;
+		}
+	}
 </style>

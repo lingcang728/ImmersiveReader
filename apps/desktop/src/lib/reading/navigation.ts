@@ -162,3 +162,59 @@ export function resolveFocusStep(
 	}
 	return { type: "focus", index: requestedIndex };
 }
+
+/**
+ * Touch-start targets where a horizontal gesture means "interact with this
+ * element" — scroll a wide code block/table horizontally, scrub media, drag a
+ * handle, follow a control — and must never be interpreted as a chapter-turn
+ * swipe. Evaluated against the `touchstart` target only; once a gesture is
+ * admitted its `touchmove`/`touchend` targets can wander without cancelling.
+ */
+export const SWIPE_EXCLUDE_SELECTOR = [
+	"pre",
+	"code",
+	"table",
+	".table-scroll",
+	".mermaid",
+	".katex-display",
+	"img",
+	"video",
+	"audio",
+	"iframe",
+	"[contenteditable]",
+	"input",
+	"textarea",
+	"select",
+	"summary",
+	"details",
+	"a",
+	"button",
+	"[role='button']",
+	".mobile-focus-bar",
+	".context-bar",
+].join(", ");
+
+interface ClosestCapable {
+	closest(selector: string): unknown;
+}
+
+function closestCapable(target: unknown): ClosestCapable | null {
+	if (
+		target &&
+		typeof (target as ClosestCapable).closest === "function"
+	) {
+		return target as ClosestCapable;
+	}
+	// `touchstart.target` can be a Text node; climb to its element.
+	const parent = (target as { parentElement?: unknown } | null | undefined)
+		?.parentElement;
+	return parent && typeof (parent as ClosestCapable).closest === "function"
+		? (parent as ClosestCapable)
+		: null;
+}
+
+/** True when the touch began inside a widget that owns horizontal gestures. */
+export function isSwipeExcludedTarget(target: unknown): boolean {
+	const element = closestCapable(target);
+	return element !== null && element.closest(SWIPE_EXCLUDE_SELECTOR) !== null;
+}

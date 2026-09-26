@@ -39,10 +39,33 @@ const COMMAND_TIMEOUT_MS: Record<string, number> = {
 	delete_book: 60_000,
 	restore_trash_item: 30_000,
 	permanently_delete_trash_item: 30_000,
+	// Async import pipeline: begin returns an operation id quickly while the
+	// real work continues backend-side; each status poll gets its own budget.
+	begin_import: 30_000,
+	get_import_status: 30_000,
+	cancel_import: 30_000,
 	// Sidecar session setup tears down/starts the reader server.
-	open_reader_session: 30_000,
+	start_reader_session: 30_000,
+	get_reader_session: 30_000,
 	close_reader_session: 30_000,
 	open_task_result: 30_000,
+	// EPUB reader surface + reader database.
+	get_readable_chapter: 60_000,
+	get_reader_locator: 15_000,
+	save_reader_locator: 15_000,
+	list_bookmarks: 15_000,
+	add_bookmark: 15_000,
+	remove_bookmark: 15_000,
+	search_book: 60_000,
+	// Android bridges: SAF staging streams whole documents; the pending-open
+	// drain and the volume-key toggle are cheap plugin round-trips.
+	stage_content_uri: 60_000,
+	take_pending_open_uris: 15_000,
+	set_volume_key_capture: 10_000,
+	get_platform_capabilities: 15_000,
+	// Reading bundle export/import can copy the whole library.
+	export_reading_bundle: 300_000,
+	import_reading_bundle: 600_000,
 	// Task control round-trips through the control DB and child processes.
 	start_podcast_task: 30_000,
 	restart_podcast_task: 30_000,

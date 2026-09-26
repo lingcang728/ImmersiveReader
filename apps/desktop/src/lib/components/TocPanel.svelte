@@ -3,6 +3,11 @@
 	import { tocOpen } from "$lib/stores/app";
 	import type { TocItem } from "$lib/render/markdown";
 	import { cycleFocusWithin } from "$lib/a11y/focusTrap";
+	import { detectDevice } from "$lib/platform/device";
+
+	// 移动端打开目录不自动聚焦搜索框——聚焦会立刻弹起软键盘遮住半个
+	// 抽屉面板，用户刚打开目录多数时候只是想点章节而不是输入检索。
+	const isMobile = typeof window !== "undefined" ? detectDevice().isMobile : false;
 
 	export let items: TocItem[] = [];
 	export let activeId: string = "";
@@ -45,7 +50,7 @@
 				Math.min(selectedIndex - 40, items.length - TOC_WINDOW),
 			);
 			void tick().then(() => {
-				inputEl?.focus();
+				if (!isMobile) inputEl?.focus();
 				scrollSelectedIntoView();
 			});
 		} else {

@@ -1,5 +1,8 @@
 import type { TocItem } from '$lib/render/markdown';
 import type { TaskSnapshot } from '$lib/tasks/sync';
+// Type-only import — the epub surface is owned by a parallel workstream; the
+// frontend only consumes `publication` to decide which reader to mount.
+import type { Publication } from '$lib/epub/types';
 
 export type BookSource = 'zhihu' | 'manual' | 'podcast';
 
@@ -68,6 +71,17 @@ export interface BookDetail {
 	progress: ReadingState;
 	provenance?: BookProvenance | null;
 	taskRecords: readonly TaskSnapshot[];
+	/**
+	 * Absolute path of the book's on-disk directory — the root the EPUB
+	 * reader resolves publication resources against.
+	 */
+	bookDir: string;
+	/**
+	 * EPUB publication descriptor, present when the backend built one for the
+	 * book. `publication.format === "epub"` routes the book to EpubReader
+	 * instead of the markdown chapter pipeline.
+	 */
+	publication?: Publication | null;
 }
 
 export interface BookProvenance {

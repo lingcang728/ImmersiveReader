@@ -131,10 +131,43 @@ function pathFromFileUrl(src: string): string | null {
 
 // P2-3: remote http(s) images in archived/user markdown are a tracking
 // surface — opening a chapter fires a real request to that host. Render a
-// transparent pixel instead; the reader still shows the figure slot without
-// any outbound traffic.
-const BLOCKED_REMOTE_PIXEL =
-	'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+// visible in-document placeholder instead (an inline SVG chip), so the reader
+// sees "远程图片已离线阻止" where the figure was, with the original URL kept
+// on `data-ir-remote-src` for diagnostics. No outbound request ever fires.
+export const BLOCKED_REMOTE_IMAGE_SRC =
+	'data:image/svg+xml;charset=utf-8,' +
+	encodeURIComponent(
+		'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="96" viewBox="0 0 320 96">' +
+			'<rect x="1" y="1" width="318" height="94" rx="10" fill="none" stroke="#8a8f98" stroke-width="1.5" stroke-dasharray="6 5"/>' +
+			'<text x="160" y="53" text-anchor="middle" font-family="system-ui, sans-serif" font-size="15" fill="#8a8f98">远程图片已离线阻止</text>' +
+			'</svg>'
+	);
+
+const classAttributeRegex = /\sclass\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
+const REMOTE_BLOCKED_CLASS = 'remote-blocked';
+
+/**
+ * Mark a blocked <img> tag: `remote-blocked` class (merged into an existing
+ * class list) plus the original URL on `data-ir-remote-src`.
+ */
+function markBlockedRemoteImage(tag: string, originalSrc: string): string {
+	let result = appendImageAttribute(
+		tag,
+		`data-ir-remote-src="${escapeHtmlAttribute(originalSrc)}"`
+	);
+	const match = classAttributeRegex.exec(result);
+	if (!match) {
+		return appendImageAttribute(result, `class="${REMOTE_BLOCKED_CLASS}"`);
+	}
+	const existing = match[1] ?? match[2] ?? match[3] ?? '';
+	if (existing.split(/\s+/).includes(REMOTE_BLOCKED_CLASS)) return result;
+	const merged = ` class="${escapeHtmlAttribute(
+		`${existing} ${REMOTE_BLOCKED_CLASS}`.trim()
+	)}"`;
+	return `${result.slice(0, match.index)}${merged}${result.slice(
+		match.index + match[0].length
+	)}`;
+}
 
 export function resolveMarkdownImageSrc(
 	src: string,
@@ -147,7 +180,7 @@ export function resolveMarkdownImageSrc(
 	// `//host/…` is protocol-relative — it resolves to a remote http(s) URL
 	// under the webview's own scheme, so it belongs on the blocked surface too.
 	if (/^https?:/i.test(decodedSrc) || decodedSrc.startsWith('//'))
-		return BLOCKED_REMOTE_PIXEL;
+		return BLOCKED_REMOTE_IMAGE_SRC;
 	if (/^(data|blob|asset):/i.test(decodedSrc)) return src;
 
 	const fileUrlPath = /^file:/i.test(decodedSrc) ? pathFromFileUrl(decodedSrc) : null;
@@ -208,6 +241,14 @@ export function resolveMarkdownImageSources(
 				resolvedTag = `${tag.slice(0, match.index)}${replacement}${tag.slice(
 					match.index + match[0].length
 				)}`;
+			}
+			// Blocked remote images get the visible placeholder treatment —
+			// class + original URL for diagnostics — not just a swapped src.
+			if (resolved === BLOCKED_REMOTE_IMAGE_SRC) {
+				resolvedTag = markBlockedRemoteImage(
+					resolvedTag,
+					decodeHtmlAttribute(rawValue).trim()
+				);
 			}
 		}
 

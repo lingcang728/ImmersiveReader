@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveMarkdownImageSources, resolveMarkdownImageSrc } from './images';
+import {
+	BLOCKED_REMOTE_IMAGE_SRC,
+	resolveMarkdownImageSources,
+	resolveMarkdownImageSrc
+} from './images';
 
 const convert = (path: string) => `asset://${path}`;
 
@@ -26,10 +30,12 @@ describe('resolveMarkdownImageSrc', () => {
 	});
 
 	it('blocks remote images but keeps embedded images', () => {
-		// P2-3: remote http(s) must not become a real request — placeholder pixel.
+		// P2-3: remote http(s) must not become a real request — the src is
+		// swapped for an inline SVG placeholder data URI instead.
 		expect(resolveMarkdownImageSrc('https://example.com/cover.png', 'C:\\docs\\skills.md', convert)).toBe(
-			'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+			BLOCKED_REMOTE_IMAGE_SRC
 		);
+		expect(BLOCKED_REMOTE_IMAGE_SRC.startsWith('data:image/svg+xml')).toBe(true);
 		expect(resolveMarkdownImageSrc('data:image/png;base64,abc', 'C:\\docs\\skills.md', convert)).toBe(
 			'data:image/png;base64,abc'
 		);
@@ -47,8 +53,23 @@ describe('resolveMarkdownImageSources', () => {
 		const result = resolveMarkdownImageSources(html, 'C:\\Users\\reader\\docs\\skills.md', convert);
 
 		expect(result).toContain('src="asset://C:\\Users\\reader\\docs\\cover.png"');
-		expect(result).not.toContain('src="https://example.com/remote.png"');
-		expect(result).toContain('src="data:image/gif;base64,R0lGODlhAQAB');
+		// The live src must be the placeholder; the original URL survives only
+		// in the data-ir-remote-src diagnostics attribute.
+		expect(result).not.toMatch(/\ssrc="https:\/\/example\.com\/remote\.png"/);
+		expect(result).toContain(`src="${BLOCKED_REMOTE_IMAGE_SRC}"`);
+		expect(result).toContain('remote-blocked');
+		expect(result).toContain('data-ir-remote-src="https://example.com/remote.png"');
+	});
+
+	it('merges remote-blocked into an existing class list', () => {
+		const result = resolveMarkdownImageSources(
+			'<img src="https://example.com/remote.png" class="hero  banner">',
+			'C:\\docs\\skills.md',
+			convert
+		);
+
+		expect(result).toContain('class="hero  banner remote-blocked"');
+		expect(result).toContain('data-ir-remote-src="https://example.com/remote.png"');
 	});
 
 	it('adds lazy loading and async decoding to rewritten images', () => {
@@ -70,10 +91,9 @@ describe('resolveMarkdownImageSources', () => {
 			convert
 		);
 
-		expect(result).toBe(
-			'<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" loading="lazy" decoding="async"> ' +
-				'<img src="data:image/png;base64,abc" loading="lazy" decoding="async">'
-		);
+		expect(result).toContain('class="remote-blocked"');
+		expect(result).toContain('loading="lazy"');
+		expect(result).toContain('<img src="data:image/png;base64,abc" loading="lazy" decoding="async">');
 	});
 
 	it('keeps author-specified loading and decoding attributes', () => {
