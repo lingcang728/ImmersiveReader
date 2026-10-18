@@ -72,9 +72,26 @@
 	export let bookDir: string;
 	export let publication: Publication;
 	export let isMobile: boolean = false;
+	/**
+	 * Embedded mode: the mobile ReaderScreen owns the chrome (toolbar, progress
+	 * bar, sheets), so this component renders only the reading surface. Desktop
+	 * and the legacy mobile page keep `embedded = false` — behavior unchanged.
+	 */
+	export let embedded: boolean = false;
 	export let initialLocator: ReaderLocator | null = null;
 	export let onExit: () => void = () => {};
 	export let onLocator: (locator: ReaderLocator) => void = () => {};
+	/** Embedded-only: live chapter/progress metadata for the shell chrome. */
+	export let onMeta: (meta: {
+		chapterId: string;
+		chapterTitle: string;
+		chapterIndex: number;
+		chapterCount: number;
+		chapterRatio: number;
+		overall: number;
+		canPrev: boolean;
+		canNext: boolean;
+	}) => void = () => {};
 
 	type Panel = "" | "toc" | "search" | "bookmarks" | "type";
 
@@ -137,6 +154,36 @@
 		: "";
 	$: unsupportedLabels = (publication.unsupported ?? []).map(describeUnsupportedFlag);
 	$: showUnsupported = !noticeDismissed && unsupportedLabels.length > 0;
+
+	// Embedded (mobile) mode reports its live position to the shell chrome.
+	// Deduped on the quantized values so a scroll does not re-render the parent
+	// on every throttled sample.
+	let lastMetaKey = "";
+	function emitMeta() {
+		if (!embedded) return;
+		const meta = {
+			chapterId: chapter?.chapterId ?? "",
+			chapterTitle: chapter?.title ?? "",
+			chapterIndex: spineIndex,
+			chapterCount: spineCount,
+			chapterRatio: currentLocator?.ratio ?? 0,
+			overall: progressPct / 100,
+			canPrev: !!chapter?.prevChapterId,
+			canNext: !!chapter?.nextChapterId,
+		};
+		const key = `${meta.chapterId}|${meta.chapterIndex}|${Math.round(meta.chapterRatio * 200)}|${Math.round(meta.overall * 400)}|${meta.canPrev ? 1 : 0}${meta.canNext ? 1 : 0}`;
+		if (key === lastMetaKey) return;
+		lastMetaKey = key;
+		onMeta(meta);
+	}
+	$: {
+		// Touch the reactive inputs so this block re-runs on chapter/scroll.
+		void chapter;
+		void currentLocator;
+		void progressPct;
+		void spineIndex;
+		emitMeta();
+	}
 
 	// ---------- font size ----------
 	const FONT_PCT_KEY = "ir-epub-font-pct";
@@ -291,11 +338,13 @@
 	}
 
 	// Throttled (not debounced): updates must land ~every 2s *while* scrolling,
-	// not only after the scroll ends.
+	// not only after the scroll ends. The mobile shell asks for ~1s persistence
+	// (embedded), desktop keeps its existing cadence — default behavior is
+	// unchanged.
 	const throttledEmit = throttled(() => {
 		sampleScroll();
 		emitLocatorNow();
-	}, 1600);
+	}, embedded ? 1000 : 1600);
 
 	function handleScroll() {
 		throttledSample();
@@ -611,9 +660,67 @@
 		if (mountedBookId) init();
 		mountedBookId = bookId;
 	}
+
+	// ---------------------------------------------------------------------
+	// Imperative surface for the mobile ReaderScreen (embedded mode only).
+	// The desktop page keeps using props/callbacks and never calls these.
+
+	export function goToChapterId(chapterId: string, fragment = "") {
+		goToChapter(chapterId, fragment);
+	}
+
+	export function navigateChapterBy(direction: 1 | -1) {
+		navigateChapter(direction);
+	}
+
+	export function scrollPage(direction: 1 | -1) {
+		if (!scrollerEl) return;
+		const delta = scrollerEl.clientHeight * 0.82 * direction;
+		const max = Math.max(0, scrollerEl.scrollHeight - scrollerEl.clientHeight);
+		const target = Math.min(max, Math.max(0, scrollerEl.scrollTop + delta));
+		scrollerEl.scrollTo({ top: target, behavior: "smooth" });
+	}
+
+	export function goToSearchHit(hit: SearchHit) {
+		jumpToSearchHit(hit);
+	}
+
+	export function goToLocator(locator: ReaderLocator) {
+		jumpToLocator(locator);
+	}
+
+	export function bookmarkCurrent(): Promise<void> {
+		return addBookmarkHere();
+	}
+
+	/** Called by the shell before leaving: persist the freshest locator. */
+	export function flushLocator() {
+		sampleScroll();
+		throttledEmit.flush();
+		emitLocatorNow();
+	}
+
+	export function getFocusContext(): {
+		articleEl: HTMLElement;
+		scrollerEl: HTMLElement;
+		contentKey: string;
+	} | null {
+		if (!articleEl || !scrollerEl || !chapter) return null;
+		return { articleEl, scrollerEl, contentKey: chapter.chapterId };
+	}
+
+	/** Android back: close an open EPUB panel first. */
+	export function handleBack(): boolean {
+		if (panel) {
+			panel = "";
+			return true;
+		}
+		return false;
+	}
 </script>
 
-<div class="epub-reader" class:mobile={isMobile}>
+<div class="epub-reader" class:mobile={isMobile} class:embedded={embedded}>
+	{#if !embedded}
 	<header class="epub-top">
 		<button
 			type="button"
@@ -667,6 +774,7 @@
 			>字号</button>
 		</div>
 	</header>
+	{/if}
 
 	{#if showUnsupported}
 		<div class="epub-unsupported" role="status">
@@ -731,7 +839,7 @@
 		{/if}
 	</div>
 
-	{#if isMobile}
+	{#if isMobile && !embedded}
 		<footer class="epub-bottom">
 			<button
 				type="button"
@@ -1142,6 +1250,20 @@
 	}
 	.epub-error-btn:focus-visible {
 		outline: 2px solid var(--link);
+	}
+
+	/* ---------- embedded (mobile ReaderScreen) ---------- */
+	.epub-reader.embedded .epub-content {
+		/* ReaderScreen chrome floats above the scroller; reserve its height so
+		   the first chapter does not start underneath the toolbar. */
+		padding-top: var(--reader-article-top, 64px);
+		padding-bottom: 40px;
+	}
+	.epub-reader.embedded .epub-scroll {
+		height: 100%;
+	}
+	.epub-reader.embedded .epub-chapter-nav {
+		padding-bottom: calc(max(var(--ir-safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 88px);
 	}
 
 	/* ---------- chapter nav row ---------- */

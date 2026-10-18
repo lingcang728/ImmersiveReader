@@ -1,0 +1,135 @@
+/*
+ * Android mobile shell global styles.
+ *
+ * Loaded only when `MobileApp.svelte` is imported, so the desktop bundle is
+ * untouched. Everything here is shell-level: viewport root, safe-area
+ * variables, scroll containers and reduced-motion rules. Per-component
+ * visuals live in the Svelte components (scoped) and every colour comes from
+ * the MMbook token set in `$lib/theme/themes.ts`.
+ */
+
+:root {
+	/* UI font stack — body reading typography stays in the reader. */
+	--ir-ui-font:
+		system-ui, -apple-system, 'Noto Sans SC', 'Source Han Sans SC', 'PingFang SC',
+		'Microsoft YaHei', sans-serif;
+
+	/*
+	 * Safe areas: Kotlin injects real inset values as inline `--ir-safe-*`
+	 * custom properties (CSS px) on <html>. These rules only provide the
+	 * fallback for builds/browsers where the injection has not run yet.
+	 */
+	--ir-safe-top: env(safe-area-inset-top, 0px);
+	--ir-safe-right: env(safe-area-inset-right, 0px);
+	--ir-safe-bottom: env(safe-area-inset-bottom, 0px);
+	--ir-safe-left: env(safe-area-inset-left, 0px);
+
+	/* 4px rhythm, shared motion curve. */
+	--ir-radius-sm: 8px;
+	--ir-radius-md: 12px;
+	--ir-radius-lg: 16px;
+	--ir-radius-xl: 20px;
+	--ir-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+	--ir-duration: 180ms;
+	--ir-duration-fast: 140ms;
+}
+
+.mobile-root {
+	position: fixed;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	background: var(--bg);
+	color: var(--text);
+	font-family: var(--ir-ui-font);
+	font-size: 15px;
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	-webkit-tap-highlight-color: transparent;
+	-webkit-text-size-adjust: 100%;
+	text-size-adjust: 100%;
+	overscroll-behavior: none;
+}
+
+.mobile-root *,
+.mobile-root *::before,
+.mobile-root *::after {
+	box-sizing: border-box;
+}
+
+.mobile-root button,
+.mobile-root input,
+.mobile-root select,
+.mobile-root textarea {
+	font: inherit;
+	color: inherit;
+}
+
+.mobile-root button {
+	touch-action: manipulation;
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+.mobile-root :focus-visible {
+	outline: 2px solid var(--link);
+	outline-offset: 2px;
+}
+
+.mobile-root ::selection {
+	background: var(--selection);
+}
+
+/* Internal scroll containers: momentum scrolling, no visible scrollbar. */
+.ir-scroll {
+	overflow-x: hidden;
+	overflow-y: auto;
+	-webkit-overflow-scrolling: touch;
+	overscroll-behavior: contain;
+	scrollbar-width: none;
+}
+
+.ir-scroll::-webkit-scrollbar {
+	display: none;
+	width: 0;
+	height: 0;
+}
+
+/* Circular touch feedback without layout work. */
+.ir-pressable {
+	-webkit-tap-highlight-color: transparent;
+	touch-action: manipulation;
+	transition:
+		transform var(--ir-duration-fast) var(--ir-ease),
+		opacity var(--ir-duration-fast) var(--ir-ease);
+}
+
+.ir-pressable:active {
+	transform: scale(0.985);
+	opacity: 0.9;
+}
+
+.ir-sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.mobile-root *,
+	.mobile-root *::before,
+	.mobile-root *::after {
+		animation-duration: 1ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 1ms !important;
+		scroll-behavior: auto !important;
+	}
+}

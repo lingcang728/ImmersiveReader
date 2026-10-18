@@ -1,4 +1,4 @@
-﻿import { unified } from 'unified';
+import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import remarkRehype from 'remark-rehype';
@@ -798,7 +798,21 @@ export function mayContainMath(source: string): boolean {
 	return /\$(?!\s)[^\n$]*[^\s$]\$(?!\d)|\$\$/.test(source);
 }
 
-export async function renderMarkdownDocument(source: string): Promise<RenderedMarkdownDocument> {
+/**
+ * Optional render modes. Omitted → desktop behavior, byte-for-byte unchanged.
+ * `lightweight` is the Android mobile reader profile: skip Shiki syntax
+ * highlighting (the biggest render cost + DOM weight) and let the caller
+ * inject KaTeX CSS on demand. The pipeline itself (sanitize, headings, TOC,
+ * front matter, math) is identical.
+ */
+export interface MarkdownRenderOptions {
+	lightweight?: boolean;
+}
+
+export async function renderMarkdownDocument(
+	source: string,
+	options: MarkdownRenderOptions = {}
+): Promise<RenderedMarkdownDocument> {
 	const toc: TocItem[] = [];
 	const frontMatterBlock = splitFrontMatter(source);
 	const renderSource = frontMatterBlock ? blankFrontMatterBlock(frontMatterBlock) : source;
@@ -810,7 +824,7 @@ export async function renderMarkdownDocument(source: string): Promise<RenderedMa
 	const result = await pipeline.process({ value: renderSource, data: { toc } });
 
 	return {
-		html: await highlightCodeBlocks(String(result)),
+		html: options.lightweight ? String(result) : await highlightCodeBlocks(String(result)),
 		toc,
 		frontMatter: frontMatterBlock ? parseFrontMatterEntries(frontMatterBlock) : []
 	};

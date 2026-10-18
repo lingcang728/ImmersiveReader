@@ -1,9 +1,10 @@
 import { renderMarkdownDocument } from './markdown';
-import type { RenderedMarkdownDocument } from './markdown';
+import type { MarkdownRenderOptions, RenderedMarkdownDocument } from './markdown';
 
 type RenderRequest = {
 	id: number;
 	source: string;
+	options?: MarkdownRenderOptions;
 };
 
 type RenderResponse =
@@ -17,9 +18,9 @@ type RenderResponse =
 	  };
 
 self.onmessage = async (event: MessageEvent<RenderRequest>) => {
-	const { id, source } = event.data;
+	const { id, source, options } = event.data;
 	try {
-		const result = await renderMarkdownDocument(source);
+		const result = await renderMarkdownDocument(source, options);
 		self.postMessage({ id, result } satisfies RenderResponse);
 	} catch (err) {
 		self.postMessage({
