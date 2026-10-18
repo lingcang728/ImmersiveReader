@@ -1,0 +1,7 @@
+Starting: Intent { cmp=com.lingcang.immersivereading/.MainActivity }
+Status: ok
+LaunchState: COLD
+Activity: com.lingcang.immersivereading/.MainActivity
+TotalTime: 152
+WaitTime: 156
+Complete

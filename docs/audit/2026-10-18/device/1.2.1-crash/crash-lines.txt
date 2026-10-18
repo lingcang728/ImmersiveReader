@@ -1,0 +1,40 @@
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: FATAL EXCEPTION: main
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: Process: com.lingcang.immersivereading, PID: 26759
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: java.lang.RuntimeException: java.lang.reflect.InvocationTargetException
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:605)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1081)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: Caused by: java.lang.reflect.InvocationTargetException
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at java.lang.reflect.Method.invoke(Native Method)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:595)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	... 1 more
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: Caused by: java.lang.ClassNotFoundException: com.lingcang.immersivereading.SecretsPlugin
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at java.lang.Class.classForName(Native Method)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at java.lang.Class.forName(Class.java:591)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at java.lang.Class.forName(Class.java:496)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at com.lingcang.immersivereading.WryActivity.getAppClass(SourceFile:5)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at android.os.MessageQueue.nativePollOnce(Native Method)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at android.os.MessageQueue.nextLegacy(MessageQueue.java:949)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at android.os.MessageQueue.next(MessageQueue.java:847)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at android.os.Looper.loopOnce(Looper.java:278)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at android.os.Looper.loop(Looper.java:499)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	at android.app.ActivityThread.main(ActivityThread.java:10510)
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	... 3 more
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: Caused by: java.lang.ClassNotFoundException: com.lingcang.immersivereading.SecretsPlugin
+10-18 19:10:32.198 26759 26759 E AndroidRuntime: 	... 13 more
+10-18 19:10:32.207  2283  4173 W ActivityTaskManager:   Force finishing activity com.lingcang.immersivereading/.MainActivity
+10-18 19:10:32.882 27028 27028 D AndroidRuntime: Shutting down VM
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: FATAL EXCEPTION: main
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: Process: com.lingcang.immersivereading, PID: 27028
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: java.lang.RuntimeException: java.lang.reflect.InvocationTargetException
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:605)
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1081)
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: Caused by: java.lang.reflect.InvocationTargetException
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	at java.lang.reflect.Method.invoke(Native Method)
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:595)
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	... 1 more
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: Caused by: java.lang.ClassNotFoundException: com.lingcang.immersivereading.SecretsPlugin
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	at java.lang.Class.classForName(Native Method)
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	at java.lang.Class.forName(Class.java:591)
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	at java.lang.Class.forName(Class.java:496)
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	at com.lingcang.immersivereading.WryActivity.getAppClass(SourceFile:5)
+10-18 19:10:32.882 27028 27028 E AndroidRuntime: 	at android.os.MessageQueue.nativePollOnce(Native Method)

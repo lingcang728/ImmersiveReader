@@ -1,0 +1,20 @@
+[
+  {
+    "run": 1,
+    "status": "ok",
+    "totalMs": 0,
+    "waitMs": 10
+  },
+  {
+    "run": 2,
+    "status": "ok",
+    "totalMs": 154,
+    "waitMs": 157
+  },
+  {
+    "run": 3,
+    "status": "ok",
+    "totalMs": 153,
+    "waitMs": 157
+  }
+]

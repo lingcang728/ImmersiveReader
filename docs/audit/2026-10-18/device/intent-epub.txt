@@ -1,0 +1,8 @@
+Starting: Intent { act=android.intent.action.VIEW dat=content://com.android.externalstorage.documents/... typ=application/epub+zip flg=0x1 cmp=com.lingcang.immersivereading/.MainActivity }
+Status: ok
+LaunchState: COLD
+Activity: com.lingcang.immersivereading/.MainActivity
+TotalTime: 151
+WaitTime: 155
+Complete
+

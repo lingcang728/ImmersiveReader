@@ -1,0 +1,68 @@
+Applications Memory Usage (in Kilobytes):
+Uptime: 757171200 Realtime: 808946890
+
+** MEMINFO in pid 8270 [com.lingcang.immersivereading] **
+                   Pss  Private  Private  SwapPss      Rss     Heap     Heap     Heap
+                 Total    Dirty    Clean    Dirty    Total     Size    Alloc     Free
+                ------   ------   ------   ------   ------   ------   ------   ------
+  Native Heap    36867    36844        4       23    38652    63488    58416     5071
+  Dalvik Heap     5944     5936        0       96     7008    16306     4018    12288
+ Dalvik Other     1506     1488        0        2     1896                           
+        Stack     1912     1912        0        0     1920                           
+       Ashmem      330      168        0        0      992                           
+    Other dev       36        0       36        0      876                           
+     .so mmap    15508      380    12692        7    66760                           
+    .jar mmap     3063        0     1220        0    42952                           
+    .apk mmap    21821      948    14480        0    47908                           
+    .ttf mmap      317        0      144        0      524                           
+    .dex mmap     2094        4     2060        0     3332                           
+    .oat mmap      466       12      104        0    19788                           
+    .art mmap     1189      972       16       65    19800                           
+   Other mmap     1002      272      316        0     3040                           
+        Memfd        9        0        0        0       20                           
+      Unknown     8512     8448       44        2     9300                           
+        TOTAL   100771    57384    31116      195   264768    79794    62434    17359
+ 
+ App Summary
+                       Pss(KB)                        Rss(KB)
+                        ------                         ------
+           Java Heap:     6924                          26808
+         Native Heap:    36844                          38652
+                Code:    32044                         181300
+               Stack:     1912                           1920
+            Graphics:        0                              0
+       Private Other:    10776
+              System:    12271
+             Unknown:                                   16088
+ 
+           TOTAL PSS:   100771            TOTAL RSS:   264768       TOTAL SWAP PSS:      195
+ 
+ Objects
+               Views:        8         ViewRootImpl:        1
+         AppContexts:        6           Activities:        1
+              Assets:       33        AssetManagers:        0
+       Local Binders:       58        Proxy Binders:       96
+       Parcel memory:       26         Parcel count:       78
+    Death Recipients:        6             WebViews:        1
+ 
+ Native Allocations
+                         Count                       Total(kB)
+                        ------                         ------
+    Other (malloced):      392                             35
+ Other (nonmalloced):      181                            496
+   Bitmap (malloced):       12                            130
+ 
+ Mapped Bitmaps
+                         Count                       Size(KB)
+                        ------                         ------
+              Mapped:        0                              0
+              Unique:        0                              0
+ 
+ SQL
+         MEMORY_USED:        0
+  PAGECACHE_OVERFLOW:        0          MALLOC_SIZE:        0
+ 
+
+
+
+ 

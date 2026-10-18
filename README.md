@@ -1,8 +1,8 @@
 # 沉浸阅读
 
-沉浸阅读是一个面向 Windows 长文阅读的本地系统，将知乎归档、播客转写和 Markdown 精读统一到同一座书库中。
+沉浸阅读是一个本地优先的长文阅读器：Windows 桌面端把知乎归档、播客转写和 Markdown 精读统一到同一座书库中；Android 端是独立的本地阅读器，专注 **Markdown 与 EPUB** 的流畅阅读。
 
-当前发布版本：1.2.1。
+当前发布版本：1.3.0。
 
 ## 使用
 
@@ -13,6 +13,17 @@
 ```
 
 桌面书架可以启动知乎归档、播客转写、Markdown 文件夹导入、临时 Markdown 和阅读器。生产 Node、Chromium、Python、FFmpeg 与 Whisper 模型由受管 `runtime\` 提供，不再依赖已退休的旧项目目录。
+
+### Android
+
+Android 端（1.3.0 起）使用全新的移动界面，只保留本地阅读：书架、导入（系统文件选择器/分享打开）、Markdown 多章文集与单文件、EPUB 2/3、目录/搜索/书签/进度、六套主题、字体排版、专注模式、音量键翻页，并适配挖孔屏与手势条安全区。知乎、播客、连读、DeepSeek 密钥属于桌面能力，Android 端不提供。
+
+```powershell
+# 构建 arm64-v8a Release APK（需要 JDK 17/21、Android SDK、NDK 与 Rust aarch64-linux-android target）
+.\scripts\build-android.ps1 -Target aarch64 -Release
+```
+
+APK 输出到 `output\mobile\`。1.3.0 使用新的正式签名密钥；若手机已安装 1.2.1（debug 签名），需先卸载旧版再安装。
 
 ## 书库与阅读
 
@@ -37,4 +48,4 @@ C:\Users\<用户名>\Documents\沉浸阅读\Library
 
 ## 开发与验证
 
-开发、测试、生产安装和发布说明见 [CONTRIBUTING.md](CONTRIBUTING.md)、[DESIGN.md](DESIGN.md) 和 [docs/release/1.2.1/RELEASE_NOTES.md](docs/release/1.2.1/RELEASE_NOTES.md)。
+开发、测试、生产安装和发布说明见 [CONTRIBUTING.md](CONTRIBUTING.md)、[DESIGN.md](DESIGN.md)、[docs/mobile-redesign.md](docs/mobile-redesign.md) 和 [docs/release/1.3.0/RELEASE_NOTES.md](docs/release/1.3.0/RELEASE_NOTES.md)。

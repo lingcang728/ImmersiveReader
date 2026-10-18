@@ -1,0 +1,1633 @@
+{
+  "generatedFrom": "apps/desktop/build (existing artifact; no build executed)",
+  "buildIndexMtime": "2026-10-18T11:02:53.486Z",
+  "totals": {
+    "totalBuildBytes": 9832320,
+    "allJsBytes": 8496822,
+    "chunksBytes": 6209709,
+    "workersBytes": 2283381,
+    "nodesBytes": 797,
+    "entryBytes": 2935,
+    "cssFiles": [
+      {
+        "rel": "_app/immutable/assets/2.BCpM6uNW.css",
+        "size": 1022
+      },
+      {
+        "rel": "_app/immutable/assets/DesktopApp.DEoO3P3J.css",
+        "size": 73047
+      },
+      {
+        "rel": "_app/immutable/assets/EpubReader.DmnYInhr.css",
+        "size": 19223
+      },
+      {
+        "rel": "_app/immutable/assets/katex.DyJzwzQf.css",
+        "size": 28933
+      },
+      {
+        "rel": "_app/immutable/assets/katex.f9WQ10tb.css",
+        "size": 28933
+      },
+      {
+        "rel": "_app/immutable/assets/MobileApp.B7CrEXUt.css",
+        "size": 22470
+      },
+      {
+        "rel": "_app/immutable/assets/PodcastWorkflow.t6NwZ3dX.css",
+        "size": 4244
+      },
+      {
+        "rel": "_app/immutable/assets/ReaderScreen.D7gJ98Z4.css",
+        "size": 21391
+      },
+      {
+        "rel": "_app/immutable/assets/SettingsPanel.C22AOcyF.css",
+        "size": 11565
+      },
+      {
+        "rel": "_app/immutable/assets/TrashPanel.CD63ltH8.css",
+        "size": 3550
+      },
+      {
+        "rel": "_app/immutable/assets/ZhihuWorkflow.pb4cfLWO.css",
+        "size": 1651
+      }
+    ],
+    "fontsBytes": 1072948,
+    "fontFileCount": 59
+  },
+  "firstLoad": {
+    "modulePreloads": [],
+    "routePrefetch": [
+      "_app/immutable/nodes/0.D_vHI6Vp.js",
+      "_app/immutable/chunks/C-7xQPvW.js",
+      "_app/immutable/nodes/1.CJICadyC.js",
+      "_app/immutable/chunks/DmJL5tdU.js",
+      "_app/immutable/nodes/2.6JY8Yj2L.js",
+      "_app/immutable/chunks/T2GVx7cH.js",
+      "_app/immutable/chunks/Dp1pzeXC.js",
+      "_app/immutable/assets/2.BCpM6uNW.css"
+    ],
+    "staticClosure": {
+      "files": [
+        {
+          "rel": "_app/immutable/chunks/C-7xQPvW.js",
+          "size": 52718
+        },
+        {
+          "rel": "_app/immutable/chunks/DmJL5tdU.js",
+          "size": 28032
+        },
+        {
+          "rel": "_app/immutable/chunks/Dp1pzeXC.js",
+          "size": 1266
+        },
+        {
+          "rel": "_app/immutable/chunks/T2GVx7cH.js",
+          "size": 2615
+        },
+        {
+          "rel": "_app/immutable/entry/app.DOLsEo0l.js",
+          "size": 2852
+        },
+        {
+          "rel": "_app/immutable/entry/start.BZpIgECl.js",
+          "size": 83
+        },
+        {
+          "rel": "_app/immutable/nodes/0.D_vHI6Vp.js",
+          "size": 267
+        },
+        {
+          "rel": "_app/immutable/nodes/1.CJICadyC.js",
+          "size": 464
+        },
+        {
+          "rel": "_app/immutable/nodes/2.6JY8Yj2L.js",
+          "size": 66
+        }
+      ],
+      "bytes": 88363
+    },
+    "jsBytes": 88363,
+    "css": [
+      {
+        "rel": "_app/immutable/assets/2.BCpM6uNW.css",
+        "size": 1022
+      }
+    ],
+    "cssBytes": 1022,
+    "totalBytes": 89385,
+    "fileCount": 10
+  },
+  "worker": {
+    "entry": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+    "entrySize": 374701,
+    "dynamic": [
+      "_app/immutable/workers/chunks/DgJyDXW6.js",
+      "_app/immutable/workers/chunks/BG-tZi7o.js",
+      "_app/immutable/workers/chunks/Cux-tB8m.js",
+      "_app/immutable/workers/chunks/Br67jR8j.js",
+      "_app/immutable/workers/chunks/B7VTfpnm.js",
+      "_app/immutable/workers/chunks/CvuxEhxg.js",
+      "_app/immutable/workers/chunks/BTDmaRNO.js",
+      "_app/immutable/workers/chunks/WyGyM1wV.js",
+      "_app/immutable/workers/chunks/B8JryHcM.js",
+      "_app/immutable/workers/chunks/DX-TNHnc.js",
+      "_app/immutable/workers/chunks/B6Ihcp-E.js",
+      "_app/immutable/workers/chunks/CxuBE0J8.js",
+      "_app/immutable/workers/chunks/BbONfI8K.js",
+      "_app/immutable/workers/chunks/BqvgUolh.js",
+      "_app/immutable/workers/chunks/Bopit2L3.js",
+      "_app/immutable/workers/chunks/CAS9KKkb.js",
+      "_app/immutable/workers/chunks/BCLIdGf-.js",
+      "_app/immutable/workers/chunks/Rcb2q3L5.js",
+      "_app/immutable/workers/chunks/BQV5ugrc.js",
+      "_app/immutable/workers/chunks/BN2u7NEo.js",
+      "_app/immutable/workers/chunks/DSex4Zst.js"
+    ],
+    "staticClosureBytes": 374701,
+    "staticClosureFiles": [
+      {
+        "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+        "size": 374701
+      }
+    ],
+    "dynamicClosure": {
+      "bytes": 2283381,
+      "fileCount": 22,
+      "files": [
+        {
+          "rel": "_app/immutable/workers/chunks/B6Ihcp-E.js",
+          "size": 69956
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/B7VTfpnm.js",
+          "size": 46822
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/B8JryHcM.js",
+          "size": 2828
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/BCLIdGf-.js",
+          "size": 60674
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/BG-tZi7o.js",
+          "size": 72117
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/BN2u7NEo.js",
+          "size": 5959
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/BQV5ugrc.js",
+          "size": 11403
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/BTDmaRNO.js",
+          "size": 27223
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/BbONfI8K.js",
+          "size": 23411
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/Bopit2L3.js",
+          "size": 10510
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/BqvgUolh.js",
+          "size": 181084
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/Br67jR8j.js",
+          "size": 49045
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/CAS9KKkb.js",
+          "size": 83781
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/Cux-tB8m.js",
+          "size": 637581
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/CvuxEhxg.js",
+          "size": 57236
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/CxuBE0J8.js",
+          "size": 15073
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/DSex4Zst.js",
+          "size": 267142
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/DX-TNHnc.js",
+          "size": 59339
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/DgJyDXW6.js",
+          "size": 41483
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/Rcb2q3L5.js",
+          "size": 11182
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/WyGyM1wV.js",
+          "size": 174831
+        },
+        {
+          "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+          "size": 374701
+        }
+      ]
+    }
+  },
+  "duplication": {
+    "pairs": [
+      {
+        "workerRel": "_app/immutable/workers/chunks/B6Ihcp-E.js",
+        "workerSize": 69956,
+        "mainRel": "_app/immutable/chunks/B6aJPvgy.js",
+        "mainSize": 69952,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/B7VTfpnm.js",
+        "workerSize": 46822,
+        "mainRel": "_app/immutable/chunks/C27-OAKa.js",
+        "mainSize": 46818,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/B8JryHcM.js",
+        "workerSize": 2828,
+        "mainRel": "_app/immutable/chunks/Cp-IABpG.js",
+        "mainSize": 2824,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/BbONfI8K.js",
+        "workerSize": 23411,
+        "mainRel": "_app/immutable/chunks/BLtJtn59.js",
+        "mainSize": 23407,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/BCLIdGf-.js",
+        "workerSize": 60674,
+        "mainRel": "_app/immutable/chunks/BCLIdGf-.js",
+        "mainSize": 60674,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/BG-tZi7o.js",
+        "workerSize": 72117,
+        "mainRel": "_app/immutable/chunks/BIGW1oBm.js",
+        "mainSize": 72113,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/BN2u7NEo.js",
+        "workerSize": 5959,
+        "mainRel": "_app/immutable/chunks/Dxy6ny9E.js",
+        "mainSize": 5942,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/Bopit2L3.js",
+        "workerSize": 10510,
+        "mainRel": "_app/immutable/chunks/Buea-lGh.js",
+        "mainSize": 10506,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/BQV5ugrc.js",
+        "workerSize": 11403,
+        "mainRel": "_app/immutable/chunks/DHJKELXO.js",
+        "mainSize": 11405,
+        "tokenDice": 0.9995
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/BqvgUolh.js",
+        "workerSize": 181084,
+        "mainRel": "_app/immutable/chunks/BPQ3VLAy.js",
+        "mainSize": 181080,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/Br67jR8j.js",
+        "workerSize": 49045,
+        "mainRel": "_app/immutable/chunks/CLj8gQPS.js",
+        "mainSize": 49041,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/BTDmaRNO.js",
+        "workerSize": 27223,
+        "mainRel": "_app/immutable/chunks/CylS5w8V.js",
+        "mainSize": 27219,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/CAS9KKkb.js",
+        "workerSize": 83781,
+        "mainRel": "_app/immutable/chunks/P6GcXczN.js",
+        "mainSize": 83764,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/Cux-tB8m.js",
+        "workerSize": 637581,
+        "mainRel": "_app/immutable/chunks/Ck_RvX-X.js",
+        "mainSize": 637547,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/CvuxEhxg.js",
+        "workerSize": 57236,
+        "mainRel": "_app/immutable/chunks/DSSpBswy.js",
+        "mainSize": 57232,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/CxuBE0J8.js",
+        "workerSize": 15073,
+        "mainRel": "_app/immutable/chunks/B1yitclQ.js",
+        "mainSize": 15069,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/DgJyDXW6.js",
+        "workerSize": 41483,
+        "mainRel": "_app/immutable/chunks/Yzrsuije.js",
+        "mainSize": 41479,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/DSex4Zst.js",
+        "workerSize": 267142,
+        "mainRel": "_app/immutable/chunks/CI73rwsU.js",
+        "mainSize": 267125,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/DX-TNHnc.js",
+        "workerSize": 59339,
+        "mainRel": "_app/immutable/chunks/Cvjx9yec.js",
+        "mainSize": 59335,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/Rcb2q3L5.js",
+        "workerSize": 11182,
+        "mainRel": "_app/immutable/chunks/DAi9KRSo.js",
+        "mainSize": 11184,
+        "tokenDice": 0.9995
+      },
+      {
+        "workerRel": "_app/immutable/workers/chunks/WyGyM1wV.js",
+        "workerSize": 174831,
+        "mainRel": "_app/immutable/chunks/wDzz0qaB.js",
+        "mainSize": 174827,
+        "tokenDice": 1
+      },
+      {
+        "workerRel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+        "workerSize": 374701,
+        "mainRel": "_app/immutable/chunks/hOfXeXfW.js",
+        "mainSize": 375368,
+        "tokenDice": 0.998
+      }
+    ],
+    "duplicatedBytes": 2283240,
+    "workerChunksBytes": 2283381,
+    "mainChunksBytes": 6209709
+  },
+  "dynamicHooks": {
+    "pageChunk": {
+      "rel": "_app/immutable/chunks/T2GVx7cH.js",
+      "size": 2615,
+      "dynamic": [
+        "_app/immutable/chunks/CheMj8JJ.js",
+        "_app/immutable/chunks/C8pXMjSg.js"
+      ]
+    },
+    "pageDynamic": [
+      {
+        "rel": "_app/immutable/chunks/CheMj8JJ.js",
+        "size": 44372,
+        "dynamic": [
+          "_app/immutable/chunks/DqJqSHTc.js",
+          "_app/immutable/chunks/BLexoqeN.js"
+        ]
+      },
+      {
+        "rel": "_app/immutable/chunks/C8pXMjSg.js",
+        "size": 187791,
+        "dynamic": [
+          "_app/immutable/chunks/DqJqSHTc.js",
+          "_app/immutable/chunks/DTkNtNwF.js",
+          "_app/immutable/chunks/CChV3U0I.js",
+          "_app/immutable/chunks/BWAJ-DOn.js",
+          "_app/immutable/chunks/ChLVmfEA.js",
+          "_app/immutable/chunks/Jycflvag.js",
+          "_app/immutable/chunks/Cct4SwtD.js",
+          "_app/immutable/chunks/CyKwSB-Y.js",
+          "_app/immutable/chunks/hOfXeXfW.js",
+          "_app/immutable/chunks/8Nzaj9JP.js",
+          "_app/immutable/chunks/Csrj9YNg.js"
+        ]
+      }
+    ]
+  },
+  "graphClosures": {
+    "_app/immutable/chunks/CheMj8JJ.js": {
+      "root": "_app/immutable/chunks/CheMj8JJ.js",
+      "rootSize": 44372,
+      "bytes": 6181677,
+      "fileCount": 105,
+      "rels": [
+        "_app/immutable/chunks/CheMj8JJ.js",
+        "_app/immutable/chunks/BLexoqeN.js",
+        "_app/immutable/chunks/ChLVmfEA.js",
+        "_app/immutable/chunks/Cve7ytX1.js",
+        "_app/immutable/chunks/Csrj9YNg.js",
+        "_app/immutable/chunks/Dp1pzeXC.js",
+        "_app/immutable/chunks/CH0tC5n7.js",
+        "_app/immutable/chunks/CIC6DbyW.js",
+        "_app/immutable/chunks/T2GVx7cH.js",
+        "_app/immutable/chunks/C8pXMjSg.js",
+        "_app/immutable/chunks/8Nzaj9JP.js",
+        "_app/immutable/chunks/DZLMIC_f.js",
+        "_app/immutable/chunks/B3CbEcJl.js",
+        "_app/immutable/chunks/DWzxJxco.js",
+        "_app/immutable/chunks/BlGqbvKa.js",
+        "_app/immutable/chunks/0CPKTNZi.js",
+        "_app/immutable/chunks/CTi8UQd6.js",
+        "_app/immutable/chunks/5lUaPKrX.js",
+        "_app/immutable/chunks/DTbmHViI.js",
+        "_app/immutable/chunks/DtxBhlwP.js",
+        "_app/immutable/chunks/ZWHLPNan.js",
+        "_app/immutable/chunks/CmKTTxBW.js",
+        "_app/immutable/chunks/Gi6I4Gst.js",
+        "_app/immutable/chunks/DX6XiGOO.js",
+        "_app/immutable/chunks/DReYqD26.js",
+        "_app/immutable/chunks/BVNWgnAH.js",
+        "_app/immutable/chunks/DLlvAZjC.js",
+        "_app/immutable/chunks/GElTKfCc.js",
+        "_app/immutable/chunks/BZ5oCRs6.js",
+        "_app/immutable/chunks/CqkleIqs.js",
+        "_app/immutable/chunks/DTSO7Bv0.js",
+        "_app/immutable/chunks/BnUZPm6V.js",
+        "_app/immutable/chunks/amlPkzK_.js",
+        "_app/immutable/chunks/tr6LvWgS.js",
+        "_app/immutable/chunks/Qr0Fasja.js",
+        "_app/immutable/chunks/C9eacEi8.js",
+        "_app/immutable/chunks/DtFlL1ml.js",
+        "_app/immutable/chunks/_qKkEWA8.js",
+        "_app/immutable/chunks/DYVHVA90.js",
+        "_app/immutable/chunks/DAGE9qYj.js",
+        "_app/immutable/chunks/B-jh6J4K.js",
+        "_app/immutable/chunks/IPAMfGN6.js",
+        "_app/immutable/chunks/CW3A_5LV.js",
+        "_app/immutable/chunks/VUNAfZtq.js",
+        "_app/immutable/chunks/D4kW1pMJ.js",
+        "_app/immutable/chunks/Ch23VGrD.js",
+        "_app/immutable/chunks/UphYIPn6.js",
+        "_app/immutable/chunks/j9Za1zSQ.js",
+        "_app/immutable/chunks/BEy8BQ3H.js",
+        "_app/immutable/chunks/BynL5bRR.js",
+        "_app/immutable/chunks/CKtalg1S.js",
+        "_app/immutable/chunks/DkpbRQEZ.js",
+        "_app/immutable/chunks/BkdhGZBL.js",
+        "_app/immutable/chunks/Dh1-tsKZ.js",
+        "_app/immutable/chunks/Ss3TUK6Z.js",
+        "_app/immutable/chunks/9KVm-4yk.js",
+        "_app/immutable/chunks/wmaAmVC6.js",
+        "_app/immutable/chunks/BhUPZTSW.js",
+        "_app/immutable/chunks/UNvPHA7W.js",
+        "_app/immutable/chunks/BBtSaJ-6.js",
+        "_app/immutable/chunks/B9M2Rj3j.js",
+        "_app/immutable/chunks/CXd7Ebj7.js",
+        "_app/immutable/chunks/BaZVO6te.js",
+        "_app/immutable/chunks/doKjyp_D.js",
+        "_app/immutable/chunks/OB6JIemC.js",
+        "_app/immutable/chunks/BoXBoSGb.js",
+        "_app/immutable/chunks/Du6JynWX.js",
+        "_app/immutable/chunks/C9YgNG4G.js",
+        "_app/immutable/chunks/CgN1cWwq.js",
+        "_app/immutable/chunks/CsckceXK.js",
+        "_app/immutable/chunks/BUBRXiHZ.js",
+        "_app/immutable/chunks/C3Vz3d0U.js",
+        "_app/immutable/chunks/ztgSJ0cA.js",
+        "_app/immutable/chunks/C5jXJg4s.js",
+        "_app/immutable/chunks/hOfXeXfW.js",
+        "_app/immutable/chunks/CI73rwsU.js",
+        "_app/immutable/chunks/Dxy6ny9E.js",
+        "_app/immutable/chunks/DHJKELXO.js",
+        "_app/immutable/chunks/DAi9KRSo.js",
+        "_app/immutable/chunks/BCLIdGf-.js",
+        "_app/immutable/chunks/P6GcXczN.js",
+        "_app/immutable/chunks/Buea-lGh.js",
+        "_app/immutable/chunks/BPQ3VLAy.js",
+        "_app/immutable/chunks/BLtJtn59.js",
+        "_app/immutable/chunks/B1yitclQ.js",
+        "_app/immutable/chunks/B6aJPvgy.js",
+        "_app/immutable/chunks/Cvjx9yec.js",
+        "_app/immutable/chunks/Cp-IABpG.js",
+        "_app/immutable/chunks/wDzz0qaB.js",
+        "_app/immutable/chunks/CylS5w8V.js",
+        "_app/immutable/chunks/DSSpBswy.js",
+        "_app/immutable/chunks/CLj8gQPS.js",
+        "_app/immutable/chunks/C27-OAKa.js",
+        "_app/immutable/chunks/Ck_RvX-X.js",
+        "_app/immutable/chunks/BIGW1oBm.js",
+        "_app/immutable/chunks/Yzrsuije.js",
+        "_app/immutable/chunks/CyKwSB-Y.js",
+        "_app/immutable/chunks/C-7xQPvW.js",
+        "_app/immutable/chunks/Cct4SwtD.js",
+        "_app/immutable/chunks/Jycflvag.js",
+        "_app/immutable/chunks/BWAJ-DOn.js",
+        "_app/immutable/chunks/CChV3U0I.js",
+        "_app/immutable/chunks/DTkNtNwF.js",
+        "_app/immutable/chunks/DqJqSHTc.js",
+        "_app/immutable/chunks/YYALHGsS.js"
+      ]
+    },
+    "_app/immutable/chunks/C8pXMjSg.js": {
+      "root": "_app/immutable/chunks/C8pXMjSg.js",
+      "rootSize": 187791,
+      "bytes": 6181677,
+      "fileCount": 105,
+      "rels": [
+        "_app/immutable/chunks/C8pXMjSg.js",
+        "_app/immutable/chunks/Csrj9YNg.js",
+        "_app/immutable/chunks/8Nzaj9JP.js",
+        "_app/immutable/chunks/DZLMIC_f.js",
+        "_app/immutable/chunks/B3CbEcJl.js",
+        "_app/immutable/chunks/Dp1pzeXC.js",
+        "_app/immutable/chunks/DWzxJxco.js",
+        "_app/immutable/chunks/BlGqbvKa.js",
+        "_app/immutable/chunks/0CPKTNZi.js",
+        "_app/immutable/chunks/CTi8UQd6.js",
+        "_app/immutable/chunks/5lUaPKrX.js",
+        "_app/immutable/chunks/DTbmHViI.js",
+        "_app/immutable/chunks/DtxBhlwP.js",
+        "_app/immutable/chunks/ZWHLPNan.js",
+        "_app/immutable/chunks/CmKTTxBW.js",
+        "_app/immutable/chunks/Gi6I4Gst.js",
+        "_app/immutable/chunks/DX6XiGOO.js",
+        "_app/immutable/chunks/DReYqD26.js",
+        "_app/immutable/chunks/BVNWgnAH.js",
+        "_app/immutable/chunks/DLlvAZjC.js",
+        "_app/immutable/chunks/GElTKfCc.js",
+        "_app/immutable/chunks/BZ5oCRs6.js",
+        "_app/immutable/chunks/CqkleIqs.js",
+        "_app/immutable/chunks/DTSO7Bv0.js",
+        "_app/immutable/chunks/BnUZPm6V.js",
+        "_app/immutable/chunks/amlPkzK_.js",
+        "_app/immutable/chunks/tr6LvWgS.js",
+        "_app/immutable/chunks/Qr0Fasja.js",
+        "_app/immutable/chunks/C9eacEi8.js",
+        "_app/immutable/chunks/DtFlL1ml.js",
+        "_app/immutable/chunks/_qKkEWA8.js",
+        "_app/immutable/chunks/DYVHVA90.js",
+        "_app/immutable/chunks/DAGE9qYj.js",
+        "_app/immutable/chunks/B-jh6J4K.js",
+        "_app/immutable/chunks/IPAMfGN6.js",
+        "_app/immutable/chunks/CW3A_5LV.js",
+        "_app/immutable/chunks/VUNAfZtq.js",
+        "_app/immutable/chunks/D4kW1pMJ.js",
+        "_app/immutable/chunks/Ch23VGrD.js",
+        "_app/immutable/chunks/UphYIPn6.js",
+        "_app/immutable/chunks/j9Za1zSQ.js",
+        "_app/immutable/chunks/BEy8BQ3H.js",
+        "_app/immutable/chunks/BynL5bRR.js",
+        "_app/immutable/chunks/CKtalg1S.js",
+        "_app/immutable/chunks/DkpbRQEZ.js",
+        "_app/immutable/chunks/BkdhGZBL.js",
+        "_app/immutable/chunks/Dh1-tsKZ.js",
+        "_app/immutable/chunks/Ss3TUK6Z.js",
+        "_app/immutable/chunks/9KVm-4yk.js",
+        "_app/immutable/chunks/wmaAmVC6.js",
+        "_app/immutable/chunks/BhUPZTSW.js",
+        "_app/immutable/chunks/UNvPHA7W.js",
+        "_app/immutable/chunks/BBtSaJ-6.js",
+        "_app/immutable/chunks/B9M2Rj3j.js",
+        "_app/immutable/chunks/CXd7Ebj7.js",
+        "_app/immutable/chunks/BaZVO6te.js",
+        "_app/immutable/chunks/doKjyp_D.js",
+        "_app/immutable/chunks/OB6JIemC.js",
+        "_app/immutable/chunks/BoXBoSGb.js",
+        "_app/immutable/chunks/Du6JynWX.js",
+        "_app/immutable/chunks/C9YgNG4G.js",
+        "_app/immutable/chunks/CgN1cWwq.js",
+        "_app/immutable/chunks/CsckceXK.js",
+        "_app/immutable/chunks/BUBRXiHZ.js",
+        "_app/immutable/chunks/C3Vz3d0U.js",
+        "_app/immutable/chunks/ztgSJ0cA.js",
+        "_app/immutable/chunks/C5jXJg4s.js",
+        "_app/immutable/chunks/hOfXeXfW.js",
+        "_app/immutable/chunks/CI73rwsU.js",
+        "_app/immutable/chunks/Dxy6ny9E.js",
+        "_app/immutable/chunks/DHJKELXO.js",
+        "_app/immutable/chunks/DAi9KRSo.js",
+        "_app/immutable/chunks/BCLIdGf-.js",
+        "_app/immutable/chunks/P6GcXczN.js",
+        "_app/immutable/chunks/Buea-lGh.js",
+        "_app/immutable/chunks/BPQ3VLAy.js",
+        "_app/immutable/chunks/BLtJtn59.js",
+        "_app/immutable/chunks/B1yitclQ.js",
+        "_app/immutable/chunks/B6aJPvgy.js",
+        "_app/immutable/chunks/Cvjx9yec.js",
+        "_app/immutable/chunks/Cp-IABpG.js",
+        "_app/immutable/chunks/wDzz0qaB.js",
+        "_app/immutable/chunks/CylS5w8V.js",
+        "_app/immutable/chunks/DSSpBswy.js",
+        "_app/immutable/chunks/CLj8gQPS.js",
+        "_app/immutable/chunks/C27-OAKa.js",
+        "_app/immutable/chunks/Ck_RvX-X.js",
+        "_app/immutable/chunks/BIGW1oBm.js",
+        "_app/immutable/chunks/Yzrsuije.js",
+        "_app/immutable/chunks/CyKwSB-Y.js",
+        "_app/immutable/chunks/CIC6DbyW.js",
+        "_app/immutable/chunks/T2GVx7cH.js",
+        "_app/immutable/chunks/CheMj8JJ.js",
+        "_app/immutable/chunks/BLexoqeN.js",
+        "_app/immutable/chunks/ChLVmfEA.js",
+        "_app/immutable/chunks/Cve7ytX1.js",
+        "_app/immutable/chunks/CH0tC5n7.js",
+        "_app/immutable/chunks/YYALHGsS.js",
+        "_app/immutable/chunks/C-7xQPvW.js",
+        "_app/immutable/chunks/DqJqSHTc.js",
+        "_app/immutable/chunks/Cct4SwtD.js",
+        "_app/immutable/chunks/Jycflvag.js",
+        "_app/immutable/chunks/BWAJ-DOn.js",
+        "_app/immutable/chunks/CChV3U0I.js",
+        "_app/immutable/chunks/DTkNtNwF.js"
+      ]
+    },
+    "_app/immutable/chunks/8Nzaj9JP.js": {
+      "root": "_app/immutable/chunks/8Nzaj9JP.js",
+      "rootSize": 603575,
+      "bytes": 3427722,
+      "fileCount": 66,
+      "rels": [
+        "_app/immutable/chunks/8Nzaj9JP.js",
+        "_app/immutable/chunks/DZLMIC_f.js",
+        "_app/immutable/chunks/B3CbEcJl.js",
+        "_app/immutable/chunks/Dp1pzeXC.js",
+        "_app/immutable/chunks/DWzxJxco.js",
+        "_app/immutable/chunks/BlGqbvKa.js",
+        "_app/immutable/chunks/0CPKTNZi.js",
+        "_app/immutable/chunks/CTi8UQd6.js",
+        "_app/immutable/chunks/5lUaPKrX.js",
+        "_app/immutable/chunks/DTbmHViI.js",
+        "_app/immutable/chunks/DtxBhlwP.js",
+        "_app/immutable/chunks/ZWHLPNan.js",
+        "_app/immutable/chunks/CmKTTxBW.js",
+        "_app/immutable/chunks/Gi6I4Gst.js",
+        "_app/immutable/chunks/DX6XiGOO.js",
+        "_app/immutable/chunks/DReYqD26.js",
+        "_app/immutable/chunks/BVNWgnAH.js",
+        "_app/immutable/chunks/DLlvAZjC.js",
+        "_app/immutable/chunks/GElTKfCc.js",
+        "_app/immutable/chunks/BZ5oCRs6.js",
+        "_app/immutable/chunks/CqkleIqs.js",
+        "_app/immutable/chunks/DTSO7Bv0.js",
+        "_app/immutable/chunks/BnUZPm6V.js",
+        "_app/immutable/chunks/amlPkzK_.js",
+        "_app/immutable/chunks/tr6LvWgS.js",
+        "_app/immutable/chunks/Qr0Fasja.js",
+        "_app/immutable/chunks/C9eacEi8.js",
+        "_app/immutable/chunks/DtFlL1ml.js",
+        "_app/immutable/chunks/_qKkEWA8.js",
+        "_app/immutable/chunks/DYVHVA90.js",
+        "_app/immutable/chunks/DAGE9qYj.js",
+        "_app/immutable/chunks/B-jh6J4K.js",
+        "_app/immutable/chunks/IPAMfGN6.js",
+        "_app/immutable/chunks/CW3A_5LV.js",
+        "_app/immutable/chunks/VUNAfZtq.js",
+        "_app/immutable/chunks/D4kW1pMJ.js",
+        "_app/immutable/chunks/Ch23VGrD.js",
+        "_app/immutable/chunks/UphYIPn6.js",
+        "_app/immutable/chunks/j9Za1zSQ.js",
+        "_app/immutable/chunks/BEy8BQ3H.js",
+        "_app/immutable/chunks/Csrj9YNg.js",
+        "_app/immutable/chunks/BynL5bRR.js",
+        "_app/immutable/chunks/CKtalg1S.js",
+        "_app/immutable/chunks/DkpbRQEZ.js",
+        "_app/immutable/chunks/BkdhGZBL.js",
+        "_app/immutable/chunks/Dh1-tsKZ.js",
+        "_app/immutable/chunks/Ss3TUK6Z.js",
+        "_app/immutable/chunks/9KVm-4yk.js",
+        "_app/immutable/chunks/wmaAmVC6.js",
+        "_app/immutable/chunks/BhUPZTSW.js",
+        "_app/immutable/chunks/UNvPHA7W.js",
+        "_app/immutable/chunks/BBtSaJ-6.js",
+        "_app/immutable/chunks/B9M2Rj3j.js",
+        "_app/immutable/chunks/CXd7Ebj7.js",
+        "_app/immutable/chunks/BaZVO6te.js",
+        "_app/immutable/chunks/doKjyp_D.js",
+        "_app/immutable/chunks/OB6JIemC.js",
+        "_app/immutable/chunks/BoXBoSGb.js",
+        "_app/immutable/chunks/Du6JynWX.js",
+        "_app/immutable/chunks/C9YgNG4G.js",
+        "_app/immutable/chunks/CgN1cWwq.js",
+        "_app/immutable/chunks/CsckceXK.js",
+        "_app/immutable/chunks/BUBRXiHZ.js",
+        "_app/immutable/chunks/C3Vz3d0U.js",
+        "_app/immutable/chunks/ztgSJ0cA.js",
+        "_app/immutable/chunks/C5jXJg4s.js"
+      ]
+    },
+    "worker_full": {
+      "root": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+      "bytes": 2283381,
+      "fileCount": 22,
+      "rels": [
+        "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+        "_app/immutable/workers/chunks/DSex4Zst.js",
+        "_app/immutable/workers/chunks/BN2u7NEo.js",
+        "_app/immutable/workers/chunks/BQV5ugrc.js",
+        "_app/immutable/workers/chunks/Rcb2q3L5.js",
+        "_app/immutable/workers/chunks/BCLIdGf-.js",
+        "_app/immutable/workers/chunks/CAS9KKkb.js",
+        "_app/immutable/workers/chunks/Bopit2L3.js",
+        "_app/immutable/workers/chunks/BqvgUolh.js",
+        "_app/immutable/workers/chunks/BbONfI8K.js",
+        "_app/immutable/workers/chunks/CxuBE0J8.js",
+        "_app/immutable/workers/chunks/B6Ihcp-E.js",
+        "_app/immutable/workers/chunks/DX-TNHnc.js",
+        "_app/immutable/workers/chunks/B8JryHcM.js",
+        "_app/immutable/workers/chunks/WyGyM1wV.js",
+        "_app/immutable/workers/chunks/BTDmaRNO.js",
+        "_app/immutable/workers/chunks/CvuxEhxg.js",
+        "_app/immutable/workers/chunks/Br67jR8j.js",
+        "_app/immutable/workers/chunks/B7VTfpnm.js",
+        "_app/immutable/workers/chunks/Cux-tB8m.js",
+        "_app/immutable/workers/chunks/BG-tZi7o.js",
+        "_app/immutable/workers/chunks/DgJyDXW6.js"
+      ]
+    }
+  },
+  "pipelineDuplication": {
+    "workerFullBytes": 2283381,
+    "fallbackFullBytes": 0,
+    "sharedFileCount": 0,
+    "sharedBytes": 0,
+    "sharedFiles": []
+  },
+  "biggestFiles": [
+    {
+      "rel": "_app/immutable/chunks/B3CbEcJl.js",
+      "size": 691064,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/0CPKTNZi.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/5lUaPKrX.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/B9M2Rj3j.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BnUZPm6V.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BZ5oCRs6.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/CTi8UQd6.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/CXd7Ebj7.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/doKjyp_D.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DTbmHViI.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DtxBhlwP.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DYVHVA90.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DZLMIC_f.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/GElTKfCc.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/ZWHLPNan.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/_qKkEWA8.js",
+          "kind": "static"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/Cux-tB8m.js",
+      "size": 637581,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/Ck_RvX-X.js",
+      "size": 637547,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/hOfXeXfW.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/8Nzaj9JP.js",
+      "size": 603575,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/0CPKTNZi.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/5lUaPKrX.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/9KVm-4yk.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/amlPkzK_.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/B-jh6J4K.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/B9M2Rj3j.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BaZVO6te.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BBtSaJ-6.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BEy8BQ3H.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BhUPZTSW.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BkdhGZBL.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BlGqbvKa.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BnUZPm6V.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BoXBoSGb.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BUBRXiHZ.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BVNWgnAH.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BynL5bRR.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/BZ5oCRs6.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/C3Vz3d0U.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/C8pXMjSg.js",
+          "kind": "dynamic"
+        },
+        {
+          "rel": "_app/immutable/chunks/C9YgNG4G.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/CgN1cWwq.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/Ch23VGrD.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/CsckceXK.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/CTi8UQd6.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/CW3A_5LV.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/CXd7Ebj7.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/D4kW1pMJ.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DAGE9qYj.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/Dh1-tsKZ.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DLlvAZjC.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/doKjyp_D.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DReYqD26.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DTbmHViI.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DtFlL1ml.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DtxBhlwP.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/Du6JynWX.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DWzxJxco.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DYVHVA90.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/DZLMIC_f.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/GElTKfCc.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/IPAMfGN6.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/j9Za1zSQ.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/OB6JIemC.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/Qr0Fasja.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/Ss3TUK6Z.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/tr6LvWgS.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/UNvPHA7W.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/UphYIPn6.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/VUNAfZtq.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/wmaAmVC6.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/ztgSJ0cA.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/ZWHLPNan.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/_qKkEWA8.js",
+          "kind": "static"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/DTSO7Bv0.js",
+      "size": 443722,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/BZ5oCRs6.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/CgN1cWwq.js",
+          "kind": "static"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/hOfXeXfW.js",
+      "size": 375368,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/BLexoqeN.js",
+          "kind": "dynamic"
+        },
+        {
+          "rel": "_app/immutable/chunks/C8pXMjSg.js",
+          "kind": "dynamic"
+        },
+        {
+          "rel": "_app/immutable/chunks/CI73rwsU.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/Dxy6ny9E.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/P6GcXczN.js",
+          "kind": "static"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+      "size": 374701,
+      "inInitial": false,
+      "inWorkerStatic": true,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/workers/chunks/BN2u7NEo.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/CAS9KKkb.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/workers/chunks/DSex4Zst.js",
+          "kind": "static"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/DSex4Zst.js",
+      "size": 267142,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/CI73rwsU.js",
+      "size": 267125,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/hOfXeXfW.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/C5jXJg4s.js",
+      "size": 261329,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/8Nzaj9JP.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/C8pXMjSg.js",
+      "size": 187791,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/BWAJ-DOn.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/Cct4SwtD.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/CyKwSB-Y.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/Jycflvag.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/T2GVx7cH.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/BqvgUolh.js",
+      "size": 181084,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/BPQ3VLAy.js",
+      "size": 181080,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/hOfXeXfW.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/WyGyM1wV.js",
+      "size": 174831,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/workers/chunks/CvuxEhxg.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/wDzz0qaB.js",
+      "size": 174827,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/DSSpBswy.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/hOfXeXfW.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/BZ5oCRs6.js",
+      "size": 151643,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/8Nzaj9JP.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/CsckceXK.js",
+      "size": 120126,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/8Nzaj9JP.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/9KVm-4yk.js",
+      "size": 117380,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/8Nzaj9JP.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/CAS9KKkb.js",
+      "size": 83781,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/P6GcXczN.js",
+      "size": 83764,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/hOfXeXfW.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/CgN1cWwq.js",
+      "size": 81684,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/8Nzaj9JP.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/tr6LvWgS.js",
+      "size": 75060,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/8Nzaj9JP.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/BG-tZi7o.js",
+      "size": 72117,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/workers/chunks/Cux-tB8m.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/BIGW1oBm.js",
+      "size": 72113,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/chunks/Ck_RvX-X.js",
+          "kind": "static"
+        },
+        {
+          "rel": "_app/immutable/chunks/hOfXeXfW.js",
+          "kind": "dynamic"
+        }
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/B6Ihcp-E.js",
+      "size": 69956,
+      "inInitial": false,
+      "inWorkerStatic": false,
+      "importedBy": [
+        {
+          "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+          "kind": "dynamic"
+        }
+      ]
+    }
+  ],
+  "fingerprints": [
+    {
+      "rel": "_app/immutable/chunks/B3CbEcJl.js",
+      "size": 691064,
+      "tags": [
+        "svelte:36"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/8Nzaj9JP.js",
+      "size": 603575,
+      "tags": [
+        "mermaid:36",
+        "katex:4"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/hOfXeXfW.js",
+      "size": 375368,
+      "tags": [
+        "unified:4",
+        "epub:53"
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/markdown.worker-VE3_whl3.js",
+      "size": 374701,
+      "tags": [
+        "unified:4",
+        "epub:53"
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/DSex4Zst.js",
+      "size": 267142,
+      "tags": [
+        "katex:18",
+        "epub:3"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/CI73rwsU.js",
+      "size": 267125,
+      "tags": [
+        "katex:18",
+        "epub:3"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/C5jXJg4s.js",
+      "size": 261329,
+      "tags": [
+        "katex:15",
+        "epub:3"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/C8pXMjSg.js",
+      "size": 187791,
+      "tags": [
+        "katex:4",
+        "svelte:176",
+        "tauri:3"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/CsckceXK.js",
+      "size": 120126,
+      "tags": [
+        "mermaid:4"
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/CAS9KKkb.js",
+      "size": 83781,
+      "tags": [
+        "shiki:29"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/P6GcXczN.js",
+      "size": 83764,
+      "tags": [
+        "shiki:29"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/tr6LvWgS.js",
+      "size": 75060,
+      "tags": [
+        "mermaid:10"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/BLexoqeN.js",
+      "size": 62517,
+      "tags": [
+        "katex:6",
+        "svelte:155"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/Du6JynWX.js",
+      "size": 61342,
+      "tags": [
+        "mermaid:19"
+      ]
+    },
+    {
+      "rel": "_app/immutable/workers/chunks/CvuxEhxg.js",
+      "size": 57236,
+      "tags": [
+        "epub:23"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/DSSpBswy.js",
+      "size": 57232,
+      "tags": [
+        "epub:23"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/C-7xQPvW.js",
+      "size": 52718,
+      "tags": [
+        "svelte:26"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/CheMj8JJ.js",
+      "size": 44372,
+      "tags": [
+        "svelte:204"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/Csrj9YNg.js",
+      "size": 28139,
+      "tags": [
+        "dompurify:11"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/DmJL5tdU.js",
+      "size": 28032,
+      "tags": [
+        "svelte:16"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/ChLVmfEA.js",
+      "size": 27824,
+      "tags": [
+        "epub:5",
+        "svelte:93"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/BWAJ-DOn.js",
+      "size": 25770,
+      "tags": [
+        "svelte:130"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/CIC6DbyW.js",
+      "size": 23841,
+      "tags": [
+        "tauri:10"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/DLlvAZjC.js",
+      "size": 17526,
+      "tags": [
+        "epub:4"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/Cct4SwtD.js",
+      "size": 11307,
+      "tags": [
+        "svelte:34"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/CyKwSB-Y.js",
+      "size": 8983,
+      "tags": [
+        "svelte:19"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/ztgSJ0cA.js",
+      "size": 8808,
+      "tags": [
+        "mermaid:4"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/Jycflvag.js",
+      "size": 3729,
+      "tags": [
+        "svelte:25"
+      ]
+    },
+    {
+      "rel": "_app/immutable/chunks/T2GVx7cH.js",
+      "size": 2615,
+      "tags": [
+        "svelte:5"
+      ]
+    }
+  ]
+}

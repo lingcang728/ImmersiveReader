@@ -1,0 +1,123 @@
+{
+  "reportDate": "2026-10-18",
+  "tool": "scripts/qa/mobile/android-device-check.ps1 + manual adb runbook (same commands, validated)",
+  "device": {
+    "serial": "192.168.2.178:41031",
+    "brand": "OPPO",
+    "model": "PLJ110",
+    "device": "OP5E17L1",
+    "androidRelease": "17",
+    "sdk": 37,
+    "buildId": "PLJ110_17.0.0.101(CN01)",
+    "wmSize": "1256x2760",
+    "wmDensity": 560,
+    "cssViewport": "359x789",
+    "cssDpr": 3.5
+  },
+  "apk": {
+    "path": "output/mobile/ImmersiveReader_1.3.0_android-arm64-release.apk",
+    "bytes": 16033256,
+    "sha256": "D52D358C3913390AC511B33AB9001E4CD1E3275CADEE9EE2BD746DBD0718DED6",
+    "universalApk": {
+      "path": "output/mobile/ImmersiveReader_1.3.0_android-universal-release.apk",
+      "bytes": 57467499,
+      "sha256": "3066699C6BF116E3E00410A1E4B2838186900A3C7E8950DC77EE9933C9016224",
+      "abis": ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"],
+      "note": "built after the arm64 device run; not separately device-tested (the arm64 payload inside is the tested build)"
+    },
+    "signing": "ir-release (new self-signed keystore; keystore not committed)"
+  },
+  "install": {
+    "command": "adb -s <serial> install -r -d <arm64 apk>",
+    "result": "Success",
+    "versionName": "1.3.0",
+    "versionCode": 1003000,
+    "targetSdk": 36,
+    "minSdk": 26,
+    "primaryCpuAbi": "arm64-v8a",
+    "previousPackage": "1.2.1 uninstalled before first 1.3.0 install; data preserved on arm64 reinstall (install -r)"
+  },
+  "crashRegression": {
+    "baseline": "1.2.1 APK F560BC74E620CFCC759BCE0AF095A56909D2A6BCCC5A739928C34BB681E1638C",
+    "baselineResult": "FATAL EXCEPTION main: ClassNotFoundException com.lingcang.immersivereading.SecretsPlugin (WryActivity.getAppClass) -> Force finishing -> process died; 3 crash-loop PIDs; cold start TotalTime 154ms",
+    "baselineEvidence": "docs/audit/2026-10-18/device/1.2.1-crash/EVIDENCE.md",
+    "fixedResult": "1.3.0 cold starts ok, shelf renders, logcat FATAL/ANR = 0 across 3 cold starts + reader flows"
+  },
+  "coldStart": {
+    "measurement": "adb shell am start -W -n com.lingcang.immersivereading/.MainActivity after force-stop + logcat -c",
+    "firstInstallUniversalBytes": [
+      { "run": 1, "status": "ok", "totalTimeMs": 152, "waitTimeMs": 156 },
+      { "run": 2, "status": "ok", "totalTimeMs": 141, "waitTimeMs": 144 },
+      { "run": 3, "status": "ok", "totalTimeMs": 141, "waitTimeMs": 145 }
+    ],
+    "firstInstallMedianTotalTimeMs": 141,
+    "afterArm64Reinstall": [
+      { "run": 1, "status": "ok", "totalTimeMs": 0, "waitTimeMs": 10, "valid": false, "note": "force-stop/start race; activity already resumed" },
+      { "run": 2, "status": "ok", "totalTimeMs": 154, "waitTimeMs": 157 },
+      { "run": 3, "status": "ok", "totalTimeMs": 153, "waitTimeMs": 157 }
+    ],
+    "afterArm64ReinstallMedianTotalTimeMs": 153.5,
+    "caveat": "am start -W TotalTime = activity first frame (splash); JS-ready time not separately measured; screenshot 2-4s after launch shows interactive shelf"
+  },
+  "logcat": {
+    "fatalException": 0,
+    "anr": 0,
+    "raw": ["logcat-final-coldstart.txt", "logcat-final-fatal.txt (empty)", "logcat-launch.txt"]
+  },
+  "memory": {
+    "afterFirstLaunchPssKb": 113228,
+    "afterArm64ReinstallLaunchPssKb": 100771,
+    "readingMarkdownPssKb": 98631,
+    "readingMarkdownRssKb": 285432,
+    "raw": ["meminfo-launch.txt", "meminfo-launch-final.txt", "meminfo-reader.txt"]
+  },
+  "gfxinfoReading": {
+    "scenario": "synthetic Markdown reader, dumpsys gfxinfo reset then 3 vertical scroll swipes",
+    "totalFrames": 184,
+    "jankyFrames": 0,
+    "jankyPercent": 0.0,
+    "p50ms": 6,
+    "p90ms": 8,
+    "p99ms": 9,
+    "missedVsync": 0,
+    "slowUiThread": 0,
+    "raw": ["gfxinfo-reader.txt", "gfxinfo-framestats.csv"]
+  },
+  "readerFlows": {
+    "markdownExternalOpen": "content:// VIEW + --grant-read-uri-permission + explicit MainActivity, cold: Status ok TotalTime 151-161ms; synthetic md rendered",
+    "epubExternalOpen": "content:// VIEW application/epub+zip cold: Status ok TotalTime 151ms; synthetic EPUB cover/chapter rendered",
+    "backFromShelfOpenedReader": "one KEYCODE_BACK returns to shelf; app process alive (pidof present)",
+    "backFromExternalOpenedEpubReader": "returns to launcher (app exits) - recorded, needs product confirmation",
+    "themeLightDark": "cmd uimode night no/yes switches reader theme live; screenshots 06-light/07-dark",
+    "safeArea": "top: content starts below status bar (verified visually); bottom: scrollable content flows under gesture pill, fixed controls not obscured; end-of-document last-line visibility not verified"
+  },
+  "screenshots": [
+    "01-launch.png",
+    "01-launch-final.png",
+    "02-reader-md.png",
+    "03-reader-scrolled.png",
+    "04-back-to-shelf.png",
+    "05-shelf-light.png",
+    "06-reader-light.png",
+    "07-reader-dark.png",
+    "08-epub-import.png",
+    "12-after-back-from-shelf-reader.png"
+  ],
+  "privacy": {
+    "userDataOnDevice": "one real EPUB book in app library (user manual data)",
+    "handling": "not opened, not screenshotted, not deleted; shelf screenshots cropped above the user's book row; no user content in repo evidence"
+  },
+  "observations": [
+    "External open of the same Markdown creates a new mobile-import-<uuid> book each time (3 duplicates observed for one synthetic file) and the shelf 'N 个项目无法读取' warning increased 2 -> 5; .incoming dir empty and duplicate dirs contain valid manifest+chapter",
+    "External-open EPUB BACK exits to launcher instead of shelf (needs product decision)",
+    "No FATAL/ANR observed in any run"
+  ],
+  "unverified": [
+    "WebView JS-ready milliseconds",
+    "end-of-document last line vs bottom gesture bar",
+    "SAF picker import / document export-restore",
+    "volume-key paging / swipe feel / rotation / TalkBack",
+    "Android 8-16 and non-OPPO device matrix",
+    "1.2.1 -> 1.3.0 in-place upgrade (impossible: signature changed; fresh install verified)"
+  ]
+}

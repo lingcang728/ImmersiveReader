@@ -1,0 +1,4 @@
+path=C:\Users\15pro\Desktop\MyProject\ImmersiveReader\output\mobile\ImmersiveReader_1.3.0_android-arm64-release.apk
+bytes=16033256
+sha256=D52D358C3913390AC511B33AB9001E4CD1E3275CADEE9EE2BD746DBD0718DED6
+lastWriteTime=2026-10-18T19:12:07.3565484+08:00

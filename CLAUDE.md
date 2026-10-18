@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-沉浸阅读 (ImmersiveReader) is a local-first Windows desktop app for long-form reading. It unifies three content sources — Zhihu archives, podcast transcriptions, and Markdown folders — into a single local Library. Current release: 1.2.1.
+沉浸阅读 (ImmersiveReader) is a local-first reading app. On Windows it is a desktop app for long-form reading that unifies three content sources — Zhihu archives, podcast transcriptions, and Markdown folders — into a single local Library. On Android (1.3.0+) it is an independent mobile reader for local **Markdown and EPUB** only (new mobile UI, no Zhihu/podcast/continuous-reading). Current release: 1.3.0.
+
+Android mobile surface: `apps/desktop/src/lib/mobile/**` (shell, shelf, settings, Markdown/EPUB readers), design spec `docs/mobile-redesign.md`. Desktop remains `src/lib/desktop/DesktopApp.svelte`; `src/routes/+page.svelte` is a thin platform dispatcher.
 
 It is a polyglot monorepo with **no root `package.json` and no npm workspaces** — each package is built and tested independently and stitched together by the Rust backend at runtime.
 
@@ -16,7 +18,10 @@ All commands assume PowerShell from the repo root. Prefer `npm.cmd` / `cargo.exe
 
 ```powershell
 .\scripts\start.ps1 desktop          # tauri dev (sets IMMERSIVE_RUNTIME_ROOT, dev URL http://localhost:1420)
+.\scripts\build-android.ps1 -Target aarch64 -Release   # Android release APK -> output\mobile\
 ```
+
+Android builds need JDK 17/21, Android SDK + NDK and the Rust Android targets; set `JAVA_HOME` to a JDK 17/21 (the script auto-detects `G:\build_cache\jdk-17*`).
 
 ### Verify (run for any cross-package or shared-contract change)
 

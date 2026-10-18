@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "bookId": "manual:qa-sample-library",
+  "title": "QA 合成书稿",
+  "source": "manual",
+  "generatedAt": "2026-10-18T00:00:00Z",
+  "updatedAt": "2026-10-18T00:00:00Z",
+  "chapters": [
+    { "id": "q1", "path": "001.md", "title": "第一章 合成书稿", "date": null, "voteCount": 0, "wordCount": 520 },
+    { "id": "q2", "path": "002.md", "title": "第二章 合成书稿", "date": null, "voteCount": 0, "wordCount": 520 }
+  ]
+}

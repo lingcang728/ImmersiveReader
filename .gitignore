@@ -63,6 +63,17 @@ test-results/
 *.tmp
 *.bak
 
+# Release bundles (installers/APKs are published outside Git; keep the source tree clean)
+/release/
+# Large binary QA evidence: reports/scripts/JSON stay tracked, screenshots and raw
+# device logs do not (they are reproducible from the synthetic fixtures).
+docs/audit/**/screens/*.png
+docs/audit/**/_probe-screens/
+docs/audit/**/_probe-*/
+docs/audit/**/device/**/*.png
+docs/audit/**/device/**/logcat*.txt
+docs/audit/**/device/**/*.csv
+
 # Operating system metadata
 .DS_Store
 Thumbs.db

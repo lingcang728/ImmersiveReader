@@ -4,6 +4,19 @@
 > 图例：⬜ 待做 · 🔨 进行中 · ✅ 完成 · ⚠️ 代码完成，真机未验证 · ❌ 受阻
 > 交付头：`5384d21` 已推送 `origin/main`；QA 报告：`docs/release/1.2.1/QA_REPORT.md`
 
+## 1.3.0 · Android 阅读器重制（2026-10-18）
+
+| # | 条目 | 状态 | 说明 |
+|---|------|------|------|
+| M1 | 1.2.1 Android 启动崩溃根因（缺失 Kotlin `SecretsPlugin` 注册） | ✅ | 真机复现 `ClassNotFoundException`；移除 Android secrets 插件，只保留 `ContentReaderPlugin` |
+| M2 | Android 冷启动门控（桌面恢复/清扫 `#[cfg(desktop)]`，缓存清扫后台 3s） | ✅ | 真机冷启动 141–154 ms、FATAL/ANR=0、启动 PSS 100.8–113.2 MB |
+| M3 | 独立移动 UI（书架/阅读器/设置/导入，移除知乎/播客/连读/桌面设置） | ✅ | `src/lib/mobile/**`；94/94 浏览器冒烟，4 视口 48 张截图 |
+| M4 | 移动 Markdown 阅读（多章/单文件/续读/目录/搜索/专注/手势/进度） | ✅ | 复用 render worker + lightweight 渲染；真机阅读滚动 janky 0.00% |
+| M5 | 移动 EPUB 阅读（spine/多级目录/内链/资源/书签/全书搜索/locator） | ✅ | 复用 `lib/epub` 阅读内核 + `epub-embedded` 移动外壳 |
+| M6 | 原生启动画面 / WebView 性能 / 安全区 insets / Manifest / R8 / 新签名 | ✅ | Find X9 真机验证；新 `ir-release` 密钥，旧包需先卸载 |
+| M7 | 桌面入口分流 + 重组件懒加载（外观零变化） | ✅ | 桌面首屏 JS -20.5%、CSS -34.5%；`ship:local` 已安装 1.3.0 |
+| M8 | 版本 1.3.0 / APK（arm64 + universal）/ verify.ps1 / QA 报告 | ✅ | APK sha256 见 `docs/release/1.3.0/QA_REPORT.md` |
+
 ## 第一阶段 · 手机阅读基础（交互/返回/进度）
 
 | # | 条目 | 状态 | 说明 |

@@ -1,0 +1,1259 @@
+{
+  "harness": "scripts/qa/mobile/verify_mobile.py",
+  "buildDir": "C:\\Users\\15pro\\Desktop\\MyProject\\ImmersiveReader\\apps\\desktop\\build",
+  "baseUrl": "http://127.0.0.1:12867",
+  "viewports": [
+    "390x844@3",
+    "360x800@2",
+    "412x915@2.6"
+  ],
+  "startedAt": "2026-10-18T19:09:29+0800",
+  "finishedAt": "2026-10-18T19:10:13+0800",
+  "browserChannel": "chrome",
+  "summary": {
+    "pass": 94,
+    "fail": 0,
+    "skip": 0
+  },
+  "mobileShellMissing": false,
+  "readerChecksPassed": 48,
+  "checks": [
+    {
+      "name": "shelf: continue-reading card",
+      "status": "pass",
+      "detail": "",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "shelf: all mocked books rendered",
+      "status": "pass",
+      "detail": "3/3 books discoverable",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "shelf: no horizontal overflow",
+      "status": "pass",
+      "detail": "390px wide",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "shelf: safe-area CSS contract",
+      "status": "pass",
+      "detail": "--ir-safe-top=0px",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(md): open first chapter",
+      "status": "pass",
+      "detail": "Markdown chapter rendered",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(md): 44px back target",
+      "status": "pass",
+      "detail": "44x44",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(md): content mounted + scrollable",
+      "status": "pass",
+      "detail": "32 blocks, scrollable=div[reader-scroll] 6869px",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(md): TOC sheet opens",
+      "status": "pass",
+      "detail": "TOC sheet opened",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(md): TOC + chapter switch",
+      "status": "pass",
+      "detail": "TOC jumped to chapter 2",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(md): settings panel",
+      "status": "pass",
+      "detail": "reader settings panel opened",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(md): focus HUD",
+      "status": "pass",
+      "detail": "focus HUD opened via settings switch [aria-label*=\"专注\"]",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(md): back to shelf",
+      "status": "pass",
+      "detail": "returned to shelf",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(epub): open first chapter",
+      "status": "pass",
+      "detail": "EPUB spine chapter rendered",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(epub): TOC sheet opens",
+      "status": "pass",
+      "detail": "EPUB TOC sheet opened",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(epub): TOC navigation",
+      "status": "pass",
+      "detail": "EPUB TOC navigated to second spine item",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "reader(epub): back to shelf",
+      "status": "pass",
+      "detail": "returned to shelf",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "settings: mobile-only settings screen",
+      "status": "pass",
+      "detail": "mobile-only settings screen",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "shelf: import sheet",
+      "status": "pass",
+      "detail": "import sheet opened",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "perf: desktop chunk not loaded on mobile",
+      "status": "pass",
+      "detail": "15 resources, no desktop shell assets",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "perf: first-screen JS/CSS budget",
+      "status": "pass",
+      "detail": "JS=159876B CSS=24092B",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "screenshots: per-viewport distinct states",
+      "status": "pass",
+      "detail": "10 screenshots, all distinct",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "theme: dark shelf background",
+      "status": "pass",
+      "detail": "shelf bg=rgb(30, 30, 28)",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "theme: dark reader background",
+      "status": "pass",
+      "detail": "reader bg=rgb(30, 30, 28)",
+      "viewport": "390x844@3"
+    },
+    {
+      "name": "shelf: continue-reading card",
+      "status": "pass",
+      "detail": "",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "shelf: all mocked books rendered",
+      "status": "pass",
+      "detail": "3/3 books discoverable",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "shelf: no horizontal overflow",
+      "status": "pass",
+      "detail": "360px wide",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "shelf: safe-area CSS contract",
+      "status": "pass",
+      "detail": "--ir-safe-top=0px",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(md): open first chapter",
+      "status": "pass",
+      "detail": "Markdown chapter rendered",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(md): 44px back target",
+      "status": "pass",
+      "detail": "44x44",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(md): content mounted + scrollable",
+      "status": "pass",
+      "detail": "32 blocks, scrollable=div[reader-scroll] 8174px",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(md): TOC sheet opens",
+      "status": "pass",
+      "detail": "TOC sheet opened",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(md): TOC + chapter switch",
+      "status": "pass",
+      "detail": "TOC jumped to chapter 2",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(md): settings panel",
+      "status": "pass",
+      "detail": "reader settings panel opened",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(md): focus HUD",
+      "status": "pass",
+      "detail": "focus HUD opened via settings switch [aria-label*=\"专注\"]",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(md): back to shelf",
+      "status": "pass",
+      "detail": "returned to shelf",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(epub): open first chapter",
+      "status": "pass",
+      "detail": "EPUB spine chapter rendered",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(epub): TOC sheet opens",
+      "status": "pass",
+      "detail": "EPUB TOC sheet opened",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(epub): TOC navigation",
+      "status": "pass",
+      "detail": "EPUB TOC navigated to second spine item",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "reader(epub): back to shelf",
+      "status": "pass",
+      "detail": "returned to shelf",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "settings: mobile-only settings screen",
+      "status": "pass",
+      "detail": "mobile-only settings screen",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "shelf: import sheet",
+      "status": "pass",
+      "detail": "import sheet opened",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "perf: desktop chunk not loaded on mobile",
+      "status": "pass",
+      "detail": "15 resources, no desktop shell assets",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "perf: first-screen JS/CSS budget",
+      "status": "pass",
+      "detail": "JS=159876B CSS=24092B",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "screenshots: per-viewport distinct states",
+      "status": "pass",
+      "detail": "10 screenshots, all distinct",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "theme: dark shelf background",
+      "status": "pass",
+      "detail": "shelf bg=rgb(30, 30, 28)",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "theme: dark reader background",
+      "status": "pass",
+      "detail": "reader bg=rgb(30, 30, 28)",
+      "viewport": "360x800@2"
+    },
+    {
+      "name": "shelf: continue-reading card",
+      "status": "pass",
+      "detail": "",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "shelf: all mocked books rendered",
+      "status": "pass",
+      "detail": "3/3 books discoverable",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "shelf: no horizontal overflow",
+      "status": "pass",
+      "detail": "412px wide",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "shelf: safe-area CSS contract",
+      "status": "pass",
+      "detail": "--ir-safe-top=0px",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(md): open first chapter",
+      "status": "pass",
+      "detail": "Markdown chapter rendered",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(md): 44px back target",
+      "status": "pass",
+      "detail": "44x44",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(md): content mounted + scrollable",
+      "status": "pass",
+      "detail": "32 blocks, scrollable=div[reader-scroll] 6869px",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(md): TOC sheet opens",
+      "status": "pass",
+      "detail": "TOC sheet opened",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(md): TOC + chapter switch",
+      "status": "pass",
+      "detail": "TOC jumped to chapter 2",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(md): settings panel",
+      "status": "pass",
+      "detail": "reader settings panel opened",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(md): focus HUD",
+      "status": "pass",
+      "detail": "focus HUD opened via settings switch [aria-label*=\"专注\"]",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(md): back to shelf",
+      "status": "pass",
+      "detail": "returned to shelf",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(epub): open first chapter",
+      "status": "pass",
+      "detail": "EPUB spine chapter rendered",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(epub): TOC sheet opens",
+      "status": "pass",
+      "detail": "EPUB TOC sheet opened",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(epub): TOC navigation",
+      "status": "pass",
+      "detail": "EPUB TOC navigated to second spine item",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "reader(epub): back to shelf",
+      "status": "pass",
+      "detail": "returned to shelf",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "settings: mobile-only settings screen",
+      "status": "pass",
+      "detail": "mobile-only settings screen",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "shelf: import sheet",
+      "status": "pass",
+      "detail": "import sheet opened",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "perf: desktop chunk not loaded on mobile",
+      "status": "pass",
+      "detail": "15 resources, no desktop shell assets",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "perf: first-screen JS/CSS budget",
+      "status": "pass",
+      "detail": "JS=159876B CSS=24092B",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "screenshots: per-viewport distinct states",
+      "status": "pass",
+      "detail": "10 screenshots, all distinct",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "theme: dark shelf background",
+      "status": "pass",
+      "detail": "shelf bg=rgb(30, 30, 28)",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "theme: dark reader background",
+      "status": "pass",
+      "detail": "reader bg=rgb(30, 30, 28)",
+      "viewport": "412x915@2.6"
+    },
+    {
+      "name": "shelf: continue-reading card",
+      "status": "pass",
+      "detail": "",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "shelf: all mocked books rendered",
+      "status": "pass",
+      "detail": "3/3 books discoverable",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "shelf: no horizontal overflow",
+      "status": "pass",
+      "detail": "359px wide",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "shelf: safe-area CSS contract",
+      "status": "pass",
+      "detail": "--ir-safe-top=0px",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(md): open first chapter",
+      "status": "pass",
+      "detail": "Markdown chapter rendered",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(md): 44px back target",
+      "status": "pass",
+      "detail": "44x44",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(md): content mounted + scrollable",
+      "status": "pass",
+      "detail": "32 blocks, scrollable=div[reader-scroll] 8310px",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(md): TOC sheet opens",
+      "status": "pass",
+      "detail": "TOC sheet opened",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(md): TOC + chapter switch",
+      "status": "pass",
+      "detail": "TOC jumped to chapter 2",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(md): settings panel",
+      "status": "pass",
+      "detail": "reader settings panel opened",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(md): focus HUD",
+      "status": "pass",
+      "detail": "focus HUD opened via settings switch [aria-label*=\"专注\"]",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(md): back to shelf",
+      "status": "pass",
+      "detail": "returned to shelf",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(epub): open first chapter",
+      "status": "pass",
+      "detail": "EPUB spine chapter rendered",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(epub): TOC sheet opens",
+      "status": "pass",
+      "detail": "EPUB TOC sheet opened",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(epub): TOC navigation",
+      "status": "pass",
+      "detail": "EPUB TOC navigated to second spine item",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "reader(epub): back to shelf",
+      "status": "pass",
+      "detail": "returned to shelf",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "settings: mobile-only settings screen",
+      "status": "pass",
+      "detail": "mobile-only settings screen",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "shelf: import sheet",
+      "status": "pass",
+      "detail": "import sheet opened",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "perf: desktop chunk not loaded on mobile",
+      "status": "pass",
+      "detail": "15 resources, no desktop shell assets",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "perf: first-screen JS/CSS budget",
+      "status": "pass",
+      "detail": "JS=159876B CSS=24092B",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "screenshots: per-viewport distinct states",
+      "status": "pass",
+      "detail": "10 screenshots, all distinct",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "theme: dark shelf background",
+      "status": "pass",
+      "detail": "shelf bg=rgb(30, 30, 28)",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "theme: dark reader background",
+      "status": "pass",
+      "detail": "reader bg=rgb(30, 30, 28)",
+      "viewport": "359x789@3.5"
+    },
+    {
+      "name": "console: no unhandled page errors",
+      "status": "pass",
+      "detail": "",
+      "viewport": ""
+    },
+    {
+      "name": "console: no console errors",
+      "status": "pass",
+      "detail": "",
+      "viewport": ""
+    }
+  ],
+  "consoleErrors": [],
+  "consoleWarnings": [
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)",
+    "Failed to load resource: the server responded with a status of 404 (File not found)"
+  ],
+  "pageErrors": [],
+  "failedRequests": [],
+  "firstScreenBytes": {
+    "js": 159876,
+    "css": 24092,
+    "other": 3161,
+    "count": 15
+  },
+  "screenshots": [
+    {
+      "viewport": "390x844@3",
+      "name": "01-shelf",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-01-shelf.png",
+      "bytes": 103781,
+      "sha256": "f16686a7c3db0e994f9ca1a76dba6520b59d83197842ad4bd092a62177c22f7f"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "02-reader-md",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-02-reader-md.png",
+      "bytes": 463917,
+      "sha256": "e4b2277c4b8a52d4e62a6126d573570c999b557b26788161f4eef0d1217051d2"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "03-reader-md-toc",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-03-reader-md-toc.png",
+      "bytes": 120598,
+      "sha256": "4e228a13ff065d411981809d8e0e369706a8dca70871f33db0fa8af9d910937c"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "04-reader-md-chapter2",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-04-reader-md-chapter2.png",
+      "bytes": 378294,
+      "sha256": "e48996eb8755d3a3f745137d98b47c6a1d5db6292b2d472abee29bdd2d71025f"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "05-reader-md-settings",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-05-reader-md-settings.png",
+      "bytes": 134155,
+      "sha256": "f3e16ae17a0b5174b829a2ca0f1e01dfd08bedd89fd8e773c29dff64a89960ce"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "06-reader-md-focus",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-06-reader-md-focus.png",
+      "bytes": 132641,
+      "sha256": "63bb53c2d55afc4794463f2f3525b06892b37bb519852f715a2ef8af25fcf753"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "07-reader-epub",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-07-reader-epub.png",
+      "bytes": 349532,
+      "sha256": "a991c7381adcb6f3af67d6c21f2688ce7a49c6c92948db8a54d2f0feeedbc73f"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "08-reader-epub-toc",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-08-reader-epub-toc.png",
+      "bytes": 73978,
+      "sha256": "48b41e273aac0f77ff1cb55eb56e0ba431c5c66c214d61082327a2672ee25d91"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "09-settings",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-09-settings.png",
+      "bytes": 172075,
+      "sha256": "002fedebb77f9fb373e64ea39cd3466905735dd920905323cdeb445597b44ddd"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "10-import-sheet",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-10-import-sheet.png",
+      "bytes": 165922,
+      "sha256": "fe2be047c17bb1cafe873dd4a4abf833e47600c90d50bf7f5e98a98d645f98cf"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "11-dark-shelf",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-11-dark-shelf.png",
+      "bytes": 99822,
+      "sha256": "f8f716872426d999c9c8a640b0d798e17b223d8b544f857630926c6eb306b63a"
+    },
+    {
+      "viewport": "390x844@3",
+      "name": "12-dark-reader",
+      "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-12-dark-reader.png",
+      "bytes": 471063,
+      "sha256": "1b568b266e4f566756431de0e148a0d18ea34e579b70c8118f199698a340f084"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "01-shelf",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-01-shelf.png",
+      "bytes": 66170,
+      "sha256": "599f3f778491695cfd565c4bc99d581b2d3884a4d92f175e56262d594d149835"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "02-reader-md",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-02-reader-md.png",
+      "bytes": 248182,
+      "sha256": "1f0289bfd69a8ec1b208580e8b28115e679b9da52fd4afdbed566c38830475eb"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "03-reader-md-toc",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-03-reader-md-toc.png",
+      "bytes": 63756,
+      "sha256": "22ec7b583cd436d8bbab66a0bb574ceb449f0305b2ed693d6dac46550ddaa3ca"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "04-reader-md-chapter2",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-04-reader-md-chapter2.png",
+      "bytes": 210633,
+      "sha256": "a111d5c4e56e17db807f6532cc580fc7dc8c341a99e5096995845ca2c0de6d10"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "05-reader-md-settings",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-05-reader-md-settings.png",
+      "bytes": 81149,
+      "sha256": "a4c6503d26c94e50a5f8f98ec488e6be88578272b68cdf2bfb3cd3154edfc9b2"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "06-reader-md-focus",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-06-reader-md-focus.png",
+      "bytes": 78416,
+      "sha256": "b1989bf9bc10b1956d515d2fee5feb8fc18db712ab4b6efba8de1484269cc8d9"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "07-reader-epub",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-07-reader-epub.png",
+      "bytes": 209861,
+      "sha256": "5a2159ea9a94778a849958cae6fe6c11d886618baa541b39c2ae9a72f63a709d"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "08-reader-epub-toc",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-08-reader-epub-toc.png",
+      "bytes": 42203,
+      "sha256": "be44dd95fe92feef18480d34d8e60f63700f3cac512df9dd3b1412b59eb155c1"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "09-settings",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-09-settings.png",
+      "bytes": 104660,
+      "sha256": "66844c8e5721a138b65ad2556581768a9aafbd5b48fa8536883603f2d2782821"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "10-import-sheet",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-10-import-sheet.png",
+      "bytes": 106688,
+      "sha256": "dbabb4033a22f692c7bfd4cb7e8d03448b0ccbd97fa66a60388411fca76e83c0"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "11-dark-shelf",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-11-dark-shelf.png",
+      "bytes": 63204,
+      "sha256": "b603e37da5da69a30aa1e72930978b0eac47f3aafba76b90777ec3c71f7475ec"
+    },
+    {
+      "viewport": "360x800@2",
+      "name": "12-dark-reader",
+      "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-12-dark-reader.png",
+      "bytes": 252992,
+      "sha256": "d1d5dcedc107d5d557e79c8e3564d2ba68de1434ae7b0c2b0ab5e1da490cae13"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "01-shelf",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-01-shelf.png",
+      "bytes": 95439,
+      "sha256": "df1200bba6114fc569180d60ba16955fc10914cddaa839f25e974a906c049df7"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "02-reader-md",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-02-reader-md.png",
+      "bytes": 452087,
+      "sha256": "f3e58620719f90a36c1d2edcc7314ed78cd7dede737cbc5001da8afe55b0d343"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "03-reader-md-toc",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-03-reader-md-toc.png",
+      "bytes": 113910,
+      "sha256": "2ffde0ebbb1e0a62904ef0310b099412b27bc9339a27d22d418b3b07308beecd"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "04-reader-md-chapter2",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-04-reader-md-chapter2.png",
+      "bytes": 382147,
+      "sha256": "75446b1502743bac9a3b2f22c97094dde1494b5d2a14401b07b19c8d6e2354b2"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "05-reader-md-settings",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-05-reader-md-settings.png",
+      "bytes": 140845,
+      "sha256": "167c6b3ef492003c33ada5b0ba1fcb366320e5eacd4be237e652fc7135a05475"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "06-reader-md-focus",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-06-reader-md-focus.png",
+      "bytes": 142574,
+      "sha256": "adab23b024b6e7fd7ad4f74ae15238dc5405dc96d876f6e3c8b065877c95757c"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "07-reader-epub",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-07-reader-epub.png",
+      "bytes": 328869,
+      "sha256": "fb574a56cf07715b0191081694b521c5d1bec297e11c28771d8a82d8984b55cb"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "08-reader-epub-toc",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-08-reader-epub-toc.png",
+      "bytes": 69631,
+      "sha256": "319e833a5ad9ca3501ef4d31f4f711befdd3319dbc083f5a9482f0d6c5bae3aa"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "09-settings",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-09-settings.png",
+      "bytes": 161395,
+      "sha256": "ea017af9f0b58945759c55d5ead99a682db66880edcb404c72debc32c8943c10"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "10-import-sheet",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-10-import-sheet.png",
+      "bytes": 146994,
+      "sha256": "93ad4360c9e0a2b6c5983b03dd01ec01d3882a519638a814e3d830716cab6c19"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "11-dark-shelf",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-11-dark-shelf.png",
+      "bytes": 91838,
+      "sha256": "5c06afa022cc9da429400175328aea35c0740e12351cd08da91400441195e729"
+    },
+    {
+      "viewport": "412x915@2.6",
+      "name": "12-dark-reader",
+      "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-12-dark-reader.png",
+      "bytes": 458124,
+      "sha256": "ce16900f0bbe48134e9d1be5985b621f31df8b05078c8cd9dbd00cb62113069f"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "01-shelf",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-01-shelf.png",
+      "bytes": 122095,
+      "sha256": "27ce031f44eca3fde2fd95d1390150b306b8b471672de60907c22de9611c07fa"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "02-reader-md",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-02-reader-md.png",
+      "bytes": 446233,
+      "sha256": "324cdfb8e8ac4a4ab040821120e0b972de01e44d6866ff07ea27d6a592748f70"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "03-reader-md-toc",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-03-reader-md-toc.png",
+      "bytes": 115595,
+      "sha256": "af14e3be4821b12b0135bf38e7a700d0f50451bfed7e1a8e6e550116b216cda2"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "04-reader-md-chapter2",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-04-reader-md-chapter2.png",
+      "bytes": 373181,
+      "sha256": "c9e61824a4ceecf03bb0575dd766cc7cd856fb5647e958aea4db90d5d9831603"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "05-reader-md-settings",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-05-reader-md-settings.png",
+      "bytes": 154489,
+      "sha256": "93b8252d798766fb4ec4d1dedc0b2052ed47071ac16a8e1d87627116fbe7f6f0"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "06-reader-md-focus",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-06-reader-md-focus.png",
+      "bytes": 145121,
+      "sha256": "d7352726e1f6666f1df65c3034726320822661b60e7721d6d4953f4508386bb8"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "07-reader-epub",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-07-reader-epub.png",
+      "bytes": 362377,
+      "sha256": "8eee58530ebd3027ab311f35f08c657f9e229aba10cdd53e52ab6a268d0beb8d"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "08-reader-epub-toc",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-08-reader-epub-toc.png",
+      "bytes": 77629,
+      "sha256": "9481b0201e1bc8bd0c91b4b637d36b3812ddc89a3e232ae49fd75fb5d6afbd9d"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "09-settings",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-09-settings.png",
+      "bytes": 197018,
+      "sha256": "ed872ac778a2a49424ce1f0c5b5e300aa8ff5f56ac60d2de07ff84d50c325092"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "10-import-sheet",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-10-import-sheet.png",
+      "bytes": 194989,
+      "sha256": "f0910d79298641ba0e54e4c6ad789228bb036899d09f7ba85d74f4034edb1032"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "11-dark-shelf",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-11-dark-shelf.png",
+      "bytes": 117048,
+      "sha256": "c897be637eb036d8e92cab1844de02b775cf48ea9f5ce6e263d58064278fcefd"
+    },
+    {
+      "viewport": "359x789@3.5",
+      "name": "12-dark-reader",
+      "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-12-dark-reader.png",
+      "bytes": 450284,
+      "sha256": "913a924ce8d42e72fcbdf0bce30edb819a5b48f4f683c7bc310ee05cf0379f68"
+    }
+  ],
+  "screenshotsPerViewport": {
+    "390x844@3": [
+      "01-shelf",
+      "02-reader-md",
+      "03-reader-md-toc",
+      "04-reader-md-chapter2",
+      "05-reader-md-settings",
+      "06-reader-md-focus",
+      "07-reader-epub",
+      "08-reader-epub-toc",
+      "09-settings",
+      "10-import-sheet",
+      "11-dark-shelf",
+      "12-dark-reader"
+    ],
+    "360x800@2": [
+      "01-shelf",
+      "02-reader-md",
+      "03-reader-md-toc",
+      "04-reader-md-chapter2",
+      "05-reader-md-settings",
+      "06-reader-md-focus",
+      "07-reader-epub",
+      "08-reader-epub-toc",
+      "09-settings",
+      "10-import-sheet",
+      "11-dark-shelf",
+      "12-dark-reader"
+    ],
+    "412x915@2.6": [
+      "01-shelf",
+      "02-reader-md",
+      "03-reader-md-toc",
+      "04-reader-md-chapter2",
+      "05-reader-md-settings",
+      "06-reader-md-focus",
+      "07-reader-epub",
+      "08-reader-epub-toc",
+      "09-settings",
+      "10-import-sheet",
+      "11-dark-shelf",
+      "12-dark-reader"
+    ],
+    "359x789@3.5": [
+      "01-shelf",
+      "02-reader-md",
+      "03-reader-md-toc",
+      "04-reader-md-chapter2",
+      "05-reader-md-settings",
+      "06-reader-md-focus",
+      "07-reader-epub",
+      "08-reader-epub-toc",
+      "09-settings",
+      "10-import-sheet",
+      "11-dark-shelf",
+      "12-dark-reader"
+    ]
+  },
+  "screenshotHashes": {
+    "390x844@3": {
+      "01-shelf": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-01-shelf.png",
+        "bytes": 103781,
+        "sha256": "f16686a7c3db0e994f9ca1a76dba6520b59d83197842ad4bd092a62177c22f7f"
+      },
+      "02-reader-md": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-02-reader-md.png",
+        "bytes": 463917,
+        "sha256": "e4b2277c4b8a52d4e62a6126d573570c999b557b26788161f4eef0d1217051d2"
+      },
+      "03-reader-md-toc": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-03-reader-md-toc.png",
+        "bytes": 120598,
+        "sha256": "4e228a13ff065d411981809d8e0e369706a8dca70871f33db0fa8af9d910937c"
+      },
+      "04-reader-md-chapter2": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-04-reader-md-chapter2.png",
+        "bytes": 378294,
+        "sha256": "e48996eb8755d3a3f745137d98b47c6a1d5db6292b2d472abee29bdd2d71025f"
+      },
+      "05-reader-md-settings": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-05-reader-md-settings.png",
+        "bytes": 134155,
+        "sha256": "f3e16ae17a0b5174b829a2ca0f1e01dfd08bedd89fd8e773c29dff64a89960ce"
+      },
+      "06-reader-md-focus": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-06-reader-md-focus.png",
+        "bytes": 132641,
+        "sha256": "63bb53c2d55afc4794463f2f3525b06892b37bb519852f715a2ef8af25fcf753"
+      },
+      "07-reader-epub": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-07-reader-epub.png",
+        "bytes": 349532,
+        "sha256": "a991c7381adcb6f3af67d6c21f2688ce7a49c6c92948db8a54d2f0feeedbc73f"
+      },
+      "08-reader-epub-toc": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-08-reader-epub-toc.png",
+        "bytes": 73978,
+        "sha256": "48b41e273aac0f77ff1cb55eb56e0ba431c5c66c214d61082327a2672ee25d91"
+      },
+      "09-settings": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-09-settings.png",
+        "bytes": 172075,
+        "sha256": "002fedebb77f9fb373e64ea39cd3466905735dd920905323cdeb445597b44ddd"
+      },
+      "10-import-sheet": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-10-import-sheet.png",
+        "bytes": 165922,
+        "sha256": "fe2be047c17bb1cafe873dd4a4abf833e47600c90d50bf7f5e98a98d645f98cf"
+      },
+      "11-dark-shelf": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-11-dark-shelf.png",
+        "bytes": 99822,
+        "sha256": "f8f716872426d999c9c8a640b0d798e17b223d8b544f857630926c6eb306b63a"
+      },
+      "12-dark-reader": {
+        "path": "docs\\audit\\2026-10-18\\screens\\390x844@3-12-dark-reader.png",
+        "bytes": 471063,
+        "sha256": "1b568b266e4f566756431de0e148a0d18ea34e579b70c8118f199698a340f084"
+      }
+    },
+    "360x800@2": {
+      "01-shelf": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-01-shelf.png",
+        "bytes": 66170,
+        "sha256": "599f3f778491695cfd565c4bc99d581b2d3884a4d92f175e56262d594d149835"
+      },
+      "02-reader-md": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-02-reader-md.png",
+        "bytes": 248182,
+        "sha256": "1f0289bfd69a8ec1b208580e8b28115e679b9da52fd4afdbed566c38830475eb"
+      },
+      "03-reader-md-toc": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-03-reader-md-toc.png",
+        "bytes": 63756,
+        "sha256": "22ec7b583cd436d8bbab66a0bb574ceb449f0305b2ed693d6dac46550ddaa3ca"
+      },
+      "04-reader-md-chapter2": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-04-reader-md-chapter2.png",
+        "bytes": 210633,
+        "sha256": "a111d5c4e56e17db807f6532cc580fc7dc8c341a99e5096995845ca2c0de6d10"
+      },
+      "05-reader-md-settings": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-05-reader-md-settings.png",
+        "bytes": 81149,
+        "sha256": "a4c6503d26c94e50a5f8f98ec488e6be88578272b68cdf2bfb3cd3154edfc9b2"
+      },
+      "06-reader-md-focus": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-06-reader-md-focus.png",
+        "bytes": 78416,
+        "sha256": "b1989bf9bc10b1956d515d2fee5feb8fc18db712ab4b6efba8de1484269cc8d9"
+      },
+      "07-reader-epub": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-07-reader-epub.png",
+        "bytes": 209861,
+        "sha256": "5a2159ea9a94778a849958cae6fe6c11d886618baa541b39c2ae9a72f63a709d"
+      },
+      "08-reader-epub-toc": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-08-reader-epub-toc.png",
+        "bytes": 42203,
+        "sha256": "be44dd95fe92feef18480d34d8e60f63700f3cac512df9dd3b1412b59eb155c1"
+      },
+      "09-settings": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-09-settings.png",
+        "bytes": 104660,
+        "sha256": "66844c8e5721a138b65ad2556581768a9aafbd5b48fa8536883603f2d2782821"
+      },
+      "10-import-sheet": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-10-import-sheet.png",
+        "bytes": 106688,
+        "sha256": "dbabb4033a22f692c7bfd4cb7e8d03448b0ccbd97fa66a60388411fca76e83c0"
+      },
+      "11-dark-shelf": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-11-dark-shelf.png",
+        "bytes": 63204,
+        "sha256": "b603e37da5da69a30aa1e72930978b0eac47f3aafba76b90777ec3c71f7475ec"
+      },
+      "12-dark-reader": {
+        "path": "docs\\audit\\2026-10-18\\screens\\360x800@2-12-dark-reader.png",
+        "bytes": 252992,
+        "sha256": "d1d5dcedc107d5d557e79c8e3564d2ba68de1434ae7b0c2b0ab5e1da490cae13"
+      }
+    },
+    "412x915@2.6": {
+      "01-shelf": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-01-shelf.png",
+        "bytes": 95439,
+        "sha256": "df1200bba6114fc569180d60ba16955fc10914cddaa839f25e974a906c049df7"
+      },
+      "02-reader-md": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-02-reader-md.png",
+        "bytes": 452087,
+        "sha256": "f3e58620719f90a36c1d2edcc7314ed78cd7dede737cbc5001da8afe55b0d343"
+      },
+      "03-reader-md-toc": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-03-reader-md-toc.png",
+        "bytes": 113910,
+        "sha256": "2ffde0ebbb1e0a62904ef0310b099412b27bc9339a27d22d418b3b07308beecd"
+      },
+      "04-reader-md-chapter2": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-04-reader-md-chapter2.png",
+        "bytes": 382147,
+        "sha256": "75446b1502743bac9a3b2f22c97094dde1494b5d2a14401b07b19c8d6e2354b2"
+      },
+      "05-reader-md-settings": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-05-reader-md-settings.png",
+        "bytes": 140845,
+        "sha256": "167c6b3ef492003c33ada5b0ba1fcb366320e5eacd4be237e652fc7135a05475"
+      },
+      "06-reader-md-focus": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-06-reader-md-focus.png",
+        "bytes": 142574,
+        "sha256": "adab23b024b6e7fd7ad4f74ae15238dc5405dc96d876f6e3c8b065877c95757c"
+      },
+      "07-reader-epub": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-07-reader-epub.png",
+        "bytes": 328869,
+        "sha256": "fb574a56cf07715b0191081694b521c5d1bec297e11c28771d8a82d8984b55cb"
+      },
+      "08-reader-epub-toc": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-08-reader-epub-toc.png",
+        "bytes": 69631,
+        "sha256": "319e833a5ad9ca3501ef4d31f4f711befdd3319dbc083f5a9482f0d6c5bae3aa"
+      },
+      "09-settings": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-09-settings.png",
+        "bytes": 161395,
+        "sha256": "ea017af9f0b58945759c55d5ead99a682db66880edcb404c72debc32c8943c10"
+      },
+      "10-import-sheet": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-10-import-sheet.png",
+        "bytes": 146994,
+        "sha256": "93ad4360c9e0a2b6c5983b03dd01ec01d3882a519638a814e3d830716cab6c19"
+      },
+      "11-dark-shelf": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-11-dark-shelf.png",
+        "bytes": 91838,
+        "sha256": "5c06afa022cc9da429400175328aea35c0740e12351cd08da91400441195e729"
+      },
+      "12-dark-reader": {
+        "path": "docs\\audit\\2026-10-18\\screens\\412x915@2.6-12-dark-reader.png",
+        "bytes": 458124,
+        "sha256": "ce16900f0bbe48134e9d1be5985b621f31df8b05078c8cd9dbd00cb62113069f"
+      }
+    },
+    "359x789@3.5": {
+      "01-shelf": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-01-shelf.png",
+        "bytes": 122095,
+        "sha256": "27ce031f44eca3fde2fd95d1390150b306b8b471672de60907c22de9611c07fa"
+      },
+      "02-reader-md": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-02-reader-md.png",
+        "bytes": 446233,
+        "sha256": "324cdfb8e8ac4a4ab040821120e0b972de01e44d6866ff07ea27d6a592748f70"
+      },
+      "03-reader-md-toc": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-03-reader-md-toc.png",
+        "bytes": 115595,
+        "sha256": "af14e3be4821b12b0135bf38e7a700d0f50451bfed7e1a8e6e550116b216cda2"
+      },
+      "04-reader-md-chapter2": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-04-reader-md-chapter2.png",
+        "bytes": 373181,
+        "sha256": "c9e61824a4ceecf03bb0575dd766cc7cd856fb5647e958aea4db90d5d9831603"
+      },
+      "05-reader-md-settings": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-05-reader-md-settings.png",
+        "bytes": 154489,
+        "sha256": "93b8252d798766fb4ec4d1dedc0b2052ed47071ac16a8e1d87627116fbe7f6f0"
+      },
+      "06-reader-md-focus": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-06-reader-md-focus.png",
+        "bytes": 145121,
+        "sha256": "d7352726e1f6666f1df65c3034726320822661b60e7721d6d4953f4508386bb8"
+      },
+      "07-reader-epub": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-07-reader-epub.png",
+        "bytes": 362377,
+        "sha256": "8eee58530ebd3027ab311f35f08c657f9e229aba10cdd53e52ab6a268d0beb8d"
+      },
+      "08-reader-epub-toc": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-08-reader-epub-toc.png",
+        "bytes": 77629,
+        "sha256": "9481b0201e1bc8bd0c91b4b637d36b3812ddc89a3e232ae49fd75fb5d6afbd9d"
+      },
+      "09-settings": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-09-settings.png",
+        "bytes": 197018,
+        "sha256": "ed872ac778a2a49424ce1f0c5b5e300aa8ff5f56ac60d2de07ff84d50c325092"
+      },
+      "10-import-sheet": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-10-import-sheet.png",
+        "bytes": 194989,
+        "sha256": "f0910d79298641ba0e54e4c6ad789228bb036899d09f7ba85d74f4034edb1032"
+      },
+      "11-dark-shelf": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-11-dark-shelf.png",
+        "bytes": 117048,
+        "sha256": "c897be637eb036d8e92cab1844de02b775cf48ea9f5ce6e263d58064278fcefd"
+      },
+      "12-dark-reader": {
+        "path": "docs\\audit\\2026-10-18\\screens\\359x789@3.5-12-dark-reader.png",
+        "bytes": 450284,
+        "sha256": "913a924ce8d42e72fcbdf0bce30edb819a5b48f4f683c7bc310ee05cf0379f68"
+      }
+    }
+  }
+}

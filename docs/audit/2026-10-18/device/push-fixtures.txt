@@ -1,0 +1,1 @@
+adb: error: target '/sdcard/Download/IR-QA' is not a directory

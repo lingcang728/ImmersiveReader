@@ -1,0 +1,4 @@
+APK=C:\Users\15pro\Desktop\MyProject\ImmersiveReader\release\ImmersiveReader_1.2.1_android-universal-release.apk
+bytes=16635119
+sha256=F560BC74E620CFCC759BCE0AF095A56909D2A6BCCC5A739928C34BB681E1638C
+installedAt=2026-10-18T19:10:18.5708716+08:00
