@@ -281,6 +281,13 @@ const PODCAST_WORKER_STALE_AFTER: Duration = Duration::from_secs(900);
 /// task list.
 const PODCAST_WORKER_REAP_INTERVAL: Duration = Duration::from_secs(120);
 
+/// Android cold start: the deferred residue sweep waits this long after
+/// `setup` returns so it can never compete with the webview's first paint or
+/// the frontend's first invokes. This is a background thread started by
+/// `run()`, not a timer the UI waits on.
+#[cfg(target_os = "android")]
+const ANDROID_DEFERRED_MAINTENANCE_DELAY: Duration = Duration::from_secs(3);
+
 /// P1-18 whitelist state: Markdown paths this process has actually served to
 /// the UI (successful reads, OS open-file hand-offs, recent-files entries).
 /// `save_markdown_file` may only write inside managed roots or to a path in
@@ -328,7 +335,10 @@ fn markdown_path_allowed(path: &str) -> Result<PathBuf, String> {
 /// small enough. The explicit-open cases this can't enumerate in lib.rs alone
 /// (file dialog selection, drag-drop) still flow through here — but they are
 /// bounded to Markdown files, and writes stay behind `markdown_write_permitted`.
-fn markdown_read_target(path: &str) -> Result<PathBuf, String> {
+/// Returns the normalized path plus the size the metadata check just observed
+/// (the read pre-sizes its buffer from it; the `take()` cap still guards a
+/// file swapped in between).
+fn markdown_read_target(path: &str) -> Result<(PathBuf, u64), String> {
     let candidate = markdown_path_allowed(path)?;
     // P2-20: normalize before metadata/read — a >MAX_PATH Markdown must be
     // readable via the `\\?\` spelling instead of failing as "not found".
@@ -340,7 +350,7 @@ fn markdown_read_target(path: &str) -> Result<PathBuf, String> {
     if metadata.len() > MAX_MARKDOWN_FILE_BYTES {
         return Err("MARKDOWN_FILE_TOO_LARGE".to_string());
     }
-    Ok(normalized)
+    Ok((normalized, metadata.len()))
 }
 
 /// Write-side whitelist: managed roots (Library/Data/Cache) always qualify;
@@ -619,12 +629,14 @@ async fn stage_content_uri(
 #[tauri::command]
 async fn read_markdown_file(app: tauri::AppHandle, path: String) -> Result<ReadResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ReadResult, String> {
-        let path = markdown_read_target(&path)?;
+        let (path, len) = markdown_read_target(&path)?;
         // P2-18: the metadata check above can be raced — cap the read itself
         // so a swapped-in file can never slurp more than the limit + 1 byte.
         let bytes = {
             let file = fs::File::open(&path).map_err(|e| e.to_string())?;
-            let mut bytes = Vec::new();
+            // Pre-size from the checked metadata: a large Markdown otherwise
+            // reallocates through several Vec growth steps before decode.
+            let mut bytes = Vec::with_capacity(len as usize);
             file.take(MAX_MARKDOWN_FILE_BYTES + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|e| e.to_string())?;
@@ -1961,9 +1973,12 @@ fn open_book_detail(book_id: &str) -> Result<library::BookDetail, String> {
 
 fn open_book_detail_at(book_id: &str) -> Result<(library::BookDetail, PathBuf), String> {
     let value = settings::load_settings()?;
-    let book_root =
-        library::book_context(Path::new(&value.library_root), book_id).map(|(root, _, _)| root)?;
-    let mut detail = library::open_book(Path::new(&value.library_root), book_id)?;
+    // One `find_book` pass returns both the detail and the resolved book root
+    // (the command needs the root for the asset-scope grant). Calling
+    // `book_context` + `open_book` separately re-read/re-parsed the manifest
+    // and .reading.json and re-opened reader.db for every book open.
+    let (mut detail, book_root) =
+        library::open_book_with_root(Path::new(&value.library_root), book_id)?;
     // Task records are advisory — a busy/missing control.db must not fail a
     // book open; it degrades to an empty list like unreadable provenance.
     detail.task_records = control::ControlDb::open_current()
@@ -2196,6 +2211,13 @@ async fn cancel_import(op_id: String) -> Result<import_ops::ImportOperation, Str
 
 /// What this build can actually do — the frontend hides entries whose flag
 /// is false rather than discovering failures at invoke time.
+///
+/// The first six fields are the original 1.2.x wire shape and stay for older
+/// frontends; the frontend normalizer accepts both snake_case and camelCase
+/// and falls back per-field, so added fields are additive. `isMobile`,
+/// `taskAcquisition`, `directoryImport`, `secretStore`, `markdownEditing` and
+/// `supportedFormats` are the mobile-aware flags (the Android shell gates the
+/// Zhihu/podcast/deepseek surfaces on them).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PlatformCapabilities {
@@ -2210,7 +2232,28 @@ struct PlatformCapabilities {
     volume_key_capture: bool,
     /// Reading bundle export/import (zip).
     reading_bundle: bool,
+    /// Running in a phone/tablet shell (touch-first layout).
+    is_mobile: bool,
+    /// Zhihu/podcast acquisition engines (managed runtimes + control DB).
+    task_acquisition: bool,
+    /// Filesystem directory picking + folder import.
+    directory_import: bool,
+    /// Credential Manager (desktop) / Keystore (retired on Android) store.
+    secret_store: bool,
+    /// In-place Markdown editing (`save_markdown_file`).
+    markdown_editing: bool,
+    /// Formats the importer accepts on this platform.
+    supported_formats: Vec<&'static str>,
 }
+
+/// Formats the desktop importer/reader accepts (Markdown + text chapters,
+/// EPUB, and reading-bundle `.zip`). Android drops archive imports.
+#[cfg(not(target_os = "android"))]
+const DESKTOP_SUPPORTED_FORMATS: [&str; 5] = ["md", "markdown", "txt", "epub", "zip"];
+/// Android imports Markdown/text chapters and EPUB through SAF; `.zip`/`.cbz`
+/// archives are not offered by the mobile shell.
+#[cfg(target_os = "android")]
+const ANDROID_SUPPORTED_FORMATS: [&str; 4] = ["md", "markdown", "txt", "epub"];
 
 #[tauri::command]
 fn get_platform_capabilities() -> PlatformCapabilities {
@@ -2223,6 +2266,12 @@ fn get_platform_capabilities() -> PlatformCapabilities {
             epub: true,
             volume_key_capture: true,
             reading_bundle: true,
+            is_mobile: true,
+            task_acquisition: false,
+            directory_import: false,
+            secret_store: false,
+            markdown_editing: false,
+            supported_formats: ANDROID_SUPPORTED_FORMATS.to_vec(),
         };
     }
     #[cfg(target_os = "windows")]
@@ -2234,6 +2283,12 @@ fn get_platform_capabilities() -> PlatformCapabilities {
             epub: true,
             volume_key_capture: false,
             reading_bundle: true,
+            is_mobile: false,
+            task_acquisition: true,
+            directory_import: true,
+            secret_store: true,
+            markdown_editing: true,
+            supported_formats: DESKTOP_SUPPORTED_FORMATS.to_vec(),
         }
     }
     #[cfg(not(any(target_os = "android", target_os = "windows")))]
@@ -2244,6 +2299,12 @@ fn get_platform_capabilities() -> PlatformCapabilities {
         epub: true,
         volume_key_capture: false,
         reading_bundle: true,
+        is_mobile: false,
+        task_acquisition: true,
+        directory_import: true,
+        secret_store: true,
+        markdown_editing: true,
+        supported_formats: DESKTOP_SUPPORTED_FORMATS.to_vec(),
     }
 }
 
@@ -2335,8 +2396,9 @@ async fn take_pending_open_uris(app: tauri::AppHandle) -> Result<Vec<String>, St
 
 // ===== Readable chapters (Markdown + EPUB) =============================
 
-/// One reader-ready chapter. Markdown books answer from disk directly;
-/// EPUB books route through `epub::read_epub_chapter` (sanitized XHTML).
+/// One reader-ready chapter. Markdown books answer from disk directly; EPUB
+/// books route through `epub::read_epub_chapter_with_neighbors` (sanitized
+/// XHTML, neighbours taken from the manifest loaded once here).
 /// Either way the book root gets the recursive asset scope grant so
 /// chapter-relative resources render.
 #[tauri::command]
@@ -2359,7 +2421,19 @@ async fn get_readable_chapter(
         // reference — content/, assets/, cover — nothing more is needed.
         let _ = app.asset_protocol_scope().allow_directory(&book_root, true);
         if epub::publication_path(&book_root).is_file() {
-            return epub::read_epub_chapter(&book_root, chapter);
+            // The manifest is already in memory (see `position` above) — derive
+            // the neighbours here instead of letting the chapter reader re-read
+            // and re-parse manifest.json on every page turn.
+            let prev_chapter_id = position
+                .checked_sub(1)
+                .map(|index| manifest.chapters[index].id.clone());
+            let next_chapter_id = (position + 1 < manifest.chapters.len())
+                .then(|| manifest.chapters[position + 1].id.clone());
+            return epub::read_epub_chapter_with_neighbors(
+                &book_root,
+                chapter,
+                (prev_chapter_id, next_chapter_id),
+            );
         }
         // Markdown chapter: enforce the same cap+decode the standalone file
         // path uses, then hand the reader a ReadableChapter-shaped payload.
@@ -2375,7 +2449,10 @@ async fn get_readable_chapter(
         }
         let bytes = {
             let file = fs::File::open(&file).map_err(|error| error.to_string())?;
-            let mut bytes = Vec::new();
+            // Pre-size from the metadata just read: otherwise a multi-MB
+            // chapter reallocates/copies through several Vec growth steps
+            // before decode. `take()` still caps a swapped-in file.
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
             file.take(MAX_MARKDOWN_FILE_BYTES + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|error| error.to_string())?;
@@ -3979,8 +4056,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
-        // In-app mobile plugin: streams SAF content:// picks into the app
-        // cache (ContentReaderPlugin.kt in the Android app module).
+        // The ONLY in-app mobile plugin: streams SAF content:// picks into
+        // the app cache (ContentReaderPlugin.kt in the Android app module).
+        // Every `run_mobile_plugin` call in this crate targets one of its
+        // `@Command`s — `register_android_plugin` resolves the class name
+        // synchronously and a missing class fails plugin setup, which fails
+        // `Builder::build()` and kills the whole app before the first frame
+        // (the 1.2.1 Android no-launch bug: a `secrets` plugin was registered
+        // for a SecretsPlugin.kt that never existed). Keep this one-to-one.
         .plugin(
             tauri::plugin::Builder::<tauri::Wry, ()>::new("content-reader")
                 .setup(|app, api| {
@@ -3991,25 +4074,6 @@ pub fn run() {
                             "ContentReaderPlugin",
                         )?;
                         app.manage(ContentReaderHandle(handle));
-                    }
-                    let _ = (app, api);
-                    Ok(())
-                })
-                .build(),
-        )
-        // In-app mobile plugin: Android Keystore-backed secret storage
-        // (SecretsPlugin.kt). Only Android wires a real handle; elsewhere
-        // the credential/file backends in secrets.rs run instead.
-        .plugin(
-            tauri::plugin::Builder::<tauri::Wry, ()>::new("secrets")
-                .setup(|app, api| {
-                    #[cfg(target_os = "android")]
-                    {
-                        let handle = api.register_android_plugin(
-                            "com.lingcang.immersivereading",
-                            "SecretsPlugin",
-                        )?;
-                        secrets::init_secrets_plugin(handle);
                     }
                     let _ = (app, api);
                     Ok(())
@@ -4102,96 +4166,110 @@ pub fn run() {
             // Android has no `dirs` backend — every storage root derives from
             // the app-private directories exposed by the mobile path plugin.
             // This must run before anything that touches
-            // `StorageLocations::current()` (app_log, control.db recovery,
-            // settings). Failure is fatal: without storage roots the app
-            // cannot run at all.
+            // `StorageLocations::current()` (app_log, settings). Failure is
+            // fatal: without storage roots the app cannot run at all.
             #[cfg(target_os = "android")]
             if let Err(error) = storage::init_android_roots(app.handle()) {
                 eprintln!("Android storage roots init failed: {error}");
                 panic!("failed to initialize Android storage roots: {error}");
             }
-            #[cfg(target_os = "android")]
-            {
-                // SAF staging cannot outlive the op that created it — the
-                // URI grant dies with process death, so `import-*`,
-                // `mobile-import-*` and `临时` leftovers are always residue.
-                if let Ok(base) = storage::android_base_dirs() {
-                    let removed = temporary_content::sweep_app_cache_staging(&base.app_cache);
-                    if removed > 0 {
-                        storage::app_log(
-                            "app",
-                            &format!("swept {removed} stale app-cache staging dirs"),
-                        );
-                    }
-                }
-                // Move any pre-plugin `Data\Private\*.key` secrets into the
-                // Keystore-backed store before they can be read again.
-                secrets::migrate_file_secrets();
-            }
             storage::app_log(
                 "app",
                 &format!("immersive-reader v{} starting", env!("CARGO_PKG_VERSION")),
             );
-            // P1-1: Job Objects kill podcast workers when the app exits, but
-            // their tasks stayed Running forever with no recovery path. At
-            // startup every still-active task whose worker is gone gets marked
-            // Interrupted (restartable); the live-worker id set comes from the
-            // worker registry so a just-started task is never clobbered.
-            // These run synchronously inside setup: a background thread races
-            // the webview's first invoke (a fast `import_markdown_folder` call
-            // could watch its `.incoming` staging get swept mid-import).
-            if let Ok(control) = control::ControlDb::open_current() {
-                let active_ids = podcast::active_podcast_task_ids().unwrap_or_default();
-                if let Err(error) = control.recover_interrupted_tasks(&active_ids) {
-                    eprintln!("interrupted podcast task recovery failed: {error}");
+            // Android cold start: `setup` completes before the webview can paint
+            // its first frame, so nothing here may block on filesystem walks or
+            // a database open. The only required Android startup work is the
+            // storage roots above plus this log line; residue sweeps move to a
+            // background thread. A late sweep is safe: SAF staging in the app
+            // cache cannot outlive the process that created it, so leftovers are
+            // always residue (the fixed delay keeps it off the cold path).
+            #[cfg(target_os = "android")]
+            std::thread::spawn(|| {
+                std::thread::sleep(ANDROID_DEFERRED_MAINTENANCE_DELAY);
+                let Ok(base) = storage::android_base_dirs() else {
+                    return;
+                };
+                // SAF staging cannot outlive the op that created it — the URI
+                // grant dies with process death, so `import-*`,
+                // `mobile-import-*` and `临时` leftovers are always residue.
+                let removed = temporary_content::sweep_app_cache_staging(&base.app_cache);
+                if removed > 0 {
+                    storage::app_log(
+                        "app",
+                        &format!("swept {removed} stale app-cache staging dirs"),
+                    );
                 }
-            }
-            // P2-19: sweep abandoned import staging and P2-11 discard
-            // markers left by a crash — before the UI can start new work.
-            if let Ok(locations) = storage::StorageLocations::current_with_library_settings() {
-                importer::sweep_staging_dirs(&locations.library_root);
-                // Orphaned `.incoming` staging and over-cap `.revisions`
-                // slots — residue a deleted journal can never reclaim.
-                publish::sweep_publish_residue(&locations.library_root);
-                // P-10-F1: a publish that crashed mid-commit left a book
-                // wedged until the user found the recovery UI. Advance every
-                // non-terminal journal to its converged state now — recovery
-                // is deterministic (journal phase decides the direction) and
-                // per-transaction tolerant so one bad journal cannot block
-                // the rest.
-                if let Ok(transactions) = publish::list_transactions(&locations.library_root) {
-                    for transaction in transactions {
-                        if matches!(
-                            transaction.phase,
-                            publish::PublishPhase::Committed | publish::PublishPhase::RolledBack
-                        ) {
-                            continue;
-                        }
-                        if let Err(error) = publish::recover_transaction(
-                            &locations.library_root,
-                            &transaction.transaction_id,
-                        ) {
-                            eprintln!(
-                                "startup publish recovery: {} failed: {error}",
-                                transaction.transaction_id
-                            );
-                        }
+            });
+            // Desktop-only startup recovery: control.db task recovery, import
+            // staging sweep, publish residue/transaction recovery and the
+            // publish-index reconcile. The acquisition engines never ship on
+            // Android, so none of it has work to do there — and the synchronous
+            // control.db open blocked the first frame on every cold start.
+            #[cfg(desktop)]
+            {
+                // P1-1: Job Objects kill podcast workers when the app exits, but
+                // their tasks stayed Running forever with no recovery path. At
+                // startup every still-active task whose worker is gone gets marked
+                // Interrupted (restartable); the live-worker id set comes from the
+                // worker registry so a just-started task is never clobbered.
+                // These run synchronously inside setup: a background thread races
+                // the webview's first invoke (a fast `import_markdown_folder` call
+                // could watch its `.incoming` staging get swept mid-import).
+                if let Ok(control) = control::ControlDb::open_current() {
+                    let active_ids = podcast::active_podcast_task_ids().unwrap_or_default();
+                    if let Err(error) = control.recover_interrupted_tasks(&active_ids) {
+                        eprintln!("interrupted podcast task recovery failed: {error}");
                     }
                 }
-                // Marker sweep + publish-index reconcile share one control
-                // handle — the marker sweep consults task liveness before
-                // deleting anything.
-                if let Ok(control) = control::ControlDb::open_current() {
-                    reconcile_discard_markers(&locations, &control);
-                    // P-11-F08: the control.db publish index is only a
-                    // shortlist — reconcile it against the journals on disk so
-                    // recovered/swept transactions stop resurfacing and stale
-                    // 'prepared' rows left by a crashed writer get their real
-                    // terminal phase.
-                    if let Err(error) =
-                        control.reconcile_publish_transaction_index(&locations.library_root)
-                    {
-                        eprintln!("publish index reconcile failed: {error}");
+                // P2-19: sweep abandoned import staging and P2-11 discard
+                // markers left by a crash — before the UI can start new work.
+                if let Ok(locations) = storage::StorageLocations::current_with_library_settings() {
+                    importer::sweep_staging_dirs(&locations.library_root);
+                    // Orphaned `.incoming` staging and over-cap `.revisions`
+                    // slots — residue a deleted journal can never reclaim.
+                    publish::sweep_publish_residue(&locations.library_root);
+                    // P-10-F1: a publish that crashed mid-commit left a book
+                    // wedged until the user found the recovery UI. Advance every
+                    // non-terminal journal to its converged state now — recovery
+                    // is deterministic (journal phase decides the direction) and
+                    // per-transaction tolerant so one bad journal cannot block
+                    // the rest.
+                    if let Ok(transactions) = publish::list_transactions(&locations.library_root) {
+                        for transaction in transactions {
+                            if matches!(
+                                transaction.phase,
+                                publish::PublishPhase::Committed
+                                    | publish::PublishPhase::RolledBack
+                            ) {
+                                continue;
+                            }
+                            if let Err(error) = publish::recover_transaction(
+                                &locations.library_root,
+                                &transaction.transaction_id,
+                            ) {
+                                eprintln!(
+                                    "startup publish recovery: {} failed: {error}",
+                                    transaction.transaction_id
+                                );
+                            }
+                        }
+                    }
+                    // Marker sweep + publish-index reconcile share one control
+                    // handle — the marker sweep consults task liveness before
+                    // deleting anything.
+                    if let Ok(control) = control::ControlDb::open_current() {
+                        reconcile_discard_markers(&locations, &control);
+                        // P-11-F08: the control.db publish index is only a
+                        // shortlist — reconcile it against the journals on disk so
+                        // recovered/swept transactions stop resurfacing and stale
+                        // 'prepared' rows left by a crashed writer get their real
+                        // terminal phase.
+                        if let Err(error) =
+                            control.reconcile_publish_transaction_index(&locations.library_root)
+                        {
+                            eprintln!("publish index reconcile failed: {error}");
+                        }
                     }
                 }
             }
@@ -4437,8 +4515,8 @@ mod recent_file_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        book_asset_root, initial_file_eval_script, initial_markdown_path, is_markdown_path,
-        reconcile_discard_markers,
+        book_asset_root, get_platform_capabilities, initial_file_eval_script,
+        initial_markdown_path, is_markdown_path, reconcile_discard_markers,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -4617,6 +4695,58 @@ mod tests {
     fn markdown_extension_check_is_case_insensitive() {
         assert!(is_markdown_path("C:\\docs\\README.MD"));
         assert!(is_markdown_path("/tmp/notes.MarkDown"));
+    }
+
+    #[test]
+    fn platform_capabilities_keep_legacy_flags_and_add_mobile_aware_ones() {
+        // The Android shell gates Zhihu/podcast/deepseek surfaces on these
+        // fields; the wire keeps the historic camelCase spellings and older
+        // frontends ignore the additions (normalizer falls back per field).
+        let caps = get_platform_capabilities();
+        let json = serde_json::to_value(&caps).expect("capabilities must serialize");
+        let object = json.as_object().expect("capabilities must be an object");
+        for key in [
+            "platform",
+            "readerSession",
+            "contentUriImport",
+            "epub",
+            "volumeKeyCapture",
+            "readingBundle",
+            "isMobile",
+            "taskAcquisition",
+            "directoryImport",
+            "secretStore",
+            "markdownEditing",
+            "supportedFormats",
+        ] {
+            assert!(object.contains_key(key), "missing capability field {key}");
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(caps.platform, "windows");
+            assert!(!caps.is_mobile);
+            assert!(caps.task_acquisition);
+            assert!(caps.directory_import);
+            assert!(caps.secret_store);
+            assert!(caps.markdown_editing);
+            assert_eq!(
+                caps.supported_formats,
+                ["md", "markdown", "txt", "epub", "zip"]
+            );
+        }
+        #[cfg(target_os = "android")]
+        {
+            assert_eq!(caps.platform, "android");
+            assert!(caps.is_mobile);
+            assert!(!caps.task_acquisition);
+            assert!(!caps.directory_import);
+            assert!(!caps.secret_store);
+            assert!(!caps.markdown_editing);
+            assert_eq!(caps.supported_formats, ["md", "markdown", "txt", "epub"]);
+            assert!(!caps.reader_session);
+            assert!(caps.content_uri_import);
+        }
     }
 
     #[test]

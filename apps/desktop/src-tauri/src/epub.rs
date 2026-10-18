@@ -2230,39 +2230,17 @@ pub struct ReadableChapter {
     pub next_chapter_id: Option<String>,
 }
 
-/// prev/next chapter ids from the book's manifest.
-fn chapter_neighbors(book_root: &Path, chapter_id: &str) -> (Option<String>, Option<String>) {
-    let bytes = match fs::read(crate::atomic_file::long_path(
-        &book_root.join("manifest.json"),
-    )) {
-        Ok(bytes) => bytes,
-        Err(_) => return (None, None),
-    };
-    let manifest: Manifest = match serde_json::from_slice(&bytes) {
-        Ok(manifest) => manifest,
-        Err(_) => return (None, None),
-    };
-    let Some(index) = manifest
-        .chapters
-        .iter()
-        .position(|chapter| chapter.id == chapter_id)
-    else {
-        return (None, None);
-    };
-    let prev = index
-        .checked_sub(1)
-        .and_then(|i| manifest.chapters.get(i))
-        .map(|chapter| chapter.id.clone());
-    let next = manifest
-        .chapters
-        .get(index + 1)
-        .map(|chapter| chapter.id.clone());
-    (prev, next)
-}
-
 /// Read + sanitize one chapter of an EPUB book.
-/// `chapter` must come from the book's own manifest.
-pub fn read_epub_chapter(book_root: &Path, chapter: &Chapter) -> Result<ReadableChapter, String> {
+/// `chapter` must come from the book's own manifest; `neighbors` are its
+/// prev/next chapter ids as derived from that same manifest. The caller holds
+/// the manifest already (`get_readable_chapter` avoids a second read+parse of
+/// `manifest.json` per page turn). Sanitization/decoding is identical either
+/// way; a chapter id missing from the manifest simply gets `None` neighbours.
+pub fn read_epub_chapter_with_neighbors(
+    book_root: &Path,
+    chapter: &Chapter,
+    (prev_chapter_id, next_chapter_id): (Option<String>, Option<String>),
+) -> Result<ReadableChapter, String> {
     if !is_safe_relative_path(&chapter.path) {
         return Err(format!("EPUB_UNSAFE_CHAPTER_PATH: {}", chapter.path));
     }
@@ -2281,7 +2259,6 @@ pub fn read_epub_chapter(book_root: &Path, chapter: &Chapter) -> Result<Readable
         .parent()
         .map(|parent| parent.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
-    let (prev_chapter_id, next_chapter_id) = chapter_neighbors(book_root, &chapter.id);
     Ok(ReadableChapter {
         format: "xhtml".to_string(),
         chapter_id: chapter.id.clone(),
@@ -2698,8 +2675,18 @@ mod tests {
         let epub = write_epub(&root, "book3.epub", &build_epub(&epub3_files()));
         let outcome = import_epub_file(&epub, &library, None).expect("import");
         let book_dir = library.join("手动/测试书");
-        let chapter = &outcome.manifest.chapters[0];
-        let readable = read_epub_chapter(&book_dir, chapter).expect("read");
+        let chapters = &outcome.manifest.chapters;
+        // Mirrors get_readable_chapter: neighbours come from the manifest the
+        // caller already holds, never from a second manifest.json read.
+        let neighbors_for = |index: usize| -> (Option<String>, Option<String>) {
+            (
+                index.checked_sub(1).map(|i| chapters[i].id.clone()),
+                chapters.get(index + 1).map(|chapter| chapter.id.clone()),
+            )
+        };
+        let chapter = &chapters[0];
+        let readable =
+            read_epub_chapter_with_neighbors(&book_dir, chapter, neighbors_for(0)).expect("read");
         assert_eq!(readable.format, "xhtml");
         assert_eq!(readable.resource_dir, "content/OEBPS");
         assert_eq!(readable.prev_chapter_id, None);
@@ -2710,9 +2697,40 @@ mod tests {
         assert!(text.contains("正文 第一章"));
         assert!(!text.contains('<'), "{text}");
 
-        let second = read_epub_chapter(&book_dir, &outcome.manifest.chapters[1]).expect("read");
+        let second = read_epub_chapter_with_neighbors(&book_dir, &chapters[1], neighbors_for(1))
+            .expect("read");
         assert_eq!(second.prev_chapter_id.as_deref(), Some("epub-ch-0"));
         assert_eq!(second.next_chapter_id, None);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn read_chapter_with_precomputed_neighbors_uses_the_caller_values() {
+        // `get_readable_chapter` already holds the manifest — it derives the
+        // neighbours and passes them so the reader path does not re-read and
+        // re-parse manifest.json per page turn. The override must be honored
+        // verbatim, and content decoding/sanitizing must stay identical.
+        let root = temp_root("neighbors");
+        let library = root.join("library");
+        let epub = write_epub(&root, "book-neighbors.epub", &build_epub(&epub3_files()));
+        let outcome = import_epub_file(&epub, &library, None).expect("import");
+        let book_dir = library.join("手动/测试书");
+        let chapter = &outcome.manifest.chapters[0];
+
+        let readable = read_epub_chapter_with_neighbors(
+            &book_dir,
+            chapter,
+            (
+                Some("custom-prev".to_string()),
+                Some("custom-next".to_string()),
+            ),
+        )
+        .expect("read");
+        assert_eq!(readable.prev_chapter_id.as_deref(), Some("custom-prev"));
+        assert_eq!(readable.next_chapter_id.as_deref(), Some("custom-next"));
+        assert_eq!(readable.format, "xhtml");
+        assert_eq!(readable.resource_dir, "content/OEBPS");
+        assert!(readable.content.contains("正文 第一章"));
         fs::remove_dir_all(root).expect("cleanup");
     }
 

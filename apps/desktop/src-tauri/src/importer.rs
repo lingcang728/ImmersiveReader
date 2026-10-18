@@ -246,7 +246,10 @@ fn title_from_path(relative: &str) -> String {
 
 /// P2-19: remove leftover `手动/.incoming` staging directories. Runs at
 /// startup — before any import can be in flight — so the only residue it can
-/// delete is from a previous crash.
+/// delete is from a previous crash. Startup is desktop-only now: Android
+/// never performs directory imports (SAF staging lives in the app cache), so
+/// the mobile build has no caller and keeps the function only for tests.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub fn sweep_staging_dirs(library_root: &Path) {
     let staging_root =
         crate::atomic_file::long_path(&library_root.join("手动").join(IMPORT_STAGING_DIR));

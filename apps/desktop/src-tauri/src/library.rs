@@ -403,12 +403,19 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
     collect_manifests(root, 0, &mut paths, &mut issues, false);
     paths.sort();
     let mut books = Vec::new();
-    let mut live_books: Vec<(PathBuf, Manifest)> = Vec::new();
+    // (book root, book id, source) — the two strings the reader-index
+    // reconcile needs; keeping the whole Manifest here would deep-clone every
+    // book's chapter list on each shelf scan.
+    let mut live_books: Vec<(PathBuf, String, String)> = Vec::new();
     for path in paths {
         match load_book_at(&path) {
             Ok((manifest, progress)) => {
                 if let Some(book_root) = path.parent() {
-                    live_books.push((book_root.to_path_buf(), manifest.clone()));
+                    live_books.push((
+                        book_root.to_path_buf(),
+                        manifest.book_id.clone(),
+                        manifest.source.clone(),
+                    ));
                 }
                 let title = manifest
                     .chapters
@@ -456,6 +463,24 @@ fn index_one_book(
     book_root: &Path,
     manifest: &Manifest,
 ) {
+    index_one_book_fields(
+        db,
+        normalized_root,
+        book_root,
+        &manifest.book_id,
+        &manifest.source,
+    );
+}
+
+/// Field-level variant for the shelf scan, which keeps only the id/source
+/// strings instead of cloning every book's chapter list just to index it.
+fn index_one_book_fields(
+    db: &crate::reader_db::ReaderDb,
+    normalized_root: &Path,
+    book_root: &Path,
+    book_id: &str,
+    source: &str,
+) {
     let Some(dir_rel) = book_root
         .strip_prefix(normalized_root)
         .ok()
@@ -469,20 +494,24 @@ fn index_one_book(
     } else {
         "markdown"
     };
-    let _ = db.upsert_book(&manifest.book_id, &dir_rel, &manifest.source, format);
+    let _ = db.upsert_book(book_id, &dir_rel, source, format);
 }
 
 /// C5: keep reader.db's book index honest after every scan — upsert the
 /// live books' dir_rel mappings and drop rows pointing at dirs that
 /// vanished. Entirely best-effort: an unavailable or corrupt reader.db must
 /// never fail a shelf scan.
-fn reconcile_reader_index(normalized_root: &Path, live: &[(PathBuf, Manifest)]) {
+///
+/// `live` carries `(book root, book id, source)` — deliberately not the full
+/// `Manifest`: the scan used to clone every book's object (chapter list
+/// included) only to read these two strings here.
+fn reconcile_reader_index(normalized_root: &Path, live: &[(PathBuf, String, String)]) {
     let Ok(db) = crate::reader_db::ReaderDb::open_current() else {
         return;
     };
     let live_ids: std::collections::HashSet<&str> = live
         .iter()
-        .map(|(_, manifest)| manifest.book_id.as_str())
+        .map(|(_, book_id, _)| book_id.as_str())
         .collect();
     if let Ok(indexed) = db.all_books() {
         for (book_id, dir_rel, _, _) in indexed {
@@ -492,8 +521,8 @@ fn reconcile_reader_index(normalized_root: &Path, live: &[(PathBuf, Manifest)]) 
             }
         }
     }
-    for (book_root, manifest) in live {
-        index_one_book(&db, normalized_root, book_root, manifest);
+    for (book_root, book_id, source) in live {
+        index_one_book_fields(&db, normalized_root, book_root, book_id, source);
     }
 }
 
@@ -572,10 +601,28 @@ fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingPr
 }
 
 pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
+    open_book_with_root(root, book_id).map(|(detail, _)| detail)
+}
+
+/// Load one book's detail **and** its resolved root from a single
+/// `find_book` pass. The IPC `open_book` command needs both (the detail plus
+/// the book root for the recursive asset-scope grant) and previously called
+/// `book_context` and `open_book` back to back — reading and parsing
+/// `manifest.json` + `.reading.json` twice and opening reader.db twice per
+/// book open. Costs the same as `open_book`; additionally returns the root.
+pub(crate) fn open_book_with_root(
+    root: &Path,
+    book_id: &str,
+) -> Result<(BookDetail, PathBuf), String> {
     let (book_root, manifest, progress) = find_book(root, book_id)?;
+    let detail = book_detail_from(&book_root, manifest, progress);
+    Ok((detail, book_root))
+}
+
+fn book_detail_from(book_root: &Path, manifest: Manifest, progress: ReadingProgress) -> BookDetail {
     // P3-17: provenance is advisory metadata — a corrupt or mismatched
     // provenance.json degrades to `None` instead of killing the open.
-    let provenance = match read_provenance(&book_root, &manifest.book_id) {
+    let provenance = match read_provenance(book_root, &manifest.book_id) {
         Ok(provenance) => provenance,
         Err(error) => {
             eprintln!(
@@ -587,8 +634,8 @@ pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
     };
     // `publication.json` presence decides the branch — Markdown books never
     // touch the epub parser at all.
-    let publication = if crate::epub::publication_path(&book_root).is_file() {
-        match crate::epub::load_publication(&book_root) {
+    let publication = if crate::epub::publication_path(book_root).is_file() {
+        match crate::epub::load_publication(book_root) {
             Ok(publication) => publication,
             Err(error) => {
                 crate::storage::app_log(
@@ -604,7 +651,7 @@ pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
     } else {
         None
     };
-    Ok(BookDetail {
+    BookDetail {
         manifest,
         progress,
         provenance,
@@ -616,7 +663,7 @@ pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
             .to_string_lossy()
             .trim_start_matches("\\\\?\\")
             .to_string(),
-    })
+    }
 }
 
 pub fn find_book_by_source_id(root: &Path, source_id: &str) -> Result<Option<Manifest>, String> {
@@ -929,6 +976,28 @@ mod tests {
         let merged = crate::progress::load_progress(&book, &manifest).expect("load stale merge");
         assert_eq!(merged.current, "answer:fixture-2");
         assert_eq!(merged.position, 0.25);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_book_with_root_returns_detail_and_root_in_one_pass() {
+        // The IPC `open_book` used `book_context` + `open_book` back to back,
+        // which read/parsed manifest.json and .reading.json twice and opened
+        // reader.db twice. The combined helper must return the same detail
+        // plus the resolved book root from a single find_book pass.
+        let root = temp_library("open-with-root");
+        write_fixture_book(&root, "manual:open-with-root", "一次打开");
+        let (detail, book_root) =
+            super::open_book_with_root(&root, "manual:open-with-root").expect("open");
+        let plain = super::open_book(&root, "manual:open-with-root").expect("open plain");
+
+        assert_eq!(detail.manifest.book_id, plain.manifest.book_id);
+        assert_eq!(detail.book_dir, plain.book_dir);
+        assert_eq!(detail.progress.current, plain.progress.current);
+        assert_eq!(detail.progress.position, plain.progress.position);
+        assert_eq!(detail.provenance.is_some(), plain.provenance.is_some());
+        assert!(book_root.ends_with(Path::new("手动").join("一次打开")));
+        assert!(book_root.join("manifest.json").is_file());
         let _ = fs::remove_dir_all(&root);
     }
 }
