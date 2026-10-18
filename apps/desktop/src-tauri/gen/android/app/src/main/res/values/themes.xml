@@ -1,6 +1,20 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
+    <!-- App theme: what the activity switches to once the splash exits. The
+         window background carries the paper palette so the frame between
+         "splash gone" and "WebView first paint" is never white. -->
     <style name="Theme.immersive_reader" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <item name="android:windowBackground">@color/ir_window_background</item>
+        <item name="android:colorBackground">@color/ir_window_background</item>
+    </style>
+
+    <!-- Launcher-activity starting theme (androidx.core:core-splashscreen).
+         Android 12+ uses the platform splash; API 26-30 gets the compat
+         splash view. `installSplashScreen()` in MainActivity.onCreate swaps
+         this theme for Theme.immersive_reader before the content view is
+         installed, so TauriActivity / WryActivity keep their normal theme. -->
+    <style name="Theme.immersive_reader.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/ir_splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.immersive_reader</item>
     </style>
 </resources>

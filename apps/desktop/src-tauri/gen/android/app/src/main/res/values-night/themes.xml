@@ -1,6 +1,16 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
+    <!-- Night counterparts of values/themes.xml. The colour resources are
+         overridden in values-night/colors.xml (#1e1e1c), but the splash style
+         is repeated here on purpose so the night configuration keeps the same
+         Theme.SplashScreen wiring and postSplashScreenTheme target. -->
     <style name="Theme.immersive_reader" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <item name="android:windowBackground">@color/ir_window_background</item>
+        <item name="android:colorBackground">@color/ir_window_background</item>
+    </style>
+
+    <style name="Theme.immersive_reader.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/ir_splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.immersive_reader</item>
     </style>
 </resources>

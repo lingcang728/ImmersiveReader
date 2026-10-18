@@ -7,4 +7,11 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- 素纸浅色（frontend bg token: #faf8f5）. Shared by the splash
+         background, the window background and the WebView background so the
+         cold-start path never flashes white. values-night/colors.xml holds
+         the dark counterparts (墨石/素纸深色 #1e1e1c). -->
+    <color name="ir_splash_background">#FAF8F5</color>
+    <color name="ir_window_background">#FAF8F5</color>
 </resources>

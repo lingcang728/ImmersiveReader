@@ -72,6 +72,17 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
+            // Drop resources that R8 proves unreachable (mipmap densities,
+            // unused XML, etc.). Requires minifyEnabled = true above.
+            isShrinkResources = true
+            // Native debug symbols for the Rust `immersivereading` .so files.
+            // Applies to App-Bundle style packaging (Play symbol upload); for
+            // the standalone APK the NDK strip level still wins and the APK
+            // stays small. "FULL" keeps the symbols usable when an AAB is
+            // eventually published.
+            ndk {
+                debugSymbolLevel = "FULL"
+            }
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
@@ -100,6 +111,11 @@ rust {
 }
 
 dependencies {
+    // Cold-start splash: Theme.SplashScreen + installSplashScreen(). 1.0.1 is
+    // the latest stable of the line (Java-only, kotlin-stdlib 1.6.21) so it
+    // stays compatible with the project's Kotlin 1.9.25 toolchain; 1.2.x
+    // pulls kotlin-stdlib 2.0.21 into the app classpath.
+    implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")

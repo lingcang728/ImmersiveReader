@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 素纸深色 / 墨石深色（frontend bg token: #1e1e1c）: the splash,
+         window and WebView backgrounds all read these night resources, so a
+         dark-mode cold start stays dark from the very first frame. -->
+    <color name="ir_splash_background">#1E1E1C</color>
+    <color name="ir_window_background">#1E1E1C</color>
+</resources>

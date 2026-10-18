@@ -62,27 +62,46 @@ function Get-JavaMajorVersion([string]$javaExe) {
 
 if ($env:JAVA_HOME -and (Test-Path -LiteralPath $env:JAVA_HOME)) {
     Write-Host "[OK] JAVA_HOME: $env:JAVA_HOME" -ForegroundColor Green
-    if ($java) {
-        $majorVersion = Get-JavaMajorVersion $java.Source
-        if ($majorVersion -and $majorVersion -gt 21) {
-            Write-Warning "[WARN] 当前 Java 大版本为 JDK $majorVersion。Android Gradle 插件 (AGP 8.x) 最佳兼容为 JDK 17 或 21。"
-            Write-Warning "若 Gradle 报错 'Unsupported class file major version'，建议临时设置 `$env:JAVA_HOME 指向 JDK 17/21。"
-        }
-    }
 } elseif ($java) {
     Write-Host "[OK] java: $($java.Source)" -ForegroundColor Green
 }
 
-# 2.5 AGP 8.x 需要 JDK 17/21：JAVA_HOME 缺失或指向更高版本时，自动切换到 G:\build_cache 下的 JDK 21
+# 2.5 AGP 8.x 只支持 JDK 17/21。JAVA_HOME 缺失、过旧（<17）或过新（例如机器
+# PATH 上的 JDK 25）时，优先切到 G:\build_cache\jdk-17.0.20.1+1，其次找
+# jdk-17*，最后才回退 jdk-21*，避免落到不受支持的 JDK 25 上。
+function Test-SupportedJavaMajor($major) {
+    return ($null -ne $major) -and ($major -ge 17) -and ($major -le 21)
+}
+
 $javaHomeExe = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin\java.exe' } else { $null }
 $javaHomeMajor = Get-JavaMajorVersion $javaHomeExe
-if (-not $env:JAVA_HOME -or -not $javaHomeMajor -or $javaHomeMajor -gt 21) {
-    $jdk21 = Get-ChildItem -LiteralPath 'G:\build_cache' -Directory -Filter 'jdk-21*' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
-    if ($jdk21 -and (Test-Path -LiteralPath (Join-Path $jdk21.FullName 'bin\java.exe'))) {
-        Write-Host "自动切换 JAVA_HOME -> $($jdk21.FullName)（AGP 兼容版本）" -ForegroundColor Cyan
-        $env:JAVA_HOME = $jdk21.FullName
-    } elseif ($javaHomeMajor -gt 21) {
-        Write-Warning "[WARN] JAVA_HOME 指向 JDK $javaHomeMajor，且未在 G:\build_cache 找到 jdk-21*，Android 构建可能失败。"
+if (-not (Test-SupportedJavaMajor $javaHomeMajor)) {
+    $preferredJdk = 'G:\build_cache\jdk-17.0.20.1+1'
+    $jdkCandidates = @()
+    if (Test-Path -LiteralPath (Join-Path $preferredJdk 'bin\java.exe')) {
+        $jdkCandidates += (Get-Item -LiteralPath $preferredJdk)
+    }
+    $jdkCandidates += @(Get-ChildItem -LiteralPath 'G:\build_cache' -Directory -Filter 'jdk-17*' -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+    $jdkCandidates += @(Get-ChildItem -LiteralPath 'G:\build_cache' -Directory -Filter 'jdk-21*' -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+
+    $switched = $false
+    foreach ($candidate in $jdkCandidates) {
+        $candidateMajor = Get-JavaMajorVersion (Join-Path $candidate.FullName 'bin\java.exe')
+        if (Test-SupportedJavaMajor $candidateMajor) {
+            Write-Host "自动切换 JAVA_HOME -> $($candidate.FullName)（AGP 兼容 JDK $candidateMajor）" -ForegroundColor Cyan
+            $env:JAVA_HOME = $candidate.FullName
+            $javaHomeMajor = $candidateMajor
+            $switched = $true
+            break
+        }
+    }
+
+    if (-not $switched) {
+        if ($null -ne $javaHomeMajor) {
+            Write-Warning "[WARN] JAVA_HOME 指向 JDK $javaHomeMajor，且未在 G:\build_cache 找到可用的 JDK 17/21，Android 构建可能失败。"
+        } else {
+            Write-Warning "[WARN] 未检测到可用的 JDK 17/21（AGP 8.x 要求），请设置 JAVA_HOME。"
+        }
     }
 }
 

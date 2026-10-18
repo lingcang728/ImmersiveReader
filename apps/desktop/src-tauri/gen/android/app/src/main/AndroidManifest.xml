@@ -2,9 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- AndroidTV support -->
-    <uses-feature android:name="android.software.leanback" android:required="false" />
-
     <application
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -12,21 +9,31 @@
         android:theme="@style/Theme.immersive_reader"
         android:usesCleartextTraffic="${usesCleartextTraffic}"
         android:fullBackupContent="@xml/backup_rules"
-        android:dataExtractionRules="@xml/data_extraction_rules">
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:hardwareAccelerated="true"
+        android:supportsRtl="true">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:theme="@style/Theme.immersive_reader.Splash"
+            android:hardwareAccelerated="true"
+            android:resizeableActivity="true"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-                <!-- AndroidTV support -->
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
 
-            <!-- Open-with for typed content:// and file:// documents. -->
+            <!-- Open-with for typed content:// and file:// documents. ZIP stays
+                 because 文集 (collection) imports are a real feature path:
+                 the frontend drains take_pending_open_uris and the Rust
+                 import pipeline expands .zip/.cbz. application/octet-stream
+                 was dropped: it is a catch-all binary match that made the app
+                 appear for arbitrary files, while markdown/txt/epub keep their
+                 explicit MIME types plus the extension filters below. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -35,12 +42,10 @@
                 <data android:scheme="content" android:mimeType="text/plain" />
                 <data android:scheme="content" android:mimeType="application/epub+zip" />
                 <data android:scheme="content" android:mimeType="application/zip" />
-                <data android:scheme="content" android:mimeType="application/octet-stream" />
                 <data android:scheme="file" android:mimeType="text/markdown" />
                 <data android:scheme="file" android:mimeType="text/plain" />
                 <data android:scheme="file" android:mimeType="application/epub+zip" />
                 <data android:scheme="file" android:mimeType="application/zip" />
-                <data android:scheme="file" android:mimeType="application/octet-stream" />
             </intent-filter>
 
             <!-- Open-with by extension for file managers that send a type.
