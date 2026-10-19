@@ -386,23 +386,21 @@ impl JobObject {
 mod tests {
     use super::{resume_process, suspend_process, terminate_process, JobObject};
     use std::os::windows::io::{AsRawHandle, BorrowedHandle};
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use std::thread;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::HANDLE;
 
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
     #[test]
     fn closing_job_terminates_assigned_process() {
-        let mut child = Command::new("cmd.exe")
-            .args(["/C", "ping -t 127.0.0.1 >NUL"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .expect("test child must start");
-        let job = JobObject::kill_on_close().expect("job object must be created");
-        job.assign(&child).expect("child must join job");
+        let mut command = Command::new("ping.exe");
+        command
+            .args(["-t", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let (mut child, job) = JobObject::spawn_suspended(&mut command)
+            .expect("test child must join job before running");
 
         drop(job);
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -435,11 +433,16 @@ mod tests {
     fn process_actions_verify_handle_pid_identity() {
         // P1-3: suspend/resume/terminate must refuse a handle↔PID mismatch —
         // the pinned handle proves the target, the PID alone never can.
-        let mut child = Command::new("cmd.exe")
-            .args(["/C", "ping -t 127.0.0.1 >NUL"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .expect("test child must start");
+        // A shell spawning ping would orphan its descendant when only the
+        // pinned shell handle is terminated, retaining Cargo's stderr pipe.
+        let mut command = Command::new("ping.exe");
+        command
+            .args(["-t", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let (mut child, _job) = JobObject::spawn_suspended(&mut command)
+            .expect("test child must be owned even if an assertion fails");
         // SAFETY: child is live; borrow ends with try_clone_to_owned.
         let borrowed = unsafe { BorrowedHandle::borrow_raw(child.as_raw_handle()) };
         let process = borrowed
