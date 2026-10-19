@@ -122,6 +122,7 @@
     }
     if (command === 'get_publish_recovery_status') return [];
     if (command === 'get_migration_runs') return [];
+    if (command === 'list_state_backups') return [];
     if (command === 'plugin:event|listen') return nextCallback++;
     return null;
   };

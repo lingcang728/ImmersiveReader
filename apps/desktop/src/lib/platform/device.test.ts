@@ -52,4 +52,18 @@ describe('device and mobile platform detection', () => {
 		expect(touchSmall.isMobile).toBe(true);
 		expect(touchSmall.isTouch).toBe(true);
 	});
+
+	it('keeps narrow touchscreen desktop windows on their desktop shell', () => {
+		for (const ua of ['Windows NT 10.0; Win64; x64', 'X11; Linux x86_64']) {
+			const desktop = detectDevice(ua, 10, 600, 400, 1.5);
+			expect(desktop.isTouch).toBe(true);
+			expect(desktop.isMobile).toBe(false);
+		}
+	});
+
+	it('still recognizes an iPad using a desktop Macintosh user agent', () => {
+		const ipad = detectDevice('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15', 5, 1024, 768, 2);
+		expect(ipad.isiOS).toBe(true);
+		expect(ipad.isMobile).toBe(true);
+	});
 });

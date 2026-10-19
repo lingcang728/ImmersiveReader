@@ -18,6 +18,8 @@
 - Windows QA 运行另设 WebView 配置和单实例标识；隐藏 QA 窗口只允许在有效 QA 数据通道下启用。安装脚本对仍在运行的窗口检查桌面，无法确认属于 coding 时停止。
 - 安装版额外发现并修复冷启动文件关联丢失：旧方案在 setup 内向尚未导航的 WebView 注入路径，可能落在空白文档后丢失。改为创建 WebView 前入后端队列，冷启动、第二实例和前台恢复统一排队消费；桌面路径直接使用自动入库流程，不调用 Android URI 暂存命令。正在消费时收到新通知会再排空一次。隐藏 QA 的第二实例也不显示窗口。
 - 后续实际 Markdown 打开揭示第二个导入故障：用户选中文件先进入 EFS 暂存目录，再由 Windows `CopyFile` 复制到书库时返回 `ERROR_ENCRYPTION_FAILED`（6000）。同一 90 字节合成文件以原生 CopyFile 两跳复现，读取后写入目标则成功。比较了 CopyFileEx 允许未加密目标、手动解密、改变暂存位置、按内容流复制四种方案；选择最后一种，让目标继承其所在目录的加密策略，不更改用户目录属性。Windows 同步复制不再继承源只读属性，并在截断前通过打开的文件句柄识别同文件/硬链接，避免覆盖源文件。所有章节失败时会保留具体原因，避免只报“没有可读文件”。依据：[Microsoft EFS 复制行为](https://learn.microsoft.com/en-us/windows/win32/fileio/handling-encrypted-files-and-directories)。
+- 桌面窄窗复查发现双重误判：本机 Windows Chrome 报告 10 个触点，600 px 宽时触摸启发式隐藏了窗口栏；即使纠正平台判定，旧的 768 px CSS 规则仍强制隐藏按钮。明确的桌面系统保持桌面外壳，移除按宽度隐藏窗口按钮的规则，iPad 桌面 UA 和 Android 仍走移动端。已增加 Windows/Linux 触摸窄窗与 iPad 单元回归，继续用实际触点环境验证 600×400 布局。比较了单用触摸、指针媒体查询、原生能力及桌面系统排除四种方式，选择最小的桌面排除修复；[maxTouchPoints](https://developer.mozilla.org/en-US/docs/Web/API/Navigator/maxTouchPoints) 表示硬件触点能力，不能单独作为手机判据。
+- 桌面设置对话框增加固定定位、四边约束和自动外边距，修复全局样式清除默认外边距后贴在左上角的问题。更新旧版书架 QA 的按钮名、角色及备份数组模拟，避免把模拟接口的 `null.length` 异常误判为对话框故障。
 
 ## 自动化证据
 
@@ -25,8 +27,9 @@
 
 | 检查 | 结果及证据 |
 | --- | --- |
-| `scripts/verify.ps1` | EFS 复制补修后的 `verify-copy-final.log` 到达 `all checks passed`，完整命令退出码 0，无须清理进程解锁；前端 268、Rust 223、脚本 14、契约 60 fixtures；Svelte 0 errors / 0 warnings，Rust check / clippy / fmt 通过。移除播客专属运行时后 1315 项校验通过。报告模式的依赖审计项见下文，不能视为严格审计通过。 |
+| `scripts/verify.ps1` | 触摸窄窗补修后的 `verify-touch-final.log` 到达 `all checks passed`，完整命令退出码 0，无须清理进程解锁；前端 270、Rust 223、脚本 14、契约 60 fixtures；Svelte 0 errors / 0 warnings，Rust check / clippy / fmt 通过。移除播客专属运行时后 1315 项校验通过。报告模式的依赖审计项见下文，不能视为严格审计通过。 |
 | 4 种手机宽度 | 359/360/390/412 CSS px；最终 `layout-final.log` 94 通过、0 失败、0 跳过，48 张截图；专注截图关闭设置面板并实际推进后采集。 |
+| 桌面布局及键盘 | 最终 `bookshelf-final.log` / `artifacts/qa/bookshelf-browser-report.json` 正常退出 0；600×400、900×700、1280×800、1366×768、1440×900、1920×1080，100% / 150% 字号、深色、四种书架状态、设置/详情安全区、普通及专注键盘跨章验证通过，11 张截图、无页面异常。实际浏览器报告 10 个触点，没有通过伪造无触摸环境绕过窄窗回归。 |
 | 阅读持久化与样式隔离 | `reading-floating-csp.log` 8 项通过：832 px 位置重启恢复到 812 px、字号变化保留句内锚点、书签持久化、退出等保存、严格 nonce CSP 下 head 样式生效且不影响界面、130% 长句句内连续分页和反向分页、无未处理错误。最终 APK 另行复验。 |
 | 重复合并中断恢复 | `duplicate-recovery.log` 2 项通过，覆盖 publication 映射顺序不同、部分书签已合并后重试、保留最新进度与书签。 |
 | 验证脚本卡住的根因 | `job_object` 的旧测试终止 cmd 后留下 ping 后代，继承日志管道，使原生命令已退出但外层仍等待 EOF。只清理了本轮已核实 PID、父 PID、命令及创建时间的夹具进程。改为 Job 托管的单进程夹具并关闭标准流。比较过关闭输出管道、轮询进程退出、托管整个进程树、移除外层 shell 四种方案；选择同时消除后代泄漏和管道占用的方案。依据：[dotnet/runtime 29232](https://github.com/dotnet/runtime/issues/29232)、[51277](https://github.com/dotnet/runtime/issues/51277)。 |
@@ -43,6 +46,9 @@
 - 现有 Android Release 证书 SHA-256：`fa0f4cf8bd8ec5b30d5440a10f46fb52a19421be2f6d431ca045d3822d7170ed`。
 - 最终 QA APK（arm64-v8a、1.3.1-qa）：SHA-256 `69120E663CE3949FA98F6850D20F9556752D6067BBC87D35DF4451F0F965FFAE`，同证书签名；`adb install -r` 成功，旧 QA 合成书目保留。
 - Windows 安装包、生产 EXE 时间戳和 SHA-256、Android 最终 APK 哈希、Release Lint 及安装结果：待终验填入。
+- Android 正式 APK：`output/mobile/ImmersiveReader_1.3.1_android-arm64-release.apk`，1.3.1 / versionCode 1003001 / arm64-v8a，SHA-256 `66F38278EA12C6E869FB6FE48D45D4AEC905B482BB9D42099A9433C8E44DF075`。签名验证、16 KB ZIP 对齐验证通过；构建源码为 `d1da4a4`，后续桌面触摸判定只修复桌面系统，Android 判定不变。
+- 实际交付变体 `lintUniversalRelease` 通过，0 errors / 26 warnings / 1 hint。复用刚构建的 arm64 原生库，Lint 时不再启动 Cargo。告警主要为依赖更新、图标密度、无用资源与代码风格；`ScriptHandler.remove` 的能力检查由非空句柄的创建前置条件保证，仍被 Lint 提示 `RequiresFeature`，未将它宣称为零告警。
+- ColorOS 设备端确认后，正式包安装返回 `Success`；安装/更新时间为 `2026-10-19 18:52:47`，实际版本 1.3.1 / 1003001。冷启动主活动正常（207 ms，不能替代正文就绪时间），运行进程日志未发现致命异常，`android-device/production-shelf.png` 显示独立空书库，未向生产包写入合成夹具。QA 包及其数据保留。因原正式包先前已不存在，此结果是新装验证，不声称保留了旧 1.3.0 的数据。
 
 ## 尚未关闭的验收
 

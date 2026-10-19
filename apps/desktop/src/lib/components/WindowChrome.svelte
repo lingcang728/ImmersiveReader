@@ -343,17 +343,6 @@
 		}
 	}
 
-	@media (max-width: 768px) {
-		.window-chrome {
-			display: none !important;
-			height: 0 !important;
-			min-height: 0 !important;
-		}
-		.chrome-controls {
-			display: none !important;
-		}
-	}
-
 	:global(.is-mobile) .window-chrome {
 		display: none !important;
 		height: 0 !important;

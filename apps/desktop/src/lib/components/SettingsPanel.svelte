@@ -766,6 +766,9 @@
 
 <style>
 	.settings-dialog {
+		position: fixed;
+		inset: 0;
+		margin: auto;
 		padding: 0;
 		border: 0;
 		background: transparent;

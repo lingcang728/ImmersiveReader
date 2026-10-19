@@ -1,6 +1,7 @@
 # QA harness (manual): serves the built frontend with a mocked Tauri backend
 # (bookshelf_mock.js) and screenshots/asserts bookshelf states via Playwright.
 # Not wired into scripts\verify.ps1 — run by hand during release QA.
+import argparse
 import json
 import os
 import shutil
@@ -68,16 +69,20 @@ def wait_for_server(process: subprocess.Popen[str]) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--skip-build', action='store_true', help='Reuse the existing frontend build after QA-only edits')
+    args = parser.parse_args()
     QA_DIR.mkdir(parents=True, exist_ok=True)
     creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    subprocess.run(
-        ["npm.cmd", "run", "build"],
-        cwd=DESKTOP,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=creation_flags,
-    )
+    if not args.skip_build:
+        subprocess.run(
+            ["npm.cmd", "run", "build"],
+            cwd=DESKTOP,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creation_flags,
+        )
     node = shutil.which("node") or "node"
     vite = DESKTOP / "node_modules" / "vite" / "bin" / "vite.js"
     process = subprocess.Popen(
@@ -101,10 +106,10 @@ def main() -> int:
             page.wait_for_selector(".book-card", timeout=10000)
             assert page.locator(".book-card").count() == 3
             assert page.get_by_role("button", name="打开", exact=True).count() == 1
-            assert page.get_by_role("button", name="精读").count() == 3
+            assert page.get_by_role("button", name="阅读", exact=True).count() == 3
             assert page.get_by_role("button", name="连读 ↗").count() == 3
             page.get_by_role("button", name="打开", exact=True).click()
-            assert page.get_by_role("button", name="归档知乎").count() >= 1
+            assert page.get_by_role("menuitem", name="归档知乎").count() == 1
             assert page.get_by_role("button", name="转写播客").count() == 0
             assert page.get_by_role("button", name="临时打开").count() == 0
             page.keyboard.press("Escape")
@@ -124,7 +129,7 @@ def main() -> int:
             assert page.locator(".chapter-list li").count() <= 40
             page.locator(".tech-details summary").click()
             assert page.locator(".tech-details[open]").count() == 1
-            assert "版本" in page.locator(".tech-details").inner_text()
+            assert page.locator('.provenance-grid strong').all_inner_texts() == ['2', 'zhihu-test-engine']
             assert page.locator(".provenance-grid").count() == 1
             detail_target = QA_DIR / "bookshelf-detail-900x700.png"
             page.screenshot(path=str(detail_target), full_page=False)
@@ -138,6 +143,7 @@ def main() -> int:
                 assert metrics["sw"] == metrics["cw"], f"horizontal overflow at {label}: {metrics}"
 
             def assert_bookshelf_below_chrome(label: str) -> None:
+                assert page.locator('.window-chrome').count(), page.evaluate("() => ({ua:navigator.userAgent,touch:navigator.maxTouchPoints,width:innerWidth,body:document.body.innerText.slice(0,300)})")
                 chrome = page.locator(".window-chrome").bounding_box()
                 shelf = page.locator(".bookshelf").bounding_box()
                 header = page.locator(".bs-header").bounding_box()
@@ -225,6 +231,7 @@ def main() -> int:
             page.wait_for_selector(".advanced-block")
             assert page.locator(".advanced-block").count() == 1
             page.get_by_role("button", name="关闭设置").click()
+            assert browser_errors == [], browser_errors
 
             # Detail dialog safe area + chapter cap already asserted above.
             page.get_by_role("button", name="详情").first.click()
@@ -251,7 +258,7 @@ def main() -> int:
                 "() => getComputedStyle(document.documentElement).getPropertyValue('--font-scale').trim()"
             )
             assert restored_scale == "1.5"
-            reader_page.get_by_role("button", name="精读").first.click()
+            reader_page.get_by_role("button", name="阅读", exact=True).first.click()
             reader_page.wait_for_selector(".article")
             initial_scroll = reader_page.locator(".content").evaluate("el => el.scrollTop")
             reader_page.keyboard.press("ArrowDown")
@@ -501,7 +508,7 @@ def main() -> int:
     report = {
         "bookCount": 3,
         "chapterCount": 1469,
-        "viewports": ["900x700", "1280x800", "1440x900"],
+        "viewports": ["600x400", "900x700", "1280x800", "1366x768", "1440x900", "1920x1080"],
         "states": ["ready", "loading", "empty", "unwritable-with-corrupt-book"],
         "homepageLayout": [
             "bookshelf starts below window chrome at all tested viewports",

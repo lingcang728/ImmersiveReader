@@ -25,7 +25,10 @@ export function detectDevice(
 	const isAndroid = /android/.test(ua);
 	const isiOS = /iphone|ipad|ipod/.test(ua) || (maxTouchPoints > 1 && /macintosh/.test(ua));
 	const isTouch = maxTouchPoints > 0;
-	const isMobile = isAndroid || isiOS || /mobile/.test(ua) || (isTouch && screenWidth <= 768);
+	// Touchscreen Windows laptops still need their desktop window controls
+	// when resized. iPad's desktop UA is handled by isiOS above.
+	const desktopPlatform = /windows nt|x11/.test(ua) || (/macintosh/.test(ua) && !isiOS);
+	const isMobile = isAndroid || isiOS || /mobile/.test(ua) || (!desktopPlatform && isTouch && screenWidth <= 768);
 
 	// OPPO Find X9 profile: 6.59" AMOLED, 2760x1256 (aspect ratio ~20:9 / 19.78:9, DPR ~3.0-3.5)
 	const aspect = screenHeight > 0 && screenWidth > 0 ? Math.max(screenHeight, screenWidth) / Math.min(screenHeight, screenWidth) : 1;
