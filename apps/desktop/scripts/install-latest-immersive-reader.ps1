@@ -598,7 +598,7 @@ if ($RegisterMarkdownAssociations) {
 
   New-Item -Path "$capabilitiesPath\FileAssociations" -Force | Out-Null
   New-ItemProperty -Path $capabilitiesPath -Name "ApplicationName" -Value $registeredName -PropertyType String -Force | Out-Null
-  New-ItemProperty -Path $capabilitiesPath -Name "ApplicationDescription" -Value "本地长文阅读、知乎归档和播客转写工具。" -PropertyType String -Force | Out-Null
+  New-ItemProperty -Path $capabilitiesPath -Name "ApplicationDescription" -Value "本地 EPUB、Markdown 阅读与知乎归档工具。" -PropertyType String -Force | Out-Null
   New-ItemProperty -Path $capabilitiesPath -Name "ApplicationIcon" -Value $iconLocation -PropertyType String -Force | Out-Null
   foreach ($extension in @(".md", ".markdown")) {
     New-ItemProperty -Path "$capabilitiesPath\FileAssociations" -Name $extension -Value $progId -PropertyType String -Force | Out-Null

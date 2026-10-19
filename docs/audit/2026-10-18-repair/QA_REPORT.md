@@ -1,6 +1,6 @@
 # ImmersiveReader 1.3.1 本地修复验收
 
-执行日期：2026-10-18～19。基线：`2b08711`；交付范围为本地提交、Windows 安装和 Android 同签名更新。所有自动化书籍均为合成样本；不读取生产书籍作为夹具。
+执行日期：2026-10-18～19。基线：`2b08711`；交付范围为本地提交、Windows 安装和 Android 签名 Release 安装。所有自动化书籍均为合成样本；不读取生产书籍作为夹具。
 
 ## 已实现
 
@@ -20,6 +20,7 @@
 - 后续实际 Markdown 打开揭示第二个导入故障：用户选中文件先进入 EFS 暂存目录，再由 Windows `CopyFile` 复制到书库时返回 `ERROR_ENCRYPTION_FAILED`（6000）。同一 90 字节合成文件以原生 CopyFile 两跳复现，读取后写入目标则成功。比较了 CopyFileEx 允许未加密目标、手动解密、改变暂存位置、按内容流复制四种方案；选择最后一种，让目标继承其所在目录的加密策略，不更改用户目录属性。Windows 同步复制不再继承源只读属性，并在截断前通过打开的文件句柄识别同文件/硬链接，避免覆盖源文件。所有章节失败时会保留具体原因，避免只报“没有可读文件”。依据：[Microsoft EFS 复制行为](https://learn.microsoft.com/en-us/windows/win32/fileio/handling-encrypted-files-and-directories)。
 - 桌面窄窗复查发现双重误判：本机 Windows Chrome 报告 10 个触点，600 px 宽时触摸启发式隐藏了窗口栏；即使纠正平台判定，旧的 768 px CSS 规则仍强制隐藏按钮。明确的桌面系统保持桌面外壳，移除按宽度隐藏窗口按钮的规则，iPad 桌面 UA 和 Android 仍走移动端。已增加 Windows/Linux 触摸窄窗与 iPad 单元回归，继续用实际触点环境验证 600×400 布局。比较了单用触摸、指针媒体查询、原生能力及桌面系统排除四种方式，选择最小的桌面排除修复；[maxTouchPoints](https://developer.mozilla.org/en-US/docs/Web/API/Navigator/maxTouchPoints) 表示硬件触点能力，不能单独作为手机判据。
 - 桌面设置对话框增加固定定位、四边约束和自动外边距，修复全局样式清除默认外边距后贴在左上角的问题。更新旧版书架 QA 的按钮名、角色及备份数组模拟，避免把模拟接口的 `null.length` 异常误判为对话框故障。
+- Windows 默认应用注册说明同步删除“播客转写”，避免已移除功能仍出现在系统应用说明中；安装脚本语法解析通过，安装后核对实际注册值。
 
 ## 自动化证据
 
@@ -45,7 +46,7 @@
 - 10 月 19 日恢复无线连接后，`pm list packages -u lingcang` 仅列出 QA 包，生产包已不存在。本轮未卸载生产包；当前设备无法验收原生产包的原位更新和原首次安装时间保留，后续实际安装需明确记为新装。
 - 现有 Android Release 证书 SHA-256：`fa0f4cf8bd8ec5b30d5440a10f46fb52a19421be2f6d431ca045d3822d7170ed`。
 - 最终 QA APK（arm64-v8a、1.3.1-qa）：SHA-256 `69120E663CE3949FA98F6850D20F9556752D6067BBC87D35DF4451F0F965FFAE`，同证书签名；`adb install -r` 成功，旧 QA 合成书目保留。
-- Windows 安装包、生产 EXE 时间戳和 SHA-256、Android 最终 APK 哈希、Release Lint 及安装结果：待终验填入。
+- Windows 安装包、生产 EXE 时间戳和 SHA-256、安装后真实接口检查：等待最终 `ship:local` 及原生终验。
 - Android 正式 APK：`output/mobile/ImmersiveReader_1.3.1_android-arm64-release.apk`，1.3.1 / versionCode 1003001 / arm64-v8a，SHA-256 `66F38278EA12C6E869FB6FE48D45D4AEC905B482BB9D42099A9433C8E44DF075`。签名验证、16 KB ZIP 对齐验证通过；构建源码为 `d1da4a4`，后续桌面触摸判定只修复桌面系统，Android 判定不变。
 - 实际交付变体 `lintUniversalRelease` 通过，0 errors / 26 warnings / 1 hint。复用刚构建的 arm64 原生库，Lint 时不再启动 Cargo。告警主要为依赖更新、图标密度、无用资源与代码风格；`ScriptHandler.remove` 的能力检查由非空句柄的创建前置条件保证，仍被 Lint 提示 `RequiresFeature`，未将它宣称为零告警。
 - ColorOS 设备端确认后，正式包安装返回 `Success`；安装/更新时间为 `2026-10-19 18:52:47`，实际版本 1.3.1 / 1003001。冷启动主活动正常（207 ms，不能替代正文就绪时间），运行进程日志未发现致命异常，`android-device/production-shelf.png` 显示独立空书库，未向生产包写入合成夹具。QA 包及其数据保留。因原正式包先前已不存在，此结果是新装验证，不声称保留了旧 1.3.0 的数据。
@@ -53,7 +54,8 @@
 ## 尚未关闭的验收
 
 - [x] 最新 Android QA 包：样式、字体、状态栏隐藏/恢复、控制条位置、后台及系统返回真机复验。
-- [ ] Release Lint、生产 APK 同签名覆盖更新与保留数据检查。
+- [x] Release Lint、生产 APK 签名/ABI/对齐校验、新装启动与 QA 数据保留。
+- [ ] 原生产 APK 覆盖更新与旧数据保留检查：恢复连接后原包已不存在，此项无法由本次新装替代。
 - [ ] Windows `ship:local`、安装路径和哈希、安装后真实阅读退出路径。
 - [ ] 安装版 100 本书首屏耗时与固定样本修复前后对照；冷启动 2 秒、热启动 1 秒的目标尚未确认。
 - [ ] 原截图五条告警逐条匹配：初步证据说明资源目录被错当为书目，但本次终验不读取用户书籍，原图片当前路径已不可用，不能声称逐项复核完成。
