@@ -19,7 +19,7 @@
 	import type { Bookmark, EpubNavItem, ReaderLocator, SearchHit } from '$lib/epub/types';
 	import { makeLocator } from '$lib/epub/locator';
 	import { sanitizeSearchSnippet } from '$lib/epub/sanitize';
-	import { fontScale, readingFontFamily, readingLineHeight, readingWidth } from '$lib/stores/app';
+	import { autoFocusMode, fontScale, readingFontFamily, readingLineHeight, readingWidth } from '$lib/stores/app';
 	import ReaderChrome from './ReaderChrome.svelte';
 	import MarkdownReader from './MarkdownReader.svelte';
 	import EpubReaderMobile from './EpubReaderMobile.svelte';
@@ -78,7 +78,7 @@
 		goToSearchHit(hit: SearchHit): void;
 		goToLocator(locator: ReaderLocator): void;
 		bookmarkCurrent(): Promise<void>;
-		flushLocator(): void;
+		flushLocator(): Promise<void>;
 		handleBack(): boolean;
 		getFocusContext(): FocusContext | null;
 		isReady(): boolean;
@@ -105,7 +105,7 @@
 	let focusContext = $state<FocusContext | null>(null);
 	let reflowKey = $state(0);
 	let toast = $state('');
-	let exiting = false;
+	let exiting = $state(false);
 
 	let mdRef = $state<MarkdownReaderApi | null>(null);
 	let epubRef = $state<EpubReaderApi | null>(null);
@@ -187,7 +187,7 @@
 			if (detail.publication?.format === 'epub') {
 				const locator = target.chapterId
 					? makeLocator(detail.manifest.bookId, target.chapterId, { kind: 'ratio' }, 0)
-					: await api.getReaderLocator(detail.manifest.bookId).catch(() => null);
+					: await api.getReaderLocator(detail.manifest.bookId);
 				epubLocator = locator;
 				mode = 'epub';
 				return;
@@ -288,10 +288,12 @@
 			if (mode === 'markdown-book' || mode === 'markdown-file') {
 				await mdRef?.flushProgress();
 			} else if (mode === 'epub') {
-				epubRef?.flushLocator();
+				await epubRef?.flushLocator();
 			}
 		} catch {
-			// Exit must never block on persistence.
+			exiting = false;
+			showToast('阅读进度保存失败，请重试后返回');
+			return;
 		}
 		onExit();
 	}
@@ -306,6 +308,7 @@
 
 	function handleMarkdownMeta(next: ReaderMeta) {
 		const chapterChanged = next.chapterId !== meta.chapterId;
+		if (chapterChanged) focusBoundaryBusy = false;
 		meta = next;
 		if (next.title) bookTitle = next.title;
 		if (mode === 'markdown-file') {
@@ -322,6 +325,7 @@
 
 	function handleEpubMeta(next: EpubMeta) {
 		const chapterChanged = next.chapterId !== meta.chapterId;
+		if (chapterChanged) focusBoundaryBusy = false;
 		meta = {
 			...emptyMeta(bookTitle),
 			...next,
@@ -338,8 +342,20 @@
 
 	function syncFocusContext() {
 		const context = mdRef?.getFocusContext() ?? epubRef?.getFocusContext() ?? null;
-		if (context) focusContext = context;
+		if (context) {
+			focusContext = context;
+			if ($autoFocusMode && !focusActive && !autoFocusEntered) {
+				autoFocusEntered = true;
+				toggleFocus();
+			}
+		}
 	}
+	let autoFocusEntered = false;
+	let focusEntryDirection = $state<-1 | 1 | null>(null);
+	let focusBoundaryBusy = false;
+	$effect(() => {
+		window.dispatchEvent(new CustomEvent('ir:reader-capture', { detail: { enabled: !panel && !exiting && mode !== 'loading' && mode !== 'error' } }));
+	});
 
 	function toggleFocus() {
 		if (focusActive) {
@@ -358,12 +374,17 @@
 	}
 
 	function handleFocusExit() {
+		focusEntryDirection = null;
 		focusActive = false;
 		chromeVisible = true;
 		scheduleAutoHide();
 	}
 
 	async function handleFocusBoundary(direction: -1 | 1) {
+		if (focusBoundaryBusy) return;
+		if (!(direction < 0 ? meta.canPrev : meta.canNext)) { showToast(direction < 0 ? '已经是本书开头' : '已经是本书结尾'); return; }
+		focusBoundaryBusy = true;
+		focusEntryDirection = direction;
 		if (mode === 'epub') {
 			epubRef?.navigateChapterBy(direction);
 		} else {
@@ -545,7 +566,7 @@
 		const detail = (event as CustomEvent<{ dir?: number }>).detail;
 		const direction = detail?.dir;
 		if (direction !== -1 && direction !== 1) return;
-		if (panel) return;
+		if (panel || focusBoundaryBusy || hasActiveSelection() || document.visibilityState === 'hidden') return;
 		if (focusActive) {
 			if (direction === -1) focusRef?.prev();
 			else focusRef?.next();
@@ -654,12 +675,12 @@
 
 	/** Keep the EPUB locator on the last position when the app is frozen. */
 	function handleReaderPageHide() {
-		if (mode === 'epub') epubRef?.flushLocator();
+		if (mode === 'epub') void epubRef?.flushLocator().catch(() => showToast('阅读进度保存失败，已保留恢复记录'));
 	}
 
 	function handleReaderVisibility() {
 		if (typeof document === 'undefined' || document.visibilityState !== 'hidden') return;
-		if (mode === 'epub') epubRef?.flushLocator();
+		if (mode === 'epub') void epubRef?.flushLocator().catch(() => showToast('阅读进度保存失败，已保留恢复记录'));
 	}
 
 	onMount(() => {
@@ -710,7 +731,7 @@
 	}
 </script>
 
-<div class="reader-screen" data-testid="reader-screen">
+<div class="reader-screen" class:focus-active={focusActive} data-testid="reader-screen">
 	<ReaderChrome
 		visible={chromeVisible}
 		title={bookTitle}
@@ -835,6 +856,7 @@
 		scrollerEl={focusContext?.scrollerEl ?? null}
 		contentKey={focusContext?.contentKey ?? ''}
 		reflowKey={reflowKey}
+		entryDirection={focusEntryDirection}
 		onExit={handleFocusExit}
 		onBoundary={handleFocusBoundary}
 	/>
@@ -903,6 +925,16 @@
 		position: absolute;
 		inset: 0;
 		min-height: 0;
+		/* Full viewport beneath floating controls; fade text instead of cutting off rows. */
+		--reader-edge-mask: linear-gradient(to bottom,
+			transparent 0,
+			transparent max(var(--ir-safe-top, 0px), env(safe-area-inset-top, 0px)),
+			black calc(max(var(--ir-safe-top, 0px), env(safe-area-inset-top, 0px)) + 24px),
+			black calc(100% - max(var(--ir-safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) - 20px),
+			transparent calc(100% - max(var(--ir-safe-bottom, 0px), env(safe-area-inset-bottom, 0px))),
+			transparent 100%);
+		mask-image: var(--reader-edge-mask);
+		-webkit-mask-image: var(--reader-edge-mask);
 	}
 
 	.epub-host {

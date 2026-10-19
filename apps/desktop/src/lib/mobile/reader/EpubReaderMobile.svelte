@@ -71,8 +71,8 @@
 		return Promise.resolve(call<void>('bookmarkCurrent'));
 	}
 
-	export function flushLocator(): void {
-		call('flushLocator');
+	export function flushLocator(): Promise<void> {
+		return Promise.resolve(call<Promise<void>>('flushLocator'));
 	}
 
 	export function handleBack(): boolean {

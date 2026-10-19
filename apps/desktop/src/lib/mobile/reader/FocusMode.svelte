@@ -16,6 +16,7 @@
 -->
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import { sentencePageTarget } from './focusStep';
 	import {
 		buildFocusModel,
 		locateUnitAtLine,
@@ -34,6 +35,7 @@
 		contentKey: string;
 		/** Bumped by the parent on font/line-height/width reflow. */
 		reflowKey?: number;
+		entryDirection?: -1 | 1 | null;
 		onExit: () => void;
 		/** Asked when the reader steps past the first/last sentence. */
 		onBoundary: (direction: -1 | 1) => void;
@@ -45,6 +47,7 @@
 		scrollerEl = null,
 		contentKey,
 		reflowKey = 0,
+		entryDirection = null,
 		onExit,
 		onBoundary
 	}: Props = $props();
@@ -73,6 +76,41 @@
 	let scrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
 	let layoutTimers: ReturnType<typeof setTimeout>[] = [];
 	let suppressTapUntil = 0;
+	let stepQueue = Promise.resolve();
+	let stepEpoch = 0;
+	let motionFrame: number | null = null;
+	function measureMotion() {
+		if (!active || programmaticTarget === null) { motionFrame = null; return; }
+		measure();
+		motionFrame = requestAnimationFrame(measureMotion);
+	}
+	function scrollTo(top: number, behavior: ScrollBehavior = 'smooth') {
+		if (!scrollerEl) return;
+		clearProgrammatic();
+		programmaticTarget = Math.max(0, Math.min(top, scrollerEl.scrollHeight - scrollerEl.clientHeight));
+		scrollerEl.scrollTo({ top: programmaticTarget, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : behavior });
+		if (motionFrame === null) motionFrame = requestAnimationFrame(measureMotion);
+		programmaticTimer = setTimeout(() => { clearProgrammatic(); measure(); }, 600);
+	}
+	function interruptMotion() { stepEpoch += 1; clearProgrammatic(); }
+	function queueStep(direction: -1 | 1) {
+		for (const timer of layoutTimers) clearTimeout(timer);
+		layoutTimers = [];
+		const epoch = stepEpoch;
+		stepQueue = stepQueue.then(async () => {
+			if (epoch !== stepEpoch || !active || !model || !scrollerEl) return;
+			measure();
+			const rect = scrollerEl.getBoundingClientRect();
+			const safeTop = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ir-safe-top')) || 0;
+			const hud = document.querySelector('[data-testid="focus-hud"]')?.getBoundingClientRect();
+			const visibleTop = Math.max(rect.top, safeTop) + 28;
+			const visibleBottom = Math.min(rect.bottom, hud?.top ?? rect.bottom) - 16;
+			const target = box ? sentencePageTarget(scrollerEl.scrollTop, box.top, box.bottom, visibleTop, visibleBottom, direction) : null;
+			if (target !== null) scrollTo(target);
+			else setIndex(activeIndex + direction);
+			await new Promise<void>(resolve => setTimeout(resolve, 320));
+		}).catch(error => console.warn('[focus] navigation failed', error));
+	}
 
 	function clearProgrammatic() {
 		programmaticTarget = null;
@@ -110,10 +148,7 @@
 			measure();
 			return;
 		}
-		clearProgrammatic();
-		programmaticTarget = target;
-		programmaticTimer = setTimeout(clearProgrammatic, 900);
-		scrollerEl.scrollTo({ top: target, behavior });
+		scrollTo(target, behavior);
 	}
 
 	function setIndex(index: number, behavior: ScrollBehavior = 'smooth') {
@@ -131,13 +166,6 @@
 		realign(behavior);
 	}
 
-	function relocateFromLine() {
-		if (!active || !model || !articleEl || !scrollerEl) return;
-		const located = locateUnitAtLine(model, articleEl, scrollerEl);
-		if (located && located.globalIndex !== activeIndex) activeIndex = located.globalIndex;
-		measure();
-	}
-
 	/** Build (or rebuild after a chapter swap) and align to the reading line. */
 	function enterOrRebuild(forceBuild: boolean) {
 		if (!active || !articleEl || !scrollerEl) return;
@@ -153,12 +181,12 @@
 			}
 			ready = true;
 			const located = locateUnitAtLine(next, articleEl, scrollerEl);
-			activeIndex = located?.globalIndex ?? 0;
+			activeIndex = entryDirection === -1 ? next.total - 1 : entryDirection === 1 ? 0 : located?.globalIndex ?? 0;
 			measure();
 			realign('auto');
 			return;
 		}
-		relocateFromLine();
+		measure();
 		realign('auto');
 	}
 
@@ -193,12 +221,8 @@
 			scrollFrame = null;
 			if (!active || !model || !articleEl || !scrollerEl) return;
 			if (programmaticTarget !== null) {
-				if (Math.abs(scrollerEl.scrollTop - programmaticTarget) < 3) {
-					clearProgrammatic();
-				} else {
-					measure();
-					return;
-				}
+				measure();
+				return;
 			}
 			const located = locateUnitAtLine(model, articleEl, scrollerEl);
 			if (located && located.globalIndex !== activeIndex) activeIndex = located.globalIndex;
@@ -211,8 +235,7 @@
 		if (performance.now() < suppressTapUntil) return;
 		const target = event.target instanceof Element ? event.target : null;
 		if (target?.closest('a[href]')) {
-			event.preventDefault();
-			event.stopPropagation();
+			return;
 		}
 		const located = locateUnitAtPoint(model, articleEl, event.clientX, event.clientY);
 		if (!located || located.globalIndex === activeIndex) {
@@ -231,16 +254,16 @@
 	function exitFocus() {
 		// Keep the reader where the sentence currently sits: realign before the
 		// overlay disappears so leaving focus never moves the reading position.
-		realign('auto');
+		interruptMotion();
 		onExit();
 	}
 
 	export function next() {
-		setIndex(activeIndex + 1);
+		queueStep(1);
 	}
 
 	export function prev() {
-		setIndex(activeIndex - 1);
+		queueStep(-1);
 	}
 
 	export function exit() {
@@ -272,6 +295,8 @@
 			if (!isActiveNow || !article || !scroller) return;
 			scroller.addEventListener('scroll', handleScroll, { passive: true });
 			scroller.addEventListener('click', handleTap, true);
+			scroller.addEventListener('pointerdown', interruptMotion, { passive: true });
+			scroller.addEventListener('wheel', interruptMotion, { passive: true });
 			window.addEventListener('resize', handleResize);
 			window.visualViewport?.addEventListener('resize', handleResize);
 			scheduleLayoutSync(true);
@@ -283,6 +308,8 @@
 				if (article && scroller) {
 					scroller.removeEventListener('scroll', handleScroll);
 					scroller.removeEventListener('click', handleTap, true);
+					scroller.removeEventListener('pointerdown', interruptMotion);
+					scroller.removeEventListener('wheel', interruptMotion);
 				}
 				window.removeEventListener('resize', handleResize);
 				window.visualViewport?.removeEventListener('resize', handleResize);
@@ -291,6 +318,9 @@
 				if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
 				scrollFrame = null;
 				clearProgrammatic();
+				stepEpoch += 1;
+				if (motionFrame !== null) cancelAnimationFrame(motionFrame);
+				motionFrame = null;
 				if (scrollIdleTimer) clearTimeout(scrollIdleTimer);
 				scrollIdleTimer = null;
 				scrolling = false;
@@ -335,7 +365,9 @@
 				style:top="{bottomFarTop}px"
 				style:height="{bottomFarHeight}px"
 			></div>
-			<div class="focus-spotlight" style:top="{box.top}px" style:height="{box.bottom - box.top}px"></div>
+			{#if box.bottom - box.top <= (scrollerEl?.clientHeight ?? viewportHeight)}
+				<div class="focus-spotlight" style:top="{box.top}px" style:height="{box.bottom - box.top}px"></div>
+			{/if}
 		{/if}
 
 		<div class="focus-hud" data-testid="focus-hud" role="toolbar" aria-label="专注模式">
@@ -416,17 +448,15 @@
 		right: 8px;
 		pointer-events: none;
 		border-radius: 10px;
-		box-shadow:
-			0 0 0 1px color-mix(in srgb, var(--spotlight-color) 90%, transparent),
-			0 0 28px 10px var(--spotlight-color);
-		transition: top 140ms ease, height 140ms ease;
+		box-shadow: 0 0 28px 10px var(--spotlight-color);
+		/* Position follows the same animation frame as the sentence range. */
 	}
 
 	.focus-hud {
 		position: fixed;
 		left: 50%;
 		transform: translateX(-50%);
-		bottom: calc(max(var(--ir-safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 24px);
+		bottom: calc(max(var(--ir-safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 4px);
 		display: flex;
 		align-items: center;
 		gap: 2px;

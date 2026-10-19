@@ -36,6 +36,7 @@ android {
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.lingcang.immersivereading"
+        buildConfigField("boolean", "QA_BUILD", qaBuild.toString())
         minSdk = 26
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()

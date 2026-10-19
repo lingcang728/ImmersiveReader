@@ -11,6 +11,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -40,6 +42,21 @@ class MainActivity : TauriActivity() {
   private var safeArea: SafeArea = SafeArea.ZERO
 
   private var insetsListenerInstalled = false
+  private var readerImmersive = false
+
+  fun setReaderImmersive(enabled: Boolean) {
+    readerImmersive = enabled
+    val controller = WindowCompat.getInsetsController(window, window.decorView)
+    controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    if (enabled) controller.hide(WindowInsetsCompat.Type.statusBars())
+    else controller.show(WindowInsetsCompat.Type.statusBars())
+    webView?.let { ViewCompat.requestApplyInsets(it) }
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    if (hasFocus && readerImmersive) setReaderImmersive(true)
+  }
 
   /**
    * Document-start injection that re-applies the last known insets to every
@@ -94,8 +111,8 @@ class MainActivity : TauriActivity() {
     // Composite the page on the GPU instead of repainting it on the raster
     // thread — scrolling stays smooth on high-refresh displays.
     webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-    // Chrome DevTools attach is debug-only; a release APK must never expose it.
-    if (BuildConfig.DEBUG) {
+    // DevTools is enabled only for debug or the isolated .qa package. Production release keeps it disabled.
+    if (BuildConfig.DEBUG || BuildConfig.QA_BUILD) {
       WebView.setWebContentsDebuggingEnabled(true)
     }
   }
@@ -130,13 +147,15 @@ class MainActivity : TauriActivity() {
 
   private fun updateSafeArea(insets: WindowInsetsCompat) {
     val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+    // Keep the reading viewport stable when transient status bars appear or disappear.
+    val status = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.statusBars())
     val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
     val gestures = insets.getInsets(WindowInsetsCompat.Type.mandatorySystemGestures())
     // Insets arrive in physical pixels; the WebView viewport uses
     // width=device-width so 1 CSS px == 1 density-independent pixel.
     val density = resources.displayMetrics.density.takeIf { it > 0f } ?: 1f
     val next = SafeArea(
-      top = maxOf(bars.top, cutout.top).toDouble() / density,
+      top = maxOf(bars.top, cutout.top, status.top).toDouble() / density,
       bottom = maxOf(bars.bottom, cutout.bottom, gestures.bottom).toDouble() / density,
       left = maxOf(bars.left, cutout.left).toDouble() / density,
       right = maxOf(bars.right, cutout.right).toDouble() / density,
@@ -232,11 +251,11 @@ class MainActivity : TauriActivity() {
    * MULTIPLE are all consumed so the system volume UI never reacts.
    */
   override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-    if (VolumeKeyBridge.enabled &&
+    if (VolumeKeyBridge.enabled && hasWindowFocus() &&
       (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
         event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
     ) {
-      if (event.action == KeyEvent.ACTION_DOWN) {
+      if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
         val dir = if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) -1 else 1
         webView?.post {
           webView?.evaluateJavascript(

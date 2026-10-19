@@ -7,21 +7,9 @@
 	`volumeKeyPaging` store from `$lib/platform/device.ts` with the shell.
 -->
 <script lang="ts">
-	import { get } from 'svelte/store';
 	import SheetBase from './SheetBase.svelte';
-	import {
-		FONT_SCALE_MAX,
-		FONT_SCALE_MIN,
-		FONT_SCALE_STEP,
-		clampFontScale,
-		currentTheme,
-		fontScale,
-		readingFontFamily,
-		readingLineHeight,
-		readingWidth,
-		READING_LINE_HEIGHTS,
-		READING_WIDTHS
-	} from '$lib/stores/app';
+	import { currentTheme, autoFocusMode } from '$lib/stores/app';
+	import TypographyControls from '../components/TypographyControls.svelte';
 	import { getThemePairs, type Theme } from '$lib/theme/themes';
 	import { volumeKeyPaging } from '$lib/platform/device';
 
@@ -33,7 +21,7 @@
 		onClose: () => void;
 	}
 
-	let { open, mode, focusActive, onToggleFocus, onClose }: Props = $props();
+	let { open, focusActive, onToggleFocus, onClose }: Props = $props();
 
 	const themePairs = getThemePairs();
 	const currentThemeName = $derived($currentTheme.name);
@@ -42,27 +30,10 @@
 		currentTheme.set(theme);
 	}
 
-	function adjustFont(delta: number) {
-		fontScale.set(clampFontScale(get(fontScale) + delta));
-	}
-
-	function setLineHeight(value: number) {
-		readingLineHeight.set(value);
-	}
-
-	function setWidth(value: number) {
-		readingWidth.set(value);
-	}
-
-	function setFamily(value: 'sans' | 'serif') {
-		readingFontFamily.set(value);
-	}
-
 	function toggleVolumePaging() {
 		volumeKeyPaging.update((enabled) => !enabled);
 	}
 
-	const fontPercent = $derived(Math.round($fontScale * 100));
 </script>
 
 <SheetBase {open} testid="reading-settings-sheet" title="阅读设置" height="80" {onClose}>
@@ -98,72 +69,7 @@
 		</div>
 	</section>
 
-	<section class="settings-group">
-		<h3 class="settings-label">字号</h3>
-		<div class="settings-row">
-			<button
-				type="button"
-				class="settings-btn"
-				onclick={() => adjustFont(-FONT_SCALE_STEP)}
-				disabled={$fontScale <= FONT_SCALE_MIN + 0.001}
-				aria-label="减小字号"
-			>A−</button>
-			<span class="settings-value" data-testid="settings-font-value">{fontPercent}%</span>
-			<button
-				type="button"
-				class="settings-btn"
-				onclick={() => adjustFont(FONT_SCALE_STEP)}
-				disabled={$fontScale >= FONT_SCALE_MAX - 0.001}
-				aria-label="增大字号"
-			>A＋</button>
-		</div>
-	</section>
-
-	<section class="settings-group">
-		<h3 class="settings-label">行高</h3>
-		<div class="settings-row">
-			{#each READING_LINE_HEIGHTS as value (value)}
-				<button
-					type="button"
-					class="settings-seg"
-					class:active={$readingLineHeight === value}
-					onclick={() => setLineHeight(value)}
-				>{value.toFixed(1)}</button>
-			{/each}
-		</div>
-	</section>
-
-	<section class="settings-group">
-		<h3 class="settings-label">页宽</h3>
-		<div class="settings-row">
-			{#each READING_WIDTHS as value (value)}
-				<button
-					type="button"
-					class="settings-seg"
-					class:active={$readingWidth === value}
-					onclick={() => setWidth(value)}
-				>{value}</button>
-			{/each}
-		</div>
-	</section>
-
-	<section class="settings-group">
-		<h3 class="settings-label">字体</h3>
-		<div class="settings-row">
-			<button
-				type="button"
-				class="settings-seg wide"
-				class:active={$readingFontFamily === 'sans'}
-				onclick={() => setFamily('sans')}
-			>无衬线</button>
-			<button
-				type="button"
-				class="settings-seg wide"
-				class:active={$readingFontFamily === 'serif'}
-				onclick={() => setFamily('serif')}
-			>衬线</button>
-		</div>
-	</section>
+	<section class="settings-group"><h3 class="settings-label">排版</h3><TypographyControls /></section>
 
 	<section class="settings-group">
 		<h3 class="settings-label">翻页与专注</h3>
@@ -179,7 +85,7 @@
 			><span class="settings-knob"></span></button>
 		</div>
 		<div class="settings-row">
-			<span class="settings-row-label">{mode === 'epub' ? '专注模式（逐句聚光）' : '专注模式'}</span>
+			<span class="settings-row-label">专注模式</span>
 			<button
 				type="button"
 				class="settings-toggle"
@@ -189,7 +95,8 @@
 				onclick={onToggleFocus}
 			><span class="settings-knob"></span></button>
 		</div>
-	</section>
+        <div class="settings-row"><span class="settings-row-label">自动进入专注</span><button type="button" class="settings-toggle" class:on={$autoFocusMode} aria-pressed={$autoFocusMode} aria-label="自动进入专注" onclick={() => autoFocusMode.update(value => !value)}><span class="settings-knob"></span></button></div>
+    </section>
 </SheetBase>
 
 <style>
@@ -221,43 +128,6 @@
 		font-size: 15px;
 	}
 
-	.settings-btn {
-		min-width: 64px;
-		height: 44px;
-		border: 1px solid var(--hr);
-		border-radius: 12px;
-		background: transparent;
-		color: var(--text);
-		font-size: 16px;
-	}
-
-	.settings-btn:disabled {
-		opacity: 0.45;
-	}
-
-	.settings-value {
-		flex: 1;
-		text-align: center;
-		font-size: 15px;
-		color: var(--text-secondary);
-		font-variant-numeric: tabular-nums;
-	}
-
-	.settings-seg {
-		flex: 1;
-		min-height: 44px;
-		border: 1px solid var(--hr);
-		border-radius: 12px;
-		background: transparent;
-		color: var(--text);
-		font-size: 14.5px;
-	}
-
-	.settings-seg.active {
-		border-color: var(--link);
-		color: var(--link);
-		background: var(--bg-secondary);
-	}
 
 	.settings-toggle {
 		position: relative;

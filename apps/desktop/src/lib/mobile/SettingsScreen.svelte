@@ -10,20 +10,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import * as api from '$lib/mobile/api';
-	import {
-		FONT_SCALE_MAX,
-		FONT_SCALE_MIN,
-		FONT_SCALE_STEP,
-		READING_LINE_HEIGHTS,
-		READING_WIDTHS,
-		autoFocusMode,
-		clampFontScale,
-		currentTheme,
-		fontScale,
-		readingFontFamily,
-		readingLineHeight,
-		readingWidth
-	} from '$lib/stores/app';
+	import { autoFocusMode, currentTheme } from '$lib/stores/app';
+	import LibraryRepair from '$lib/components/LibraryRepair.svelte';
+    import type { TrashItem } from './contracts';
+	import TypographyControls from './components/TypographyControls.svelte';
 	import { volumeKeyPaging } from '$lib/platform/device';
 	import { getThemePairs } from '$lib/theme/themes';
 	import type { PlatformCapabilities } from '$lib/platform/capabilities';
@@ -51,18 +41,6 @@
 		)
 	);
 
-	const LINE_HEIGHT_LABELS: Record<number, string> = {
-		1.6: '紧凑',
-		1.8: '标准',
-		2.0: '宽松'
-	};
-
-	const WIDTH_LABELS: Record<number, string> = {
-		680: '窄',
-		760: '标准',
-		840: '宽'
-	};
-
 	function setThemeFamily(index: number) {
 		const pair = themePairs[index];
 		if (!pair) return;
@@ -72,27 +50,6 @@
 	function setScheme(scheme: 'light' | 'dark') {
 		const pair = themePairs.find((entry) => entry.label === $currentTheme.label) ?? themePairs[0];
 		currentTheme.set(scheme === 'dark' ? pair.dark : pair.light);
-	}
-
-	function adjustFontScale(direction: number) {
-		fontScale.set(clampFontScale($fontScale + direction * FONT_SCALE_STEP));
-	}
-
-	function handleFontSlider(event: Event) {
-		const value = Number((event.currentTarget as HTMLInputElement).value);
-		fontScale.set(clampFontScale(value));
-	}
-
-	function setLineHeight(value: number) {
-		readingLineHeight.set(value);
-	}
-
-	function setWidth(value: number) {
-		readingWidth.set(value);
-	}
-
-	function setFontFamily(value: 'sans' | 'serif') {
-		readingFontFamily.set(value);
 	}
 
 	// ----- storage ------------------------------------------------------
@@ -149,6 +106,23 @@
 			clearing = false;
 		}
 	}
+
+    let trashOpen = $state(false);
+    let trashItems = $state<TrashItem[]>([]);
+    let trashBusy = $state(false);
+    async function refreshTrash() {
+        trashBusy = true;
+        try { trashItems = await api.listTrash(); }
+        catch (error) { onToast(api.errorText(error), 'error'); }
+        finally { trashBusy = false; }
+    }
+    async function restoreItem(item: TrashItem) {
+        if (trashBusy) return;
+        trashBusy = true;
+        try { await api.restoreTrashItem(item.trashId, item.revision); onToast('已恢复到书架', 'success'); await refreshTrash(); }
+        catch (error) { onToast(api.errorText(error), 'error'); }
+        finally { trashBusy = false; }
+    }
 
 	// ----- about --------------------------------------------------------
 	let version = $state('');
@@ -228,101 +202,7 @@
 
 		<section class="section">
 			<h2 class="section-title">排版</h2>
-			<div class="card">
-				<div class="row row-slider">
-					<div class="row-copy">
-						<span class="row-label">字号</span>
-						<span class="row-hint">正文缩放，影响全部书籍</span>
-					</div>
-					<div class="font-scale">
-						<button
-							type="button"
-							class="round-btn"
-							aria-label="减小字号"
-							onclick={() => adjustFontScale(-1)}
-						>
-							−
-						</button>
-						<input
-							class="font-slider"
-							type="range"
-							min={FONT_SCALE_MIN}
-							max={FONT_SCALE_MAX}
-							step={FONT_SCALE_STEP}
-							aria-label="字号"
-							value={$fontScale}
-							oninput={handleFontSlider}
-						/>
-						<button
-							type="button"
-							class="round-btn"
-							aria-label="增大字号"
-							onclick={() => adjustFontScale(1)}
-						>
-							+
-						</button>
-						<span class="font-value">{Math.round($fontScale * 100)}%</span>
-					</div>
-				</div>
-
-				<div class="row row-stack">
-					<span class="row-label">行高</span>
-					<div class="segmented" role="group" aria-label="行高">
-						{#each READING_LINE_HEIGHTS as value (value)}
-							<button
-								type="button"
-								class="segment"
-								class:selected={$readingLineHeight === value}
-								aria-pressed={$readingLineHeight === value}
-								onclick={() => setLineHeight(value)}
-							>
-								{LINE_HEIGHT_LABELS[value] ?? String(value)}
-							</button>
-						{/each}
-					</div>
-				</div>
-
-				<div class="row row-stack">
-					<span class="row-label">页宽</span>
-					<div class="segmented" role="group" aria-label="页宽">
-						{#each READING_WIDTHS as value (value)}
-							<button
-								type="button"
-								class="segment"
-								class:selected={$readingWidth === value}
-								aria-pressed={$readingWidth === value}
-								onclick={() => setWidth(value)}
-							>
-								{WIDTH_LABELS[value] ?? `${value}px`}
-							</button>
-						{/each}
-					</div>
-				</div>
-
-				<div class="row row-stack">
-					<span class="row-label">字体</span>
-					<div class="segmented" role="group" aria-label="正文字体">
-						<button
-							type="button"
-							class="segment"
-							class:selected={$readingFontFamily === 'sans'}
-							aria-pressed={$readingFontFamily === 'sans'}
-							onclick={() => setFontFamily('sans')}
-						>
-							无衬线
-						</button>
-						<button
-							type="button"
-							class="segment"
-							class:selected={$readingFontFamily === 'serif'}
-							aria-pressed={$readingFontFamily === 'serif'}
-							onclick={() => setFontFamily('serif')}
-						>
-							衬线
-						</button>
-					</div>
-				</div>
-			</div>
+            <TypographyControls />
 		</section>
 
 		<section class="section">
@@ -414,6 +294,20 @@
 			<p class="section-note">清理缓存不会删除书库内容与阅读进度。</p>
 		</section>
 
+        <section class="section">
+            <h2 class="section-title">书库维护</h2>
+            <LibraryRepair onChanged={() => void refreshTrash()} />
+            <button type="button" class="text-btn" aria-expanded={trashOpen} onclick={() => { trashOpen = !trashOpen; if(trashOpen) void refreshTrash(); }}>回收站</button>
+            {#if trashOpen}
+                <div class="card">
+                    {#if trashBusy}<p class="section-note">读取中…</p>{:else if trashItems.length === 0}<p class="section-note">回收站为空</p>{/if}
+                    {#each trashItems as item (item.trashId)}
+                        <div class="row"><span class="row-copy">{item.title}</span><button type="button" class="text-btn" disabled={trashBusy} onclick={() => void restoreItem(item)}>恢复</button></div>
+                    {/each}
+                </div>
+            {/if}
+        </section>
+
 		<section class="section">
 			<h2 class="section-title">关于</h2>
 			<div class="card">
@@ -431,7 +325,7 @@
 				</div>
 			</div>
 			<p class="section-note">
-				沉浸阅读 · 本地优先的长文阅读器。排版与主题沿用 MMbook 设计语言，阅读进度只保存在本机。
+			书库、书签与阅读进度保存在本机。
 			</p>
 		</section>
 	</div>
@@ -568,14 +462,6 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.row-slider {
-		flex-wrap: wrap;
-	}
-
-	.row-stack {
-		flex-wrap: wrap;
-	}
-
 	.row-switch:active {
 		opacity: 0.92;
 	}
@@ -666,50 +552,6 @@
 	}
 
 	/* ----- font scale ----- */
-	.font-scale {
-		display: flex;
-		gap: 8px;
-		align-items: center;
-		width: 100%;
-		margin-top: 4px;
-	}
-
-	.round-btn {
-		display: inline-flex;
-		flex: none;
-		align-items: center;
-		justify-content: center;
-		width: 44px;
-		height: 44px;
-		padding: 0;
-		border: 1px solid var(--hr);
-		border-radius: var(--ir-radius-md);
-		background: var(--bg);
-		color: var(--text);
-		font-size: 20px;
-		line-height: 1;
-	}
-
-	.round-btn:active {
-		background: var(--bg-secondary);
-	}
-
-	.font-slider {
-		flex: 1;
-		min-width: 0;
-		height: 44px;
-		accent-color: var(--link);
-		background: transparent;
-	}
-
-	.font-value {
-		flex: none;
-		min-width: 44px;
-		color: var(--text-secondary);
-		font-size: 13px;
-		font-variant-numeric: tabular-nums;
-		text-align: right;
-	}
 
 	/* ----- switch ----- */
 	.switch {

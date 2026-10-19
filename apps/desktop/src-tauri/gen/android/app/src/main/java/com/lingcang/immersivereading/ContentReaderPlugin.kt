@@ -341,6 +341,24 @@ class ContentReaderPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
+  @Command
+  fun setReaderImmersive(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(SetVolumeKeyCaptureArgs::class.java)
+      activity.runOnUiThread {
+        try {
+          val reader = activity as? MainActivity ?: throw IllegalStateException("reader activity unavailable")
+          reader.setReaderImmersive(args.enabled)
+          invoke.resolve(JSObject())
+        } catch (e: Exception) {
+          invoke.reject(e.message ?: e.toString())
+        }
+      }
+    } catch (e: Exception) {
+      invoke.reject(e.message ?: e.toString())
+    }
+  }
+
   // ---------------------------------------------------------------
   // Android Keystore secrets: secretsRead / secretsWrite / secretsDelete
   // ---------------------------------------------------------------

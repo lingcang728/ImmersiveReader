@@ -16,6 +16,7 @@ param(
     [ValidateSet('aarch64', 'armv7', 'x86_64', 'universal')]
     [string]$Target = 'aarch64',
     [switch]$Release,
+    [switch]$Qa,
     [switch]$SkipToolchainCheck
 )
 
@@ -218,7 +219,13 @@ try {
     # Only collect APKs produced by THIS build: record a start watermark and
     # match the variant/ABI directory layout gradle emits (apk/<abi>/<type>/).
     $buildStartedAt = Get-Date
-    & $tauriCli $buildArgs
+    $previousQa = $env:ORG_GRADLE_PROJECT_qaBuild
+    try {
+        $env:ORG_GRADLE_PROJECT_qaBuild = if ($Qa) { 'true' } else { 'false' }
+        & $tauriCli $buildArgs
+    } finally {
+        if ($null -eq $previousQa) { Remove-Item Env:ORG_GRADLE_PROJECT_qaBuild -ErrorAction SilentlyContinue } else { $env:ORG_GRADLE_PROJECT_qaBuild = $previousQa }
+    }
 
     if ($LASTEXITCODE -ne 0) {
         throw "Tauri Android 构建失败，退出码: $LASTEXITCODE"
@@ -249,11 +256,23 @@ try {
     foreach ($apk in $apks) {
         $hash = (Get-FileHash -LiteralPath $apk.FullName -Algorithm SHA256).Hash
         $sizeMb = [math]::Round($apk.Length / 1MB, 2)
-        # app-<abi>-<type>.apk -> ImmersiveReader_<ver>_android-<abi>-<type>.apk
-        $suffix = $apk.BaseName -replace '^app-', ''
-        $targetName = "ImmersiveReader_${appVersion}_android-${suffix}.apk"
+        # Tauri names a single-ABI APK "universal" too. Inspect its actual native payload.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [IO.Compression.ZipFile]::OpenRead($apk.FullName)
+        try {
+            $abis = @($archive.Entries | ForEach-Object {
+                if ($_.FullName -match '^lib/([^/]+)/[^/]+\.so$') { $Matches[1] }
+            } | Sort-Object -Unique)
+        } finally { $archive.Dispose() }
+        if ($abis.Count -eq 0) { throw "APK 没有原生库：$($apk.FullName)" }
+        $abiLabels = @{ 'arm64-v8a' = 'arm64'; 'armeabi-v7a' = 'armv7'; 'x86_64' = 'x86_64'; 'x86' = 'x86' }
+        $abiName = ($abis | ForEach-Object { if ($abiLabels.ContainsKey($_)) { $abiLabels[$_] } else { $_ } }) -join '-'
+        $suffix = "$abiName-$expectedType"
+        $qaSuffix = if ($Qa) { '-qa' } else { '' }
+        $targetName = "ImmersiveReader_${appVersion}_android-${suffix}${qaSuffix}.apk"
         Write-Host "产物文件: $($apk.FullName)" -ForegroundColor Yellow
         Write-Host "文件大小: $sizeMb MB" -ForegroundColor Yellow
+        Write-Host "APK ABIs: $($abis -join ', ')" -ForegroundColor Yellow
         Write-Host "SHA-256:  $hash" -ForegroundColor Yellow
         Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $mobileOut $targetName) -Force
         Write-Host "已收纳到: $(Join-Path $mobileOut $targetName)" -ForegroundColor Green

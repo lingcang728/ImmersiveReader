@@ -35,6 +35,7 @@
 }
 
 .mobile-root {
+	--ir-ui-font: system-ui, -apple-system, 'Noto Sans SC', 'Source Han Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 	position: fixed;
 	inset: 0;
 	display: flex;

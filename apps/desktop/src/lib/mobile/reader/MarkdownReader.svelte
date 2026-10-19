@@ -226,11 +226,12 @@
 			if (!saveFailureNotified) {
 				saveFailureNotified = true;
 				onNotice('阅读进度暂时无法保存，退出前会再试一次');
-			}
-		}
-	}
+            }
+            throw error;
+        }
+    }
 
-	function saveProgressNow(): Promise<void> {
+    function saveProgressNow(): Promise<void> {
 		const run = saveTail.then(() => persistProgress());
 		saveTail = run.catch(() => {});
 		return run;
@@ -240,7 +241,7 @@
 		if (saveTimer) return;
 		saveTimer = setTimeout(() => {
 			saveTimer = null;
-			void saveProgressNow();
+			void saveProgressNow().catch(() => {});
 		}, SAVE_THROTTLE_MS);
 	}
 
@@ -255,12 +256,12 @@
 
 	function handleVisibilityChange() {
 		if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-			void flushProgress();
+			void flushProgress().catch(() => {});
 		}
 	}
 
 	function handlePageHide() {
-		void flushProgress();
+		void flushProgress().catch(() => {});
 	}
 
 	// ---------------------------------------------------------------------
@@ -432,7 +433,7 @@
 	export async function navigateChapter(direction: -1 | 1): Promise<boolean> {
 		const target = chapterIndex + direction;
 		if (isBook && (target < 0 || target >= chapters.length)) {
-			if (direction > 0) void flushProgress();
+			if (direction > 0) void flushProgress().catch(() => {});
 			return false;
 		}
 		await switchChapter(target, direction);
@@ -855,7 +856,7 @@
 	.md-article {
 		max-width: var(--article-max-width, 760px);
 		margin: 0 auto;
-		padding: var(--reader-article-top, 64px) 20px 24px;
+		padding: var(--reader-article-top, 64px) var(--mobile-article-padding, 20px) calc(88px + var(--ir-safe-bottom, 0px));
 		font-size: calc(17px * var(--font-scale, 1));
 		line-height: var(--article-line-height, 1.8);
 		font-family: var(--article-font-family, inherit);

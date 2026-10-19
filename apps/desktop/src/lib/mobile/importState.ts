@@ -196,7 +196,7 @@ export function pickImportedBook(
 	beforeIds: ReadonlySet<string>,
 	books: readonly BookSummary[],
 ): ImportedBook | null {
-	if (status.state !== 'completed') return null;
+	if (status.state !== 'completed' || (status.books?.length ?? 0) > 1) return null;
 	if (status.bookId) {
 		const match = books.find((book) => book.bookId === status.bookId);
 		if (match) return { bookId: match.bookId, title: match.title };

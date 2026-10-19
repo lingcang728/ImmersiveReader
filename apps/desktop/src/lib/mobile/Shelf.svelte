@@ -262,7 +262,7 @@
 		{#if issues.length > 0}
 			<div class="banner">
 				<Icon name="alert" size={18} />
-				<span class="banner-text">{issues.length} 个项目无法读取</span>
+				<span class="banner-text">{issues.length} 项需要检查</span>
 				<button
 					type="button"
 					class="banner-action"
@@ -300,10 +300,10 @@
 			<div class="shelf-empty" data-testid="shelf-empty">
 				<span class="empty-icon" aria-hidden="true"><Icon name="book" size={40} /></span>
 				<h2 class="empty-title">书库还是空的</h2>
-				<p class="empty-copy">导入 EPUB 或 Markdown，开始本地阅读。</p>
+				<p class="empty-copy">打开 EPUB 或 Markdown，自动保存到书库。</p>
 				<button type="button" class="primary-btn" onclick={onImport}>
 					<Icon name="plus" size={20} />
-					<span>导入 EPUB / Markdown</span>
+					<span>打开 EPUB / Markdown</span>
 				</button>
 			</div>
 		{:else}
@@ -389,7 +389,7 @@
 	<button
 		type="button"
 		class="import-fab ir-pressable"
-		aria-label="导入书籍"
+		aria-label="打开书籍"
 		data-testid="shelf-import"
 		onclick={onImport}
 	>
@@ -425,7 +425,7 @@
 	.brand-title {
 		margin: 0;
 		color: var(--heading);
-		font-size: 24px;
+		font-size: 22px;
 		font-weight: 600;
 		letter-spacing: 0.01em;
 		line-height: 1.2;
@@ -703,7 +703,7 @@
 	/* ----- continue reading hero ----- */
 	.continue-card {
 		display: flex;
-		gap: 14px;
+		gap: 12px;
 		align-items: center;
 		width: 100%;
 		margin: 4px 0 20px;

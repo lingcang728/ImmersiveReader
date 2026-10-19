@@ -87,10 +87,13 @@
 	}
 
 	// ----- library / caps / intents ------------------------------------
-	async function refreshLibrary(silent = false) {
+	let libraryRefreshNonce = 0;
+    async function refreshLibrary(silent = false) {
+        const nonce = ++libraryRefreshNonce;
 		if (!silent) shelfLoading = true;
 		try {
 			const snapshot = await api.scanLibrary();
+            if (nonce !== libraryRefreshNonce) return;
 			books = snapshot.books;
 			issues = snapshot.issues;
 			libraryWritable = snapshot.writable;
@@ -100,9 +103,9 @@
 			console.warn('[mobile] library scan failed', error);
 			if (!silent) bootError = message;
 		} finally {
-			shelfLoading = false;
-		}
-	}
+            if (nonce === libraryRefreshNonce) shelfLoading = false;
+        }
+    }
 
 	async function loadCapabilities() {
 		try {
@@ -132,6 +135,7 @@
 
 	async function boot() {
 		if (booted) return;
+        booted = true;
 		// First frame already rendered the skeleton; exactly three concurrent
 		// IPC calls are allowed here (docs §5).
 		const scanTask = refreshLibrary();
@@ -211,6 +215,7 @@
 	}
 
 	function closeSettings() {
+        void refreshLibrary(true);
 		if (view !== 'settings') return;
 		view = 'shelf';
 		removeLayer('settings');
@@ -248,9 +253,10 @@
 
 	function closeImportSheet() {
 		if (!importOpen) return;
-		importOpen = false;
-		importInitialUris = null;
-		removeLayer('import');
+        importOpen = false;
+        importInitialUris = null;
+        void refreshLibrary(true);
+        removeLayer('import');
 	}
 
 	function requestDelete(book: BookSummary) {
@@ -419,9 +425,13 @@
 	// Default capture state is off; only an explicit transition (reader open)
 	// issues the IPC, so boot stays at exactly three concurrent calls.
 	let volumeCaptureActive: boolean | null = false;
+	let immersiveActive: boolean | null = null;
+	let readerCaptureAllowed = $state(true);
+	let appVisible = $state(true);
+	let textSelected = $state(false);
 
 	function updateVolumeCapture() {
-		const wanted = view === 'reader' && caps.volumeKeyBridge && $volumeKeyPaging;
+		const wanted = view === 'reader' && caps.volumeKeyBridge && $volumeKeyPaging && readerCaptureAllowed && appVisible && !textSelected;
 		if (wanted === volumeCaptureActive) return;
 		volumeCaptureActive = wanted;
 		void api.setVolumeKeyCapture(wanted).catch((error) => {
@@ -438,8 +448,20 @@
 		updateVolumeCapture();
 	});
 
+	$effect(() => {
+		if (caps.platform !== 'android') return;
+		const wanted = view === 'reader';
+		if (wanted === immersiveActive) return;
+		immersiveActive = wanted;
+		void api.setReaderImmersive(wanted).catch((error) => {
+			immersiveActive = null;
+			console.warn('[mobile] status-bar toggle failed', error);
+		});
+	});
+
 	// ----- lifecycle ----------------------------------------------------
 	function teardown() {
+		if (immersiveActive) void api.setReaderImmersive(false).catch(() => {});
 		for (const timer of toastTimers.values()) clearTimeout(timer);
 		toastTimers.clear();
 		if (volumeCaptureActive) {
@@ -450,13 +472,20 @@
 
 	onMount(() => {
 		void boot();
+		const onReaderCapture = (event: Event) => { readerCaptureAllowed = (event as CustomEvent<{ enabled: boolean }>).detail.enabled; };
+		const onSelection = () => { textSelected = Boolean(window.getSelection()?.toString()); };
+		window.addEventListener('ir:reader-capture', onReaderCapture);
+		document.addEventListener('selectionchange', onSelection);
 		const onVisibilityChange = () => {
+			appVisible = document.visibilityState === 'visible';
 			if (document.visibilityState !== 'visible') return;
 			// App resumed: a share/VIEW intent may have queued while backgrounded.
 			void drainIntents();
 		};
 		document.addEventListener('visibilitychange', onVisibilityChange);
 		return () => {
+			window.removeEventListener('ir:reader-capture', onReaderCapture);
+			document.removeEventListener('selectionchange', onSelection);
 			document.removeEventListener('visibilitychange', onVisibilityChange);
 			teardown();
 		};

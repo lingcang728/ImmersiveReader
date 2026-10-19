@@ -727,7 +727,12 @@ def run_light_flow(
                 if locator.count() > 0:
                     locator.first.click()
                     try:
+                        # A mounted HUD behind an open modal is not usable focus mode.
+                        panel.locator('.sheet-close').click()
+                        panel.wait_for(state='hidden', timeout=args.timeout)
                         first_visible(page, ['[data-testid="focus-hud"]'], args.timeout)
+                        page.get_by_role('button', name='下一句', exact=True).click()
+                        page.wait_for_timeout(350)
                         return f"focus HUD opened via settings switch {selector}"
                     except AssertionError:
                         continue

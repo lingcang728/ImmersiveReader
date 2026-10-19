@@ -282,25 +282,42 @@
           nextChapterId: index >= 0 && index + 1 < chapters.length ? chapters[index + 1].id : undefined,
         };
       }
-      case "open_reader_locator":
-      case "get_reader_locator":
+      case "load_reader_locator":
+        return localStorage.getItem(`qa:locator:${args.bookId}`);
+      case "save_reader_locator": {
+        if (typeof args?.locatorJson !== "string") throw new Error("locatorJson must be JSON string");
+        const locator = JSON.parse(args.locatorJson);
+        if (locator.bookId !== args.bookId || locator.schemaVersion !== 1) throw new Error("invalid locator");
+        localStorage.setItem(`qa:locator:${args.bookId}`, args.locatorJson);
         return null;
-      case "save_reader_locator":
+      }
       case "save_book_progress":
       case "save_reading_state":
       case "save_recent_files":
+        return null;
       case "set_volume_key_capture":
-        return command === "set_volume_key_capture" ? true : null;
+      case "set_reader_immersive":
+        if (typeof args.enabled !== "boolean") throw new Error("enabled must be a boolean");
+        return args.enabled;
       case "load_reading_state":
         return { scroll_position: 0, bookmarks: [], progress: 0 };
       case "load_recent_files":
         return { json: "[]", store_exists: true };
-      case "list_bookmarks":
-        return { bookmarks: [] };
-      case "add_bookmark":
-        return { bookmarkId: `qa-bm-${Date.now()}` };
-      case "remove_bookmark":
+      case "list_reader_bookmarks":
+        return JSON.parse(localStorage.getItem(`qa:bookmarks:${args.bookId}`) || "[]");
+      case "add_reader_bookmark": {
+        if (typeof args?.locatorJson !== "string") throw new Error("locatorJson required");
+        const key = `qa:bookmarks:${args.bookId}`;
+        const rows = JSON.parse(localStorage.getItem(key) || "[]");
+        const row = { bookmarkId: `qa-bm-${Date.now()}`, bookId: args.bookId, locatorJson: args.locatorJson, label: args.label || "", createdAt: new Date().toISOString() };
+        rows.push(row); localStorage.setItem(key, JSON.stringify(rows)); return row;
+      }
+      case "remove_reader_bookmark": {
+        for (const key of Object.keys(localStorage).filter(k => k.startsWith("qa:bookmarks:"))) {
+          localStorage.setItem(key, JSON.stringify(JSON.parse(localStorage.getItem(key)).filter(row => row.bookmarkId !== args.bookmarkId)));
+        }
         return null;
+      }
       case "search_book":
         return {
           hits: [
@@ -339,6 +356,8 @@
         };
       case "clear_safe_cache":
         return { deletedItems: 3, releasedBytes: 456_789, skipped: [] };
+      case "repair_library_duplicates":
+        return {groups: [], duplicateCount: 0, mergedCount: 0};
       case "list_trash":
         return [];
       case "restore_trash_item":
@@ -393,10 +412,7 @@
       case "load_reader_preferences":
         throw new Error(`desktop-only command called on mobile: ${command}`);
       default:
-        // Unknown command: record and return null rather than rejecting so a
-        // new optional call cannot hang the UI; verify_mobile.py asserts that
-        // none of the *known* critical routes fell through.
-        return null;
+        throw new Error(`unregistered mock command: ${command}`);
     }
   }
 

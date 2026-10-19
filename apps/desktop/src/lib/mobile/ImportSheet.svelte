@@ -65,7 +65,7 @@
 					? '已取消导入'
 					: phase === 'running'
 						? '正在导入'
-						: '导入书籍'
+						: '打开书籍'
 	);
 	const closeLabel = $derived(phase === 'running' ? '取消导入' : '关闭');
 
@@ -191,7 +191,7 @@
 			phase = 'completed';
 			// Clean success: hand the result to the shell immediately. With
 			// issues the sheet stays open so the user sees what was skipped.
-			if (next.issues.length === 0) handOff(next);
+			if (next.issues.length === 0 && (next.books?.length ?? 0) <= 1) handOff(next);
 			return;
 		}
 		if (next.state === 'cancelled') {
@@ -222,8 +222,9 @@
 		if (phase === 'running') schedulePoll(IMPORT_POLL_INTERVAL_MS);
 	}
 
-	function handleClose() {
-		onClose();
+    function handleClose() {
+        if (phase === 'running') { void handleCancel(); return; }
+        onClose();
 	}
 
 	function finishCompleted() {
@@ -275,7 +276,7 @@
 	{#if phase === 'idle'}
 		<div class="import-intro">
 			<span class="intro-icon" aria-hidden="true"><Icon name="folder" size={28} /></span>
-			<p class="import-copy">选择本机的 EPUB 或 Markdown 文件，导入后加入本地书架。</p>
+			<p class="import-copy">选择 EPUB 或 Markdown，自动保存副本到书库并记忆进度。</p>
 			<ul class="import-hints">
 				<li>支持 EPUB（无 DRM）与 .md / .markdown / .txt</li>
 				<li>文件只在本机读取，不会上传</li>
@@ -331,9 +332,11 @@
 		</div>
 	{:else if phase === 'completed'}
 		<div class="import-final">
-			<p class="import-copy">导入完成 · {view.filesLabel}</p>
+            <p class="import-copy">打开完成 · {status?.books?.length ?? 1} 本书目</p>
+            {#each status?.books ?? [] as book (book.bookId)}<p class="current-file">✓ {book.title}</p>{/each}
 			{@render issueBlock()}
-			<button type="button" class="primary-btn" onclick={finishCompleted}>完成</button>
+            {#if issueList.length > 0}<button type="button" class="outline-btn" onclick={retry}>重试</button>{/if}
+            <button type="button" class="primary-btn" onclick={finishCompleted}>完成</button>
 		</div>
 	{:else if phase === 'cancelled'}
 		<div class="import-final">

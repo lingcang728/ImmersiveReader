@@ -16,7 +16,7 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"
-            android:name=".MainActivity"
+            android:name="com.lingcang.immersivereading.MainActivity"
             android:exported="true"
             android:theme="@style/Theme.immersive_reader.Splash"
             android:hardwareAccelerated="true"

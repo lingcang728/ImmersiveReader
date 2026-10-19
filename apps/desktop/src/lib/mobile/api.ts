@@ -8,6 +8,7 @@
 
 import { invokeCommand, invokeWithTimeout } from '$lib/ipc';
 import { describeError } from '$lib/errors';
+import { stableRequestId } from '$lib/requestId';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type {
@@ -151,7 +152,7 @@ export function takePendingOpenUris(): Promise<string[]> {
 export async function pickBooks(): Promise<string[]> {
 	const selected = await open({
 		multiple: true,
-		title: '选择要导入的书籍',
+		title: '打开书籍',
 		filters: [{ name: '书籍与文档', extensions: ['md', 'markdown', 'txt', 'epub'] }],
 	});
 	return (Array.isArray(selected) ? selected : selected ? [selected] : []).filter(
@@ -178,15 +179,17 @@ export function listTrash(): Promise<TrashItem[]> {
 	return invokeCommand<TrashItem[]>('list_trash');
 }
 
-export function restoreTrashItem(trashId: string, expectedRevision: number): Promise<unknown> {
-	return invokeCommand('restore_trash_item', { trashId, expectedRevision });
+export async function restoreTrashItem(trashId: string, expectedRevision: number): Promise<unknown> {
+    const requestId = await stableRequestId('restore', trashId, expectedRevision);
+    return invokeCommand('restore_trash_item', { trashId, expectedRevision, requestId });
 }
 
-export function permanentlyDeleteTrashItem(
+export async function permanentlyDeleteTrashItem(
 	trashId: string,
 	expectedRevision: number,
 ): Promise<unknown> {
-	return invokeCommand('permanently_delete_trash_item', { trashId, expectedRevision });
+	const requestId = await stableRequestId('delete-trash', trashId, expectedRevision);
+    return invokeCommand('permanently_delete_trash_item', { trashId, expectedRevision, requestId });
 }
 
 // ----- Settings / storage -------------------------------------------------
@@ -229,6 +232,10 @@ export function getRawPlatformCapabilities(): Promise<RawPlatformCapabilities> {
 /** Volume-key capture (only meaningful while a reader is foregrounded). */
 export function setVolumeKeyCapture(enabled: boolean): Promise<boolean> {
 	return invokeCommand<boolean>('set_volume_key_capture', { enabled });
+}
+
+export function setReaderImmersive(enabled: boolean): Promise<boolean> {
+	return invokeCommand<boolean>('set_reader_immersive', { enabled });
 }
 
 // ----- External links -----------------------------------------------------
