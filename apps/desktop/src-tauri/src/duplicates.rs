@@ -68,6 +68,16 @@ fn signature(dir: &Path, manifest: &Manifest) -> Result<String, String> {
         hash.update([0]);
         hash.update(relative.as_bytes());
         hash.update([0]);
+        if relative == "publication.json" {
+            // Resource maps serialize from HashMap; key order is not a content change.
+            let mut value: serde_json::Value = serde_json::from_slice(
+                &crate::atomic_file::read(&path).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            value.sort_all_objects();
+            hash.update(serde_json::to_vec(&value).map_err(|e| e.to_string())?);
+            continue;
+        }
         let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
         std::io::copy(&mut file, &mut hash).map_err(|e| e.to_string())?;
     }
@@ -124,6 +134,11 @@ pub(crate) fn repair(root: &Path, apply: bool) -> Result<RepairReport, String> {
         }
         let mut progress = crate::progress::load_progress(canonical_dir, canonical)?;
         let mut locator: Option<crate::contracts::ReaderLocator> = None;
+        let mut bookmark_ids: std::collections::HashSet<_> = db
+            .list_bookmarks(&canonical.book_id)?
+            .into_iter()
+            .map(|bookmark| bookmark.bookmark_id)
+            .collect();
         for (dir, manifest, _) in group.iter() {
             progress =
                 library::merge_progress(&progress, &crate::progress::load_progress(dir, manifest)?);
@@ -162,6 +177,9 @@ pub(crate) fn repair(root: &Path, apply: bool) -> Result<RepairReport, String> {
                             format!("{}:{}", manifest.book_id, bookmark.bookmark_id).as_bytes()
                         )
                     );
+                    if !bookmark_ids.insert(id.clone()) {
+                        continue;
+                    }
                     db.add_bookmark(
                         &canonical.book_id,
                         &id,
@@ -212,6 +230,30 @@ mod tests {
         progress.position = 0.73;
         progress.updated = "2026-10-18T13:00:00Z".into();
         crate::progress::save_progress(&dir, &manifest, &progress).unwrap();
+        let db = ReaderDb::open_current().unwrap();
+        let source_id = "old-bookmark";
+        let bookmark = serde_json::json!({"schemaVersion":1,"bookId":first.manifest.book_id,"chapterId":first.manifest.chapters[0].id,"anchor":{"kind":"ratio"},"ratio":0.4,"updated":"2026-10-18T12:00:00Z"});
+        db.add_bookmark(
+            &first.manifest.book_id,
+            source_id,
+            &bookmark.to_string(),
+            "旧书签",
+        )
+        .unwrap();
+        // Simulate a previous attempt that copied bookmarks but died before moving the duplicate.
+        let replay_id = format!(
+            "merged-{:x}",
+            Sha256::digest(format!("{}:{source_id}", first.manifest.book_id).as_bytes())
+        );
+        let mut copied = bookmark;
+        copied["bookId"] = second.manifest.book_id.clone().into();
+        db.add_bookmark(
+            &second.manifest.book_id,
+            &replay_id,
+            &copied.to_string(),
+            "旧书签",
+        )
+        .unwrap();
         assert_eq!(repair(&library, false).unwrap().duplicate_count, 1);
         assert_eq!(repair(&library, true).unwrap().merged_count, 1);
         let scan = library::scan_library(&library).unwrap();
@@ -219,12 +261,47 @@ mod tests {
         assert_eq!(scan.books[0].book_id, second.manifest.book_id);
         assert_eq!(scan.books[0].progress, 0.73);
         assert_eq!(crate::trash::list(&library).unwrap().len(), 1);
+        assert_eq!(
+            db.list_bookmarks(&second.manifest.book_id).unwrap().len(),
+            1
+        );
+        drop(db);
         let _ = ReaderDb::open_current()
             .unwrap()
             .remove_book(&first.manifest.book_id);
         let _ = ReaderDb::open_current()
             .unwrap()
             .remove_book(&second.manifest.book_id);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn publication_map_order_is_not_a_content_difference() {
+        let root = std::env::temp_dir().join(format!("ir-map-order-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let manifest: Manifest = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/manifest.valid.json"
+        ))
+        .unwrap();
+        let publication = root.join("publication.json");
+        fs::write(
+            &publication,
+            r#"{"resources":{"a":"one","b":"two"},"format":"epub"}"#,
+        )
+        .unwrap();
+        let first = signature(&root, &manifest).unwrap();
+        fs::write(
+            &publication,
+            r#"{"format":"epub","resources":{"b":"two","a":"one"}}"#,
+        )
+        .unwrap();
+        assert_eq!(first, signature(&root, &manifest).unwrap());
+        fs::write(
+            &publication,
+            r#"{"format":"epub","resources":{"b":"changed","a":"one"}}"#,
+        )
+        .unwrap();
+        assert_ne!(first, signature(&root, &manifest).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 }

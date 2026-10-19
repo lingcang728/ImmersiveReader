@@ -11,7 +11,9 @@
 - Windows EFS 目录拒绝重命名时，使用带校验与原文件备份的写入日志；读写共用锁、启动读取前恢复，不关闭用户目录加密。
 - EPUB 在挂载前净化并限定样式作用域；保留 XHTML head 的样式引用，解析父目录资源，允许受书目路径权限约束的本地样式和字体。远程资源仍被阻止。
 - 手机专注使用统一分句，长句按有效视口 82% 分屏；按键排队、忽略原生长按重复事件，手动滚动中断程序滚动。排版控件共用设置，页宽三档改变实际留白。
-- 按 10 月 19 日追加要求：阅读期间隐藏 Android 状态栏，返回书架恢复；正文滚动窗口避开系统安全区，专注控制条距底部手势区 4 CSS px，并为控制条保留正文空间。
+- 按 10 月 19 日追加要求：阅读期间隐藏 Android 状态栏，返回书架恢复；正文连续铺满视口，安全区边缘柔和渐隐，不裁成上下分隔的面板。专注控制条悬浮于正文上方，距底部手势区 4 CSS px；长句不画出整屏矩形高亮边框。
+- 补充审计修复：重复书目比较 publication.json 时归一化映射顺序；部分书签复制成功后重试可跳过已合并的记录，避免修复卡在主键冲突。
+- 真机 CSP 复核发现：Tauri 注入 nonce 后，`unsafe-inline` 不再允许样式块；章节完成净化和作用域限制后复用应用 head 的可信 nonce。nonce 属性须写入可序列化的内容属性，不能只设置 DOM property。内联样式属性单独由 `style-src-attr` 允许，脚本策略不变。依据：[Tauri CSP](https://v2.tauri.app/security/csp/)、[MDN nonce](https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/nonce)。
 - Windows QA 运行另设 WebView 配置和单实例标识；隐藏 QA 窗口只允许在有效 QA 数据通道下启用。安装脚本对仍在运行的窗口检查桌面，无法确认属于 coding 时停止。
 
 ## 自动化证据
@@ -20,9 +22,10 @@
 
 | 检查 | 结果及证据 |
 | --- | --- |
-| `scripts/verify.ps1` | `verify-with-insets.log` 到达 `all checks passed`；前端 268、Rust 221、脚本 14、契约 60 fixtures；Svelte 0 errors / 0 warnings，Rust check / clippy / fmt 通过，运行时 1851 项校验通过。外层终端包装进程未自行退出，已在确认无工作子进程后清理，不能用其退出状态代替门禁内部记录。 |
+| `scripts/verify.ps1` | `verify-final.log` 到达 `all checks passed`；前端 268、Rust 222、脚本 14、契约 60 fixtures；Svelte 0 errors / 0 warnings，Rust check / clippy / fmt 通过，运行时 1851 项校验通过。报告模式的依赖审计项见下文，不能视为严格审计通过。 |
 | 4 种手机宽度 | 359/360/390/412 CSS px；`layout-insets.log` 94 通过、0 失败；48 张互异截图，首屏 JS 164849 B / CSS 25524 B。后续对焦点截图增加“关闭设置面板并实际推进”的要求。 |
-| 阅读持久化与样式隔离 | `reading-insets.log` 7 项通过：832 px 位置重启恢复到 812 px、书签持久化、退出等保存、head 样式生效且不影响界面、130% 长句句内连续分页和反向分页、无未处理错误。 |
+| 阅读持久化与样式隔离 | `reading-floating-csp.log` 8 项通过：832 px 位置重启恢复到 812 px、字号变化保留句内锚点、书签持久化、退出等保存、严格 nonce CSP 下 head 样式生效且不影响界面、130% 长句句内连续分页和反向分页、无未处理错误。最终 APK 另行复验。 |
+| 重复合并中断恢复 | `duplicate-recovery.log` 2 项通过，覆盖 publication 映射顺序不同、部分书签已合并后重试、保留最新进度与书签。 |
 | 100 本书后端性能 | 固定合成库，扫描约 111～115 ms，读取快照约 4.79 ms。此数值只代表后端，不能替代窗口首屏耗时或修复前后的整机对照。 |
 | Android 初轮真实接口 | `android-reading-v2.log`：原生导入去重、深层资源零扫描误报、定位/书签往返、书架 76%、拒绝旧命令和错误参数、杀进程后恢复、真实音量键与长按各推进一屏、相对图片加载均通过。CSS 检查发现 head 被净化器删除，已据此补修，等待更新 APK 复验。 |
 

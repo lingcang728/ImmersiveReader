@@ -285,7 +285,9 @@ export function elementCssPath(el: Element, root: Element): string {
 
 function readableTop(scroller: HTMLElement): number {
     const toolbar = scroller.ownerDocument.querySelector<HTMLElement>('[data-testid="reader-toolbar"]:not([aria-hidden="true"])');
-    return Math.max(scroller.getBoundingClientRect().top, toolbar?.getBoundingClientRect().bottom ?? 0);
+    const safeTop = scroller.closest('[data-testid="reader-screen"]')
+        ? (Number.parseFloat(getComputedStyle(scroller.ownerDocument.documentElement).getPropertyValue('--ir-safe-top')) || 0) + 24 : 0;
+    return Math.max(scroller.getBoundingClientRect().top, safeTop, toolbar?.getBoundingClientRect().bottom ?? 0);
 }
 
 /** Capture the first readable text line, excluding wrapper containers and overlaid chrome. */
@@ -533,5 +535,12 @@ export async function prepareChapterHtml(html: string, baseDir: string, convert:
         } catch (error) { console.warn("[epub] stylesheet unavailable", error); }
     }
     postProcessChapterDom(container, baseDir, convert);
+    // Tauri adds a style nonce to CSP, which makes 'unsafe-inline' ineffective.
+    // Reuse only the trusted app-head nonce after the chapter CSS has been scoped.
+    const nonce = document.head.querySelector<HTMLStyleElement>('style[nonce]')?.nonce
+        || document.head.querySelector<HTMLLinkElement>('link[rel~="stylesheet"][nonce]')?.nonce;
+    // The nonce property alone does not reflect into serialized HTML. The
+    // inert chapter is serialized for {@html}, so set the content attribute.
+    if (nonce) for (const style of Array.from(container.querySelectorAll<HTMLStyleElement>('style'))) style.setAttribute('nonce', nonce);
     return container.innerHTML;
 }
