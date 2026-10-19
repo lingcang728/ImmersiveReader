@@ -480,9 +480,17 @@ pub(crate) fn import_markdown_folder_inner(
             });
         }
         if chapters.is_empty() {
-            return Err(
-                "The selected folder contains no readable Markdown or TXT files".to_string(),
-            );
+            let details = issues
+                .iter()
+                .take(3)
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>()
+                .join("；");
+            return Err(if details.is_empty() {
+                "The selected folder contains no readable Markdown or TXT files".to_string()
+            } else {
+                format!("未能导入可读章节：{details}")
+            });
         }
         let now = Utc::now().to_rfc3339();
         let manifest = Manifest {

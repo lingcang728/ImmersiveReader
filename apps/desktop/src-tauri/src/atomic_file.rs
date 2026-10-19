@@ -460,15 +460,59 @@ pub(crate) fn copy_file_synced(source: &Path, target: &Path) -> Result<u64, Stri
     if let Some(parent) = normalized_target.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let bytes =
-        fs::copy(&normalized_source, &normalized_target).map_err(|error| error.to_string())?;
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .open(&normalized_target)
-        .map_err(|error| error.to_string())?;
-    file.sync_all()
-        .map_err(|error| error.to_string())
-        .map(|_| bytes)
+    #[cfg(windows)]
+    {
+        // CopyFile propagates EFS keys and readonly attributes. Managed copies
+        // must inherit their destination directory's policy instead: copying
+        // a readable encrypted cache file can otherwise fail with error 6000.
+        let mut input = File::open(&normalized_source).map_err(|e| e.to_string())?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&normalized_target)
+            .map_err(|e| e.to_string())?;
+        if windows_same_file(&input, &output).map_err(|e| e.to_string())? {
+            return Err("复制来源与目标是同一个文件".to_string());
+        }
+        output.set_len(0).map_err(|e| e.to_string())?;
+        let bytes = io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+        output.sync_all().map_err(|e| e.to_string())?;
+        Ok(bytes)
+    }
+    #[cfg(not(windows))]
+    {
+        let bytes = fs::copy(&normalized_source, &normalized_target).map_err(|e| e.to_string())?;
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&normalized_target)
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string()).map(|_| bytes)
+    }
+}
+
+#[cfg(windows)]
+fn windows_same_file(left: &File, right: &File) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    fn identity(file: &File) -> io::Result<(u32, u32, u32)> {
+        let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: Category 8 (FFI). The handle is owned by a live File; the
+        // output struct is read only after the API reports full initialization.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: GetFileInformationByHandle succeeded and initialized info.
+        let info = unsafe { info.assume_init() };
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    }
+    Ok(identity(left)? == identity(right)?)
 }
 
 #[cfg(test)]
@@ -477,6 +521,33 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    #[cfg(all(windows, not(miri)))]
+    // Windows-only fixture cleanup restores the readonly bit, not Unix modes.
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn managed_copy_of_readonly_source_is_writable_and_aliases_preserve_source() {
+        let dir = std::env::temp_dir().join(format!("ir-copy-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.md");
+        let target = dir.join("target.md");
+        fs::write(&source, b"original").unwrap();
+        let mut permissions = fs::metadata(&source).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&source, permissions).unwrap();
+        assert_eq!(super::copy_file_synced(&source, &target).unwrap(), 8);
+        fs::write(&target, b"editable managed copy").unwrap();
+        assert_eq!(fs::read(&source).unwrap(), b"original");
+        let mut permissions = fs::metadata(&source).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&source, permissions).unwrap();
+        let alias = dir.join("alias.md");
+        fs::hard_link(&source, &alias).unwrap();
+        assert!(super::copy_file_synced(&source, &source).is_err());
+        assert!(super::copy_file_synced(&source, &alias).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"original");
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     struct FailingReplacer;
 

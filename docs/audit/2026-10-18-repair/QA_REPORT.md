@@ -17,6 +17,7 @@
 - 真机 CSP 复核发现：Tauri 注入 nonce 后，`unsafe-inline` 不再允许样式块；章节完成净化和作用域限制后复用应用 head 的可信 nonce。nonce 属性须写入可序列化的内容属性，不能只设置 DOM property。内联样式属性单独由 `style-src-attr` 允许，脚本策略不变。依据：[Tauri CSP](https://v2.tauri.app/security/csp/)、[MDN nonce](https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/nonce)。
 - Windows QA 运行另设 WebView 配置和单实例标识；隐藏 QA 窗口只允许在有效 QA 数据通道下启用。安装脚本对仍在运行的窗口检查桌面，无法确认属于 coding 时停止。
 - 安装版额外发现并修复冷启动文件关联丢失：旧方案在 setup 内向尚未导航的 WebView 注入路径，可能落在空白文档后丢失。改为创建 WebView 前入后端队列，冷启动、第二实例和前台恢复统一排队消费；桌面路径直接使用自动入库流程，不调用 Android URI 暂存命令。正在消费时收到新通知会再排空一次。隐藏 QA 的第二实例也不显示窗口。
+- 后续实际 Markdown 打开揭示第二个导入故障：用户选中文件先进入 EFS 暂存目录，再由 Windows `CopyFile` 复制到书库时返回 `ERROR_ENCRYPTION_FAILED`（6000）。同一 90 字节合成文件以原生 CopyFile 两跳复现，读取后写入目标则成功。比较了 CopyFileEx 允许未加密目标、手动解密、改变暂存位置、按内容流复制四种方案；选择最后一种，让目标继承其所在目录的加密策略，不更改用户目录属性。Windows 同步复制不再继承源只读属性，并在截断前通过打开的文件句柄识别同文件/硬链接，避免覆盖源文件。所有章节失败时会保留具体原因，避免只报“没有可读文件”。依据：[Microsoft EFS 复制行为](https://learn.microsoft.com/en-us/windows/win32/fileio/handling-encrypted-files-and-directories)。
 
 ## 自动化证据
 
@@ -24,12 +25,13 @@
 
 | 检查 | 结果及证据 |
 | --- | --- |
-| `scripts/verify.ps1` | 文件关联补修后的 `verify-final-source.log` 到达 `all checks passed`，完整命令退出码 0，无须清理进程解锁；前端 268、Rust 222、脚本 14、契约 60 fixtures；Svelte 0 errors / 0 warnings，Rust check / clippy / fmt 通过。移除播客专属运行时后 1315 项校验通过。报告模式的依赖审计项见下文，不能视为严格审计通过。 |
+| `scripts/verify.ps1` | EFS 复制补修后的 `verify-copy-final.log` 到达 `all checks passed`，完整命令退出码 0，无须清理进程解锁；前端 268、Rust 223、脚本 14、契约 60 fixtures；Svelte 0 errors / 0 warnings，Rust check / clippy / fmt 通过。移除播客专属运行时后 1315 项校验通过。报告模式的依赖审计项见下文，不能视为严格审计通过。 |
 | 4 种手机宽度 | 359/360/390/412 CSS px；最终 `layout-final.log` 94 通过、0 失败、0 跳过，48 张截图；专注截图关闭设置面板并实际推进后采集。 |
 | 阅读持久化与样式隔离 | `reading-floating-csp.log` 8 项通过：832 px 位置重启恢复到 812 px、字号变化保留句内锚点、书签持久化、退出等保存、严格 nonce CSP 下 head 样式生效且不影响界面、130% 长句句内连续分页和反向分页、无未处理错误。最终 APK 另行复验。 |
 | 重复合并中断恢复 | `duplicate-recovery.log` 2 项通过，覆盖 publication 映射顺序不同、部分书签已合并后重试、保留最新进度与书签。 |
 | 验证脚本卡住的根因 | `job_object` 的旧测试终止 cmd 后留下 ping 后代，继承日志管道，使原生命令已退出但外层仍等待 EOF。只清理了本轮已核实 PID、父 PID、命令及创建时间的夹具进程。改为 Job 托管的单进程夹具并关闭标准流。比较过关闭输出管道、轮询进程退出、托管整个进程树、移除外层 shell 四种方案；选择同时消除后代泄漏和管道占用的方案。依据：[dotnet/runtime 29232](https://github.com/dotnet/runtime/issues/29232)、[51277](https://github.com/dotnet/runtime/issues/51277)。 |
 | 100 本书后端性能 | 固定合成库，扫描约 111～115 ms，读取快照约 4.79 ms。此数值只代表后端，不能替代窗口首屏耗时或修复前后的整机对照。 |
+| 安装版启动测量方法 | 进程创建到 `ir-shelf-ready` 的 DOM 就绪单独计时；CDP 连接开销另列。重开前保留真实子进程句柄，等待全部退出，避免和 WebView2 的异步配置目录关闭竞争。本机 `%LOCALAPPDATA%` 有 EFS 加密属性，新建默认 QA 配置目录继承加密，既有生产配置目录没有；空 QA 目录解密被系统拒绝，未尝试更改用户目录。另用 G 盘独立合成 QA 配置目录做对照，环境差异须与结果一起报告。引擎创建和缓存启动的可能影响参考 [Microsoft 性能说明](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/performance)，不能仅凭导航前耗时断言具体瓶颈。 |
 | Android 最终真实接口 | `android-reading-floating-final.log` 14 项通过：原生导入去重、深层资源零扫描误报、定位/书签往返、书架 76%、拒绝旧命令和错误参数、杀进程后恢复、状态栏隐藏、连续渐隐正文及降低的悬浮条、真实音量键与长按各推进一屏、相对图片、实际 CSP 下样式及字体、跨章首尾、后台恢复、保存后返回书架、状态栏恢复、系统返回栈。 |
 | 最终手机视觉 | 真实新 APK 截图 `android-device/focus-130-percent.png`（浅色）、`focus-130-percent-dark-final.png`（深色）；正文铺满约 788 CSS px，安全区 40/32 px，HUD 距屏幕底部约 35.43 px；长句没有矩形高亮边框，未使用临时预览样式。 |
 
