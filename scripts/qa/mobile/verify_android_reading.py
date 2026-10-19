@@ -61,7 +61,7 @@ def open_book(page,book):
     selector=f'[data-testid="shelf-book-{book}"]'
     if page.locator(selector).count(): page.locator(selector).click()
     else: page.locator('[data-testid="shelf-continue"]').click()
-    page.wait_for_selector('.epub-content #long',timeout=15000); page.wait_for_timeout(700)
+    page.locator('.epub-content #long').wait_for(timeout=15000); page.wait_for_timeout(700)
 def main():
     global SERIAL
     parser=argparse.ArgumentParser(); parser.add_argument('--apk',required=True); parser.add_argument('--serial',required=True); parser.add_argument('--skip-install',action='store_true'); args=parser.parse_args()
@@ -148,7 +148,10 @@ def main():
         adb('shell','am','start','-W','-n',PACKAGE+'/com.lingcang.immersivereading.MainActivity'); page.wait_for_timeout(500)
         assert json.loads(invoke(page,'load_reader_locator',{'bookId':book}))['chapterId']==saved['chapterId']
         record('background/foreground cursor retained',saved['ratio'])
-        ensure=page.locator('[data-testid="reader-back"]'); ensure.click(); page.wait_for_selector('[data-testid="shelf-continue"]'); record('reader returns to shelf after durable native save','visible')
+        ensure=page.locator('[data-testid="reader-back"]'); ensure.click()
+        page.wait_for_selector('[data-testid="reader-screen"]',state='detached')
+        returned=json.loads(invoke(page,'load_reader_locator',{'bookId':book})); assert returned['ratio']>0,returned
+        record('reader unmount returns to shelf without overwriting the native locator',returned['ratio'])
         page.wait_for_timeout(500); assert status_bar_visible(); record('status bar restored on shelf',True)
         # Native system Back unwinds focus first, then returns to the shelf.
         open_book(page,book); page.wait_for_selector('[data-testid="focus-hud"]')

@@ -61,7 +61,9 @@ def prepare(run_id):
 
 def start(playwright, exe, run_id, port, expected, open_path=None):
     env = os.environ.copy()
-    env.update(IMMERSIVE_QA_RUN_ID=run_id, IMMERSIVE_QA_HEADLESS='1', WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f'--remote-debugging-port={port}')
+    # Hidden WebViews otherwise clamp timers; emulate foreground scheduling
+    # without displaying or focusing a native window on the user's desktop.
+    env.update(IMMERSIVE_QA_RUN_ID=run_id, IMMERSIVE_QA_HEADLESS='1', WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f'--remote-debugging-port={port} --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows')
     before = time.perf_counter()
     before_epoch_ms = time.time() * 1000
     process = subprocess.Popen([exe, *([open_path] if open_path else [])], env=env, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -97,7 +99,7 @@ def start(playwright, exe, run_id, port, expected, open_path=None):
         raise
 
 
-def close(process, browser, page):
+def close(process, browser, page, system_request=False):
     # Retain handles to the actual QA descendants before exiting. Waiting on
     # handles also avoids PID reuse, and prevents a warm relaunch from racing
     # WebView2's asynchronous profile shutdown.
@@ -108,7 +110,11 @@ def close(process, browser, page):
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
     handles = [handle for row in child_processes(process.pid) if (handle := kernel.OpenProcess(0x100000, False, row['ProcessId']))]
     try:
-        page.locator('.chrome-btn-close').evaluate('(el) => el.click()')
+        if system_request:
+            # The same native CloseRequested path as the OS close command.
+            call(page, 'plugin:window|close', {'label':'main'})
+        else:
+            page.locator('.chrome-btn-close').evaluate('(el) => el.click()')
         process.wait(timeout=15)
         assert process.returncode == 0, process.returncode
         browser.close()
@@ -132,7 +138,7 @@ def main():
     def record(name, evidence):
         results.append(dict(name=name, evidence=evidence))
         print('PASS', name, evidence, flush=True)
-        (OUT / 'report.json').write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding='utf-8')
+        (OUT / args.run_id / 'report.json').write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding='utf-8')
     with sync_playwright() as playwright:
         process, browser, page, elapsed = start(playwright, args.exe, args.run_id, args.port, 100)
         record('100-book first launch ready including CDP connection overhead', elapsed)
@@ -143,7 +149,7 @@ def main():
         assert not engines, engines
         record('bookshelf startup does not launch acquisition engines', [row['Name'] for row in children])
         assert not call(page, 'scan_library')['issues']
-        close(process, browser, page)
+        close(process, browser, page, system_request=True)
         record('native closeRequested exits installed process', 0)
         process, browser, page, elapsed = start(playwright, args.exe, args.run_id, args.port, 100)
         record('100-book warm launch ready including CDP connection overhead', elapsed)
@@ -175,6 +181,14 @@ def main():
         record('installed EPUB stylesheet and font pass actual Tauri CSP', dict(spacing=spacing, fonts=fonts))
         page.locator('.epub-scroll').evaluate('(el) => { el.scrollTop=(el.scrollHeight-el.clientHeight)*.4; el.dispatchEvent(new Event("scroll")); }')
         page.wait_for_timeout(100)
+        page.locator('.epub-back').evaluate('(el) => el.click()')
+        page.wait_for_selector('.epub-content', state='detached')
+        returned = json.loads(call(page, 'load_reader_locator', {'bookId':book_id}))
+        assert .3 < returned['ratio'] < .5, returned
+        record('EPUB unmount after shelf return retains the durable locator', returned)
+        page.locator('.book-card').get_by_role('button', name='阅读', exact=True).evaluate('(el) => el.click()')
+        page.wait_for_selector('.epub-content #long')
+        page.wait_for_timeout(700)
         close(process, browser, page)
         record('close during EPUB reading waits for durable locator write', book_id)
         process, browser, page, _ = start(playwright, args.exe, args.run_id, args.port, 101)

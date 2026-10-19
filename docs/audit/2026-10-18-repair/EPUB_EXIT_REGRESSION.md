@@ -11,3 +11,5 @@
 `frontend-unmount-check.log` 为 Svelte 0 errors / 0 warnings；`frontend-unmount-tests.log` 为 270 / 270。此次仅修改共享前端阅读组件，没有修改 Rust 或 IPC 契约。
 
 最终 Windows/Android 安装版的返回书架复验和 12 次真机循环结果归入同目录 `QA_REPORT.md`；构建产物必须包含此修复，先前候选包不作为最终交付。
+
+收尾时结果：新 Android QA 包的 12 次进入/退出及非零定位持久化通过；Windows 和 Android 正式版尚未包含该修复。用户要求直接收尾后停止构建与追加验证，未将正式交付标为完成。
