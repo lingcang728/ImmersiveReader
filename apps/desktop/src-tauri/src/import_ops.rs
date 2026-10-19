@@ -71,6 +71,16 @@ pub struct OpProgress {
 }
 
 impl OpProgress {
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
+        Self {
+            op_id: uuid::Uuid::new_v4().to_string(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            done: Arc::new(AtomicU32::new(0)),
+            total: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
     /// The registered op id — the worker uses it to name its staging dir so
     /// sweeps and status reports correlate.
     pub fn op_id(&self) -> &str {
@@ -291,6 +301,7 @@ pub(crate) fn staging_dir(
 /// picker with no shared tree). Duplicate basenames get a `-N` suffix, dirs
 /// and symlinks are refused, and the cancel flag is polled between files.
 /// Returns the staged file count.
+#[cfg(test)]
 pub(crate) fn stage_local_files(
     paths: &[String],
     staging: &Path,
@@ -427,23 +438,20 @@ pub(crate) fn route_staged(
             .map(|value| value.to_ascii_lowercase())
             .unwrap_or_default();
         if extension == "epub" {
-            let outcome = crate::epub::import_epub_file(&files[0], &locations.library_root, title)?;
-            return serde_json::to_value(&outcome).map_err(|error| error.to_string());
+            return crate::open_inputs::import_one_file(&files[0], title, locations, progress);
         }
         if matches!(extension.as_str(), "zip" | "cbz") {
             let expanded = expand_archive(&files[0], staging)?;
             return route_staged(&expanded, title, locations, progress);
         }
     }
-    let (cancel, done) = progress.counters();
-    let outcome = crate::importer::import_markdown_folder_inner(
-        staging,
-        &locations.library_root,
-        title,
-        Some(cancel),
-        Some(done),
-    )?;
-    serde_json::to_value(&outcome).map_err(|error| error.to_string())
+    if entries
+        .iter()
+        .all(|entry| entry.file_type().is_ok_and(|ty| ty.is_file()))
+    {
+        return crate::open_inputs::import_batch(&files, locations, progress);
+    }
+    crate::open_inputs::import_directory(staging, title, locations, progress)
 }
 
 /// Worker-body helper shared by all begin_import kinds: run `body`, then

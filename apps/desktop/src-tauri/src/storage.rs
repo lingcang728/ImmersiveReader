@@ -161,6 +161,9 @@ impl StorageLocations {
 
     pub fn current() -> Result<Self, String> {
         let qa_run_id = std::env::var("IMMERSIVE_QA_RUN_ID").ok();
+        #[cfg(test)]
+        let qa_run_id =
+            Some(qa_run_id.unwrap_or_else(|| format!("unit-tests-{}", std::process::id())));
         let channel = AppChannel::detect(qa_run_id.as_deref())?;
 
         #[cfg(target_os = "android")]
@@ -170,6 +173,16 @@ impl StorageLocations {
             // (e.g. the pre-setup `app_log` call) this errors — callers such as
             // `app_log` already fail silently, so no panic path is introduced.
             let base = android_base_dirs()?;
+            let channel = if matches!(channel, AppChannel::Production)
+                && base
+                    .app_data
+                    .components()
+                    .any(|component| component.as_os_str() == "com.lingcang.immersivereading.qa")
+            {
+                AppChannel::Qa("android".to_string())
+            } else {
+                channel
+            };
             let runtime_root = std::env::var_os("IMMERSIVE_RUNTIME_ROOT")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| base.runtime.clone());

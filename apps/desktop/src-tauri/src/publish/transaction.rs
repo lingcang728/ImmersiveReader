@@ -66,7 +66,8 @@ fn save_transaction(root: &Path, transaction: &PublishTransaction) -> Result<(),
 }
 
 pub fn load_transaction(root: &Path, transaction_id: &str) -> Result<PublishTransaction, String> {
-    let raw = fs::read(journal_path(root, transaction_id)?).map_err(|error| error.to_string())?;
+    let raw = crate::atomic_file::read(journal_path(root, transaction_id)?)
+        .map_err(|error| error.to_string())?;
     let transaction: PublishTransaction =
         serde_json::from_slice(&raw).map_err(|error| error.to_string())?;
     if transaction.schema_version != 1 || transaction.transaction_id != transaction_id {
@@ -223,7 +224,7 @@ fn ensure_final_path_identity(root: &Path, transaction: &PublishTransaction) -> 
 
     let manifest_path = final_path.join("manifest.json");
     let manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(&manifest_path).map_err(|error| {
+        serde_json::from_slice(&crate::atomic_file::read(&manifest_path).map_err(|error| {
             format!("Final publish path exists but its manifest cannot be read: {error}")
         })?)
         .map_err(|error| format!("Final publish path has invalid metadata: {error}"))?;

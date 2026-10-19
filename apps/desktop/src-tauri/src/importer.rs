@@ -109,7 +109,7 @@ fn issue(issues: &mut Vec<LibraryIssue>, path: &Path, message: impl Into<String>
 /// A4: every regular file is collected (not just chapters) — non-chapter
 /// siblings are copied into the book dir preserving relative structure so
 /// images and attachments referenced by the Markdown keep resolving.
-fn collect_files(
+pub(crate) fn collect_files(
     root: &Path,
     dir: &Path,
     output: &mut Vec<(String, PathBuf)>,
@@ -379,6 +379,13 @@ pub(crate) fn import_markdown_folder_inner(
     let staged = (|| -> Result<Manifest, String> {
         let mut chapters = Vec::with_capacity(files.len());
         for (relative, path) in files {
+            if path
+                .extension()
+                .and_then(|v| v.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
+            {
+                continue;
+            }
             // A2: cooperative cancellation — the op pipeline's cancel flag
             // is polled between files so a cancelled import stops promptly.
             if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {

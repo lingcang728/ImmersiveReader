@@ -108,25 +108,6 @@ def benchmark_cache() -> dict[str, object]:
         }
 
 
-def benchmark_chunk_plan() -> dict[str, dict[str, float | int]]:
-    scripts = ROOT / "tools" / "podcast-transcriber" / "scripts"
-    sys.path.insert(0, str(scripts))
-    from podcast_transcriber.chunk_plan import ChunkPlan
-
-    results: dict[str, dict[str, float | int]] = {}
-    for label, count in (("1h", 60), ("10h", 600)):
-        durations = [60.0] * (count - 1) + [59.25]
-        measurements: list[float] = []
-        signature = ""
-        for _ in range(20):
-            started = time.perf_counter()
-            plan = ChunkPlan.from_durations(durations)
-            signature = plan.signature()
-            measurements.append((time.perf_counter() - started) * 1000)
-        results[label] = {**summary(measurements), "chunks": count, "signature_prefix": signature}
-    return results
-
-
 def benchmark_reader() -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="immersive-audit-reader-") as temporary:
         path = Path(temporary) / "large.md"
@@ -194,7 +175,6 @@ def main() -> int:
                 "environment": environment(),
                 "library_manifest_scan": benchmark_library(),
                 "cache_cleanup": benchmark_cache(),
-                "chunk_plan": benchmark_chunk_plan(),
                 "reader": benchmark_reader(),
                 "task_views": benchmark_task_views(),
             },

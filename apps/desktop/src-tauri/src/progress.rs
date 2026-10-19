@@ -57,10 +57,11 @@ fn resolve_current(mut progress: ReadingProgress, manifest: &Manifest) -> Readin
 
 pub fn load_progress(book_root: &Path, manifest: &Manifest) -> Result<ReadingProgress, String> {
     let path = progress_path(book_root);
+    crate::atomic_file::recover_file(&path).map_err(|error| error.to_string())?;
     if !path.exists() {
         return Ok(default_progress(manifest));
     }
-    let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let raw = crate::atomic_file::read_to_string(&path).map_err(|error| error.to_string())?;
     let parsed = serde_json::from_str::<ReadingProgress>(&raw);
     let mut progress = match parsed {
         Ok(value) => value,

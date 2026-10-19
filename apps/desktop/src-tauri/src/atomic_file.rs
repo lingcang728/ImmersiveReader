@@ -144,7 +144,17 @@ fn sweep_tmps_older_than(dir: &Path, min_age: std::time::Duration) {
         Ok(entries) => entries,
         Err(_) => return,
     };
-    for entry in entries.flatten() {
+    let entries: Vec<_> = entries.flatten().collect();
+    // Pending write recovery owns its temporary and backup bytes, regardless of their age.
+    if entries.iter().any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".ir-write-journal")
+    }) {
+        return;
+    }
+    for entry in entries {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         if !is_own_tmp_name(name) {
@@ -199,11 +209,211 @@ impl Drop for TempFileGuard {
     }
 }
 
+// Some EFS/filter-driver directories reject same-directory rename with ERROR_NOT_SAME_DEVICE.
+// Keep encryption enabled and use a synced write-ahead record plus an original backup there.
+// Readers and writers share this lock, and an interrupted copy is recovered before metadata is read.
+#[cfg(all(windows, not(miri)))]
+fn io_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+#[cfg(all(windows, not(miri)))]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteJournal {
+    temporary: String,
+    backup: Option<String>,
+    new_hash: String,
+    old_hash: Option<String>,
+}
+#[cfg(all(windows, not(miri)))]
+fn journal_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        "{}.ir-write-journal",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+#[cfg(all(windows, not(miri)))]
+fn digest(path: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = File::open(path)?;
+    let mut hash = Sha256::new();
+    std::io::copy(&mut file, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+#[cfg(all(windows, not(miri)))]
+fn sync_copy(source: &Path, target: &Path) -> io::Result<()> {
+    fs::copy(source, target)?;
+    OpenOptions::new().write(true).open(target)?.sync_all()
+}
+#[cfg(all(windows, not(miri)))]
+fn recover_locked(path: &Path) -> io::Result<()> {
+    let journal = journal_path(path);
+    if !journal.exists() {
+        return Ok(());
+    }
+    if fs::metadata(&journal)?.len() > 4096 {
+        return Err(io::Error::other("Invalid write recovery record"));
+    }
+    let record: WriteJournal =
+        serde_json::from_slice(&fs::read(&journal)?).map_err(io::Error::other)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("Missing write directory"))?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let safe = |entry: &str, prefix: &str| -> io::Result<PathBuf> {
+        if !entry.starts_with(prefix)
+            || !is_own_tmp_name(entry)
+            || Path::new(entry).components().count() != 1
+        {
+            return Err(io::Error::other("Invalid recovery filename"));
+        }
+        let file = parent.join(entry);
+        let metadata = fs::symlink_metadata(&file)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+            return Err(io::Error::other("Invalid recovery file"));
+        }
+        Ok(file)
+    };
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+            return Err(io::Error::other("Invalid recovery target"));
+        }
+    }
+    let temporary = safe(&record.temporary, &format!("{name}.tmp."));
+    if let Ok(source) = &temporary {
+        if digest(source)? != record.new_hash {
+            return Err(io::Error::other("Recovery bytes failed verification"));
+        }
+        sync_copy(source, path)?;
+    } else if let (Some(backup), Some(hash)) = (&record.backup, &record.old_hash) {
+        let backup = safe(backup, &format!("{name}.backup.tmp."))?;
+        if digest(&backup)? != *hash {
+            return Err(io::Error::other("Original bytes failed verification"));
+        }
+        sync_copy(&backup, path)?;
+    } else {
+        return Err(io::Error::other("Write recovery bytes missing"));
+    }
+    fs::remove_file(&journal)?;
+    if let Ok(source) = temporary {
+        let _ = fs::remove_file(source);
+    }
+    if let Some(backup) = record.backup {
+        let _ = fs::remove_file(parent.join(backup));
+    }
+    Ok(())
+}
+/// Repair an interrupted EFS fallback before an exists/metadata check.
+pub(crate) fn recover_file(path: &Path) -> io::Result<()> {
+    #[cfg(all(windows, not(miri)))]
+    {
+        let _lock = io_lock()
+            .lock()
+            .map_err(|_| io::Error::other("Write recovery lock unavailable"))?;
+        recover_locked(&long_path(path))?;
+    }
+    #[cfg(any(not(windows), miri))]
+    let _ = path;
+    Ok(())
+}
+pub(crate) fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
+    let path = path.as_ref();
+    #[cfg(all(windows, not(miri)))]
+    {
+        let _lock = io_lock()
+            .lock()
+            .map_err(|_| io::Error::other("Write recovery lock unavailable"))?;
+        recover_locked(&long_path(path))?;
+        fs::read_to_string(long_path(path))
+    }
+    #[cfg(any(not(windows), miri))]
+    {
+        fs::read_to_string(path)
+    }
+}
+pub(crate) fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    let path = path.as_ref();
+    #[cfg(all(windows, not(miri)))]
+    {
+        let _lock = io_lock()
+            .lock()
+            .map_err(|_| io::Error::other("Write recovery lock unavailable"))?;
+        recover_locked(&long_path(path))?;
+        fs::read(long_path(path))
+    }
+    #[cfg(any(not(windows), miri))]
+    {
+        fs::read(path)
+    }
+}
+#[cfg(all(windows, not(miri)))]
+fn recoverable_replace(source: &Path, target: &Path) -> io::Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::other("Missing write directory"))?;
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    let backup = target
+        .exists()
+        .then(|| parent.join(format!("{name}.backup.tmp.{}", uuid::Uuid::new_v4())));
+    if let Some(backup) = &backup {
+        sync_copy(target, backup)?;
+    }
+    let record = WriteJournal {
+        temporary: source
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        backup: backup.as_ref().map(|p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        }),
+        new_hash: digest(source)?,
+        old_hash: backup.as_ref().map(|p| digest(p)).transpose()?,
+    };
+    let journal = journal_path(target);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&journal)?;
+    file.write_all(&serde_json::to_vec(&record).map_err(io::Error::other)?)?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(error) = sync_copy(source, target) {
+        if let Some(backup) = &backup {
+            sync_copy(backup, target)?;
+        } else {
+            let _ = fs::remove_file(target);
+        }
+        let _ = fs::remove_file(&journal);
+        if let Some(backup) = backup {
+            let _ = fs::remove_file(backup);
+        }
+        return Err(error);
+    }
+    // Journal removal commits the new file; until this succeeds, recovery has both versions.
+    fs::remove_file(journal)?;
+    if let Some(backup) = backup {
+        let _ = fs::remove_file(backup);
+    }
+    fs::remove_file(source)?;
+    Ok(())
+}
+
 fn write_with(path: &Path, data: &[u8], replacer: &impl AtomicReplacer) -> Result<(), String> {
     // P2-20: normalize once — the temp sibling, parent mkdir and final
     // replace all inherit the `\\?\` form when the target is near MAX_PATH.
     let normalized = long_path(path);
     let path = normalized.as_path();
+    #[cfg(all(windows, not(miri)))]
+    let _lock = io_lock()
+        .lock()
+        .map_err(|_| "Write recovery lock unavailable".to_string())?;
+    #[cfg(all(windows, not(miri)))]
+    recover_locked(path).map_err(|error| error.to_string())?;
     let parent = path
         .parent()
         .ok_or_else(|| "Atomic write target has no parent directory".to_string())?;
@@ -215,9 +425,21 @@ fn write_with(path: &Path, data: &[u8], replacer: &impl AtomicReplacer) -> Resul
     file.write_all(data).map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
     drop(file);
-    replacer
-        .replace(&guard.path, path)
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = replacer.replace(&guard.path, path) {
+        #[cfg(all(windows, not(miri)))]
+        {
+            use std::os::windows::fs::MetadataExt;
+            let encrypted =
+                fs::metadata(&guard.path).is_ok_and(|meta| meta.file_attributes() & 0x4000 != 0);
+            if error.raw_os_error() == Some(17) && encrypted {
+                recoverable_replace(&guard.path, path).map_err(|error| error.to_string())?;
+            } else {
+                return Err(error.to_string());
+            }
+        }
+        #[cfg(any(not(windows), miri))]
+        return Err(error.to_string());
+    }
     guard.disarm();
     Ok(())
 }
@@ -291,6 +513,48 @@ mod tests {
             b"authoritative"
         );
         fs::remove_file(target).expect("fixture must be removed");
+    }
+
+    #[test]
+    #[cfg(all(windows, not(miri)))]
+    fn interrupted_efs_copy_recovers_verified_new_bytes_and_keeps_original_on_rejection() {
+        let target = temp_file("efs-recovery");
+        let name = target.file_name().unwrap().to_string_lossy();
+        let source = target.with_file_name(format!("{name}.tmp.{}", uuid::Uuid::new_v4()));
+        let backup = target.with_file_name(format!("{name}.backup.tmp.{}", uuid::Uuid::new_v4()));
+        fs::write(&source, b"new authoritative data").unwrap();
+        fs::write(&backup, b"old authoritative data").unwrap();
+        fs::write(&target, b"torn").unwrap();
+        let record = super::WriteJournal {
+            temporary: source.file_name().unwrap().to_string_lossy().into_owned(),
+            backup: Some(backup.file_name().unwrap().to_string_lossy().into_owned()),
+            new_hash: super::digest(&source).unwrap(),
+            old_hash: Some(super::digest(&backup).unwrap()),
+        };
+        fs::write(
+            super::journal_path(&target),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(super::read(&target).unwrap(), b"new authoritative data");
+        assert!(!source.exists());
+        assert!(!backup.exists());
+        assert!(!super::journal_path(&target).exists());
+        let invalid = super::WriteJournal {
+            temporary: "../foreign.tmp.00000000-0000-0000-0000-000000000000".into(),
+            backup: None,
+            new_hash: "bad".into(),
+            old_hash: None,
+        };
+        fs::write(
+            super::journal_path(&target),
+            serde_json::to_vec(&invalid).unwrap(),
+        )
+        .unwrap();
+        assert!(super::read(&target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"new authoritative data");
+        fs::remove_file(super::journal_path(&target)).unwrap();
+        fs::remove_file(target).unwrap();
     }
 
     #[test]

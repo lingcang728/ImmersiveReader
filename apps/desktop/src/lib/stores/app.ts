@@ -187,9 +187,10 @@ readingLineHeight.subscribe((v) =>
 export const readingWidth = writable<number>(
 	loadChoice('mmbook-width', READING_WIDTHS, 760, Number),
 );
-readingWidth.subscribe((v) =>
-	applyTypographyVar('mmbook-width', '--article-max-width', `${v}px`, String(v)),
-);
+readingWidth.subscribe((v) => {
+	applyTypographyVar('mmbook-width', '--article-max-width', `${v}px`, String(v));
+	if (typeof document !== 'undefined') document.documentElement.style.setProperty('--mobile-article-padding', `${v <= 680 ? 28 : v >= 840 ? 14 : 20}px`);
+});
 
 export const readingFontFamily = writable<ReadingFontFamily>(
 	loadChoice<ReadingFontFamily>(

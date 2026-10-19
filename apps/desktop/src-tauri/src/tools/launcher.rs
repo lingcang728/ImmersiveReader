@@ -70,15 +70,6 @@ pub(super) fn tool_paths(runtime_root: &Path, kind: ToolKind) -> ToolPaths {
             script: runtime_root.join(r"zhihu\app\dist\server.js"),
             working_directory: runtime_root.join(r"zhihu\app"),
         },
-        // P3-24: the podcast tool runs as a managed worker (podcast/worker.rs
-        // spawns transcribe_task.py), never as an HTTP sidecar. These paths
-        // only feed status()'s runtime-readiness probe — the runtime bundle
-        // still ships sidecar_server.py per scripts/prepare-runtime.ps1.
-        ToolKind::Podcast => ToolPaths {
-            executable: runtime_root.join(r"podcast\python\python.exe"),
-            script: runtime_root.join(r"podcast\app\scripts\sidecar_server.py"),
-            working_directory: runtime_root.join(r"podcast\app"),
-        },
     }
 }
 
@@ -137,11 +128,6 @@ pub(super) fn command_for(
                     runtime_root.join(r"zhihu\chromium\msedge.exe"),
                 );
         }
-        // P3-24: podcast is a managed worker, never a sidecar — no command
-        // may be built for it. Refuse loudly instead of spawning
-        // sidecar_server.py (the worker sets its own env in
-        // podcast/worker.rs; nothing reads the old sidecar envs).
-        ToolKind::Podcast => return Err("PODCAST_IS_WORKER_NOT_SIDECAR".to_string()),
     }
     Ok(command)
 }
@@ -156,12 +142,7 @@ mod tests {
         let root = Path::new(r"C:\ImmersiveReader\runtime");
 
         let zhihu = tool_paths(root, ToolKind::Zhihu);
-        let podcast = tool_paths(root, ToolKind::Podcast);
 
         assert_eq!(zhihu.executable, root.join(r"zhihu\node\node.exe"));
-        assert_eq!(
-            podcast.script,
-            root.join(r"podcast\app\scripts\sidecar_server.py")
-        );
     }
 }

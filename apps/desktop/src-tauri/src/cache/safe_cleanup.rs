@@ -263,17 +263,12 @@ pub fn clear_safe_cache_at(
                 #[cfg(target_os = "android")]
                 if let Ok(base) = crate::storage::android_base_dirs() {
                     for dir in crate::temporary_content::android_staging_dirs(&base.app_cache) {
-                        // Containment guard before any removal: only trees
-                        // that still resolve inside the app cache go away.
-                        if !crate::storage::path_within(&base.app_cache, &dir) {
-                            continue;
-                        }
-                        if let Ok((items, bytes)) = tree_metrics(&dir) {
-                            if fs::remove_dir_all(&dir).is_ok() {
-                                result.deleted_items = result.deleted_items.saturating_add(items);
-                                result.released_bytes = result.released_bytes.saturating_add(bytes);
-                            }
-                        }
+                        result.skipped.push(CacheSkip {
+                            category: "general_temporary".to_string(),
+                            task_id: None,
+                            path: dir.to_string_lossy().into_owned(),
+                            reason: "导入暂存受保护；下次启动仅清理上次遗留目录".to_string(),
+                        });
                     }
                 }
             }

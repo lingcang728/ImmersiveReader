@@ -1,6 +1,6 @@
 [package]
 name = "immersive-reader"
-version = "1.3.0"
+version = "1.3.1"
 description = "A local-first immersive reading library"
 authors = ["lingcang728"]
 edition = "2021"
@@ -23,7 +23,7 @@ strip = "symbols"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 # Mobile file import (content:// SAF picks) reads/writes through this plugin;
@@ -48,6 +48,9 @@ zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 quick-xml = { version = "0.38.4", default-features = false }
 reqwest = { version = "0.13.2", default-features = false, features = ["json"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }

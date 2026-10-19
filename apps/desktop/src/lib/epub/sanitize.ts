@@ -31,6 +31,11 @@ async function getPurifier(): Promise<Purifier | null> {
 // data-ir-remote-src must survive — it marks remote media the backend
 // neutralized and the DOM pass swaps for a placeholder.
 const EPUB_PURIFY_CONFIG: Config = {
+	// Keep head styles and local stylesheet references in the inert fragment.
+	// prepareChapterHtml removes links and scopes CSS before anything is mounted.
+	FORCE_BODY: true,
+	ADD_TAGS: ["link"],
+	ADD_ATTR: ["rel"],
 	FORBID_TAGS: [
 		"script",
 		"iframe",

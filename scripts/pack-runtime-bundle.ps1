@@ -54,14 +54,18 @@ Get-ChildItem -LiteralPath $OutputDirectory -File -Filter 'runtime-bundle.zip.*'
 
 # Gate 2: compress. .NET ZipArchive writes ZIP64 as needed, which Compress-
 # Archive on Windows PowerShell 5.1 does not reliably do past 4 GiB. The
-# archive holds the runtime contents flat (zhihu\, podcast\, packages\,
+# archive holds the runtime contents flat (zhihu\, packages\,
 # manifest.json at zip root) — docs\runtime-acquisition.md documents this
 # layout, and verify-runtime-bundle.ps1 accepts either flat or runtime\-rooted.
 Write-Output "[bundle] compressing $RuntimeRoot -> $bundlePath"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory(
-    $RuntimeRoot, $bundlePath,
-    [System.IO.Compression.CompressionLevel]::Optimal, $false)
+$packManifest = Get-Content -LiteralPath (Join-Path $RuntimeRoot 'manifest.json') -Raw | ConvertFrom-Json
+$archive = [System.IO.Compression.ZipFile]::Open($bundlePath, [System.IO.Compression.ZipArchiveMode]::Create)
+try {
+    foreach ($relative in @('manifest.json') + @($packManifest.entries | ForEach-Object { [string]$_.path })) {
+        [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, (Join-Path $RuntimeRoot $relative), ($relative -replace '\\', '/'), [System.IO.Compression.CompressionLevel]::Optimal)
+    }
+} finally { $archive.Dispose() }
 
 # Gate 3: the archive must contain every manifest-listed critical file. A
 # torn enumeration here would otherwise ship a bundle that verifies its own

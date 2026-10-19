@@ -6,7 +6,6 @@ pub use transaction::{
     sweep_publish_residue, PublishPhase, PublishTransaction,
 };
 pub use validation::hash_file;
-pub(crate) use validation::managed_relative;
 
 #[cfg(test)]
 pub(crate) use transaction::commit_transaction_until;

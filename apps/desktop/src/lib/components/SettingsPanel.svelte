@@ -20,6 +20,8 @@
 	import { open, save } from "@tauri-apps/plugin-dialog";
 	import { getThemePairs } from "$lib/theme/themes";
 	import { checkForDesktopUpdate, downloadAndInstallDesktopUpdate, updateState } from "$lib/update/service";
+	import LibraryRepair from "./LibraryRepair.svelte";
+    export let onLibraryChanged: () => void = () => {};
 	import WorkflowDialogShell from "./WorkflowDialogShell.svelte";
 
 	const themePairs = getThemePairs();
@@ -45,11 +47,6 @@
 		backupsBytes: number;
 		runtimeStateBytes: number;
 	};
-	type SecretStatus = {
-		configured: boolean;
-		maskedHint?: string | null;
-		lastVerifiedAt?: string | null;
-	};
 	type MigrationPreview = {
 		items: Array<{ kind: string; exists: boolean; bytes: number; sensitive: boolean; conflict: boolean }>;
 		totalBytes: number;
@@ -71,7 +68,6 @@
 
 	let locations: StorageLocations | null = null;
 	let usage: StorageUsage | null = null;
-	let secretStatus: SecretStatus | null = null;
 	let migrationPreview: MigrationPreview | null = null;
 	let publishRecovery: PublishTransaction[] = [];
 	let migrationRuns: MigrationRun[] = [];
@@ -83,7 +79,6 @@
 	let advancedLoaded = false;
 	let actionBusy = false;
 	let panelNotice = "";
-	let apiKey = "";
 	// P3-12: themed confirm dialog shared by the destructive actions below —
 	// replaces unthemed window.confirm().
 	let confirmRequest: { message: string; proceed: () => void } | null = null;
@@ -130,11 +125,7 @@
 		panelLoading = true;
 		panelNotice = "";
 		try {
-			// Core panel: locations + secret only. Disk usage / recovery load on advanced expand.
-			[locations, secretStatus] = await Promise.all([
-				invoke<StorageLocations>("get_storage_locations"),
-				invoke<SecretStatus>("get_secret_status")
-			]);
+            locations = await invoke<StorageLocations>("get_storage_locations");
 		} catch (error) {
 			panelNotice = `设置状态读取失败：${reportError("设置状态读取", error)}`;
 		} finally {
@@ -304,43 +295,6 @@
 			panelNotice = "阅读数据已导入；建议重启应用使全部状态生效";
 		} catch (error) {
 			panelNotice = `导入失败：${reportError("导入阅读数据", error)}`;
-		} finally {
-			actionBusy = false;
-		}
-	}
-
-	async function saveApiKey() {
-		if (actionBusy || !apiKey.trim()) {
-			panelNotice = "请输入 API Key";
-			return;
-		}
-		actionBusy = true;
-		try {
-			secretStatus = await invoke<SecretStatus>("set_deepseek_api_key", { apiKey });
-			apiKey = "";
-			panelNotice = "Key 已写入 Credential Manager；界面不会显示它";
-		} catch (error) {
-			panelNotice = `Key 保存失败：${reportError("保存 API Key", error)}`;
-		} finally {
-			actionBusy = false;
-		}
-	}
-
-	async function deleteApiKey(confirmed = false) {
-		if (actionBusy) return;
-		if (!confirmed) {
-			confirmRequest = {
-				message: "删除当前渠道的 DeepSeek Key？",
-				proceed: () => void deleteApiKey(true)
-			};
-			return;
-		}
-		actionBusy = true;
-		try {
-			secretStatus = await invoke<SecretStatus>("delete_deepseek_api_key");
-			panelNotice = "DeepSeek Key 已删除";
-		} catch (error) {
-			panelNotice = `Key 删除失败：${reportError("删除 API Key", error)}`;
 		} finally {
 			actionBusy = false;
 		}
@@ -696,23 +650,8 @@
 				</div>
 			{/if}
 
-			<div class="settings-title section-title">AI 服务与书库</div>
-			{#if $platformCapabilities.secretStore}
-				<div class="credential-row">
-					<span>
-						{#if secretStatus?.configured}
-							DeepSeek 已配置{#if secretStatus.maskedHint}（{secretStatus.maskedHint}）{/if}
-						{:else}
-							未配置 DeepSeek Key
-						{/if}
-					</span>
-					{#if secretStatus?.configured}<button type="button" class="mini-btn danger" disabled={actionBusy} on:click={() => void deleteApiKey()}>删除</button>{/if}
-				</div>
-				<div class="credential-form">
-					<input type="password" bind:value={apiKey} autocomplete="new-password" placeholder="输入 Key（不会显示或写入磁盘）" aria-label="DeepSeek API Key" />
-					<button type="button" class="mini-btn" disabled={actionBusy || !apiKey.trim()} on:click={() => void saveApiKey()}>保存</button>
-				</div>
-			{/if}
+			<div class="settings-title section-title">书库</div>
+            <LibraryRepair onChanged={onLibraryChanged} />
 			{#if locations}
 				<div class="status-card library-card">
 					<strong>当前书库</strong>
@@ -987,9 +926,6 @@
 		cursor: not-allowed;
 		opacity: 0.55;
 	}
-	.mini-btn.danger {
-		color: var(--danger);
-	}
 	.confirm-actions {
 		display: flex;
 		justify-content: flex-end;
@@ -1045,30 +981,6 @@
 	}
 	.status-card span {
 		flex: 1 1 100%;
-	}
-	.credential-row,
-	.credential-form {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-	.credential-row {
-		justify-content: space-between;
-		font-size: 11px;
-		color: var(--text-secondary);
-	}
-	.credential-form {
-		margin-top: 8px;
-	}
-	.credential-form input {
-		min-width: 0;
-		flex: 1;
-		border: 1px solid var(--hr);
-		border-radius: 7px;
-		background: var(--bg-secondary);
-		color: var(--text);
-		padding: 7px 9px;
-		font-size: 11px;
 	}
 	.settings-title {
 		font-size: 14px;
@@ -1281,7 +1193,6 @@
 	:global(.is-mobile) .settings-subtitle,
 	:global(.is-mobile) .status-line,
 	:global(.is-mobile) .notice,
-	:global(.is-mobile) .credential-row,
 	:global(.is-mobile) .status-card,
 	:global(.is-mobile) .backup-row,
 	:global(.is-mobile) .path-row {
@@ -1350,11 +1261,6 @@
 		min-height: 46px;
 		padding: 12px;
 		font-size: 13px;
-	}
-	:global(.is-mobile) .credential-form input {
-		min-height: 42px;
-		padding: 9px 12px;
-		font-size: 14px;
 	}
 	:global(.is-mobile) .status-card {
 		padding: 10px 12px;

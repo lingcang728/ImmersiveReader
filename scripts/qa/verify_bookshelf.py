@@ -100,11 +100,13 @@ def main() -> int:
             page.goto(ORIGIN, wait_until="networkidle")
             page.wait_for_selector(".book-card", timeout=10000)
             assert page.locator(".book-card").count() == 3
-            assert page.get_by_role("button", name="获取内容").count() == 1
+            assert page.get_by_role("button", name="打开", exact=True).count() == 1
             assert page.get_by_role("button", name="精读").count() == 3
             assert page.get_by_role("button", name="连读 ↗").count() == 3
-            page.get_by_role("button", name="获取内容").click()
+            page.get_by_role("button", name="打开", exact=True).click()
             assert page.get_by_role("button", name="归档知乎").count() >= 1
+            assert page.get_by_role("button", name="转写播客").count() == 0
+            assert page.get_by_role("button", name="临时打开").count() == 0
             page.keyboard.press("Escape")
             page.get_by_role("searchbox", name="搜索书架").fill("Jonathan")
             assert page.locator(".book-card").count() == 1
@@ -465,7 +467,7 @@ def main() -> int:
             empty_page.wait_for_selector(".empty-state")
             assert "书架还是空的" in empty_page.locator(".empty-state").inner_text()
             assert empty_page.locator(".brand-name").inner_text() == "沉浸阅读"
-            assert empty_page.get_by_role("button", name="获取内容").count() == 1
+            assert empty_page.get_by_role("button", name="打开", exact=True).count() == 1
             empty_target = QA_DIR / "bookshelf-empty-900x700.png"
             empty_page.screenshot(path=str(empty_target), full_page=False)
             screenshots.append(str(empty_target))
@@ -479,7 +481,7 @@ def main() -> int:
             error_page.wait_for_selector(".brand-name", state="visible")
             assert error_page.locator(".state-banner.warning").count() == 1
             assert error_page.get_by_role("button", name="选择书库").count() == 1
-            assert error_page.get_by_role("button", name="获取内容").count() == 1
+            assert error_page.get_by_role("button", name="打开", exact=True).count() == 1
             error_page.wait_for_timeout(150)
             error_target = QA_DIR / "bookshelf-error-900x700.png"
             error_page.screenshot(path=str(error_target), full_page=False)

@@ -29,7 +29,6 @@
 	export let onOpenFile: () => void;
 	export let onOpenTemporary: (path: string) => void;
 	export let onOpenZhihuWorkflow: () => void;
-	export let onOpenPodcastWorkflow: () => void;
 	export let onStartTask: (taskId: string) => void;
 	export let onStartZhihuTask: (taskId: string, revision: number) => void;
 	export let onOpenTaskResult: (taskId: string) => void;
@@ -321,11 +320,11 @@
 					aria-expanded={acquireOpen}
 					on:click|stopPropagation={(e) => toggleAcquire(e.detail === 0)}
 				>
-					获取内容
+					打开
 					<span aria-hidden="true">▾</span>
 				</button>
 				{#if acquireOpen}
-					<div class="acquire-menu" role="menu" tabindex="-1" aria-label="获取内容" on:keydown={menuKeydown}>
+					<div class="acquire-menu" role="menu" tabindex="-1" aria-label="打开" on:keydown={menuKeydown}>
 						{#if !isMobile}
 							<button
 								type="button"
@@ -334,23 +333,14 @@
 							>
 								归档知乎
 							</button>
-							<button
-								type="button"
-								role="menuitem"
-								on:click={() => runAcquire(onOpenPodcastWorkflow)}
-							>
-								转写播客
-							</button>
+
 						{/if}
 						<button type="button" role="menuitem" on:click={() => runAcquire(onImport)}>
-							{isMobile ? '导入文件' : '导入文件夹'}
+							打开文件夹…
 						</button>
 						<button type="button" role="menuitem" on:click={() => runAcquire(onOpenFile)}>
-							临时打开
+							打开文件…
 						</button>
-						{#if !isMobile}
-							<div class="menu-hint" role="presentation">播客可在这里预检、确认预算并加入统一任务队列。</div>
-						{/if}
 					</div>
 				{/if}
 			</div>
@@ -379,7 +369,7 @@
 		{/if}
 		{#if issues.length > 0}
 			<details class="state-banner warning">
-				<summary>{issues.length} 个书目无法载入</summary>
+				<summary>{issues.length} 项需要检查</summary>
 				{#each issues as issue}
 					<p><strong>{issue.path}</strong><br />{issue.message}</p>
 				{/each}
@@ -433,11 +423,11 @@
 						<button class="btn-resume" on:click={onImport}>导入文件</button>
 					</div>
 				{:else}
-					<p>导入一个 Markdown 文件夹，或从知乎归档内容开始。</p>
+					<p>打开 EPUB、Markdown 或文件夹，自动加入书库并记忆进度。</p>
 					<div>
-						<button class="btn-resume" on:click={onImport}>导入书库</button>
+						<button class="btn-resume" on:click={onImport}>打开文件夹</button>
 						<button class="quiet-action" on:click={onOpenZhihuWorkflow}>归档知乎</button>
-						<button class="quiet-action" on:click={onOpenPodcastWorkflow}>转写播客</button>
+
 					</div>
 				{/if}
 			</div>
@@ -532,12 +522,12 @@
 		{#if temporaryItems.length > 0}
 			<section class="temp-section">
 				<div class="section-head">
-					<h2>临时内容</h2>
-					<span>播客转录 · 不自动归档</span>
+					<h2>最近打开的文档</h2>
+					<span>再次打开时自动保存到书库</span>
 				</div>
 				{#each temporaryItems as item (item.path)}
 					<div class="temp-item">
-						<span class="temp-badge">播客</span>
+						<span class="temp-badge">文档</span>
 						<span>{item.title}</span>
 						<small>{lastReadLabel(item.modifiedAt)}</small>
 						<button on:click={() => onOpenTemporary(item.path)}>打开</button>

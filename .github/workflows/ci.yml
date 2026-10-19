@@ -45,7 +45,7 @@ jobs:
           npm ci --prefix apps/desktop
           npm ci --prefix tools/zhihu-packer
           npm ci --prefix packages/contracts
-          python -m pip install --quiet -r tools/podcast-transcriber/requirements-dev.txt
+          python -m pip install --quiet jsonschema==4.26.0
 
       - name: Contracts parity and tests
         shell: pwsh
@@ -80,18 +80,6 @@ jobs:
           npm run build --prefix tools/zhihu-packer
           npm run compile-reader --prefix tools/zhihu-packer
           npm test --prefix tools/zhihu-packer
-
-      - name: Podcast transcriber lint and tests
-        shell: pwsh
-        run: |
-          ruff check tools/podcast-transcriber/scripts tools/podcast-transcriber/tests
-          Push-Location tools/podcast-transcriber
-          try {
-            python -m pytest -q
-            python scripts/quick_validate.py
-          } finally {
-            Pop-Location
-          }
 
       # Scripts.Tests.ps1 targets Pester 3.4 syntax (`Should Be`, top-level
       # helpers); hosted runners ship Pester 5.9 for both pwsh and Windows

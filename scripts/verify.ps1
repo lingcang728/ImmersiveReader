@@ -135,7 +135,6 @@ function Assert-NoLegacyRuntimeReferences {
     foreach ($relative in @(
         'apps\desktop\node_modules',
         'tools\zhihu-packer\node_modules',
-        'tools\podcast-transcriber\.venv',
         # runtime trees are junction candidates too: PS 5.1 Remove-Item -Recurse
         # and robocopy /MIR both follow them into the target volume.
         'runtime',
@@ -171,7 +170,7 @@ function Remove-FreshGeneratedDirectory {
 $root = Get-RepoRoot
 $npm = Require-Command -Name 'npm.cmd'
 $cargo = Require-Command -Name 'cargo.exe'
-$python = Get-PodcastPython
+$python = Get-VerificationPython
 $node = Require-Command -Name 'node.exe'
 # node --test over .ts files relies on built-in type stripping, unflagged since
 # Node 22.18; zhihu-packer's node:sqlite needs >=22.5. Gate the dev machine
@@ -208,11 +207,6 @@ try {
     Invoke-Checked 'contracts build' { & $typescript -p tsconfig.json }
 } finally {
     Pop-Location
-}
-
-$ruff = Get-Command ruff.exe -ErrorAction SilentlyContinue
-if (-not $ruff) {
-    throw '未找到本机 ruff.exe（请复用全局安装，勿在项目内重复安装）'
 }
 
 Push-Location (Join-Path $root 'apps\desktop')
@@ -262,20 +256,6 @@ try {
     Invoke-Checked 'Zhihu TypeScript build' { & $npm run build }
     Invoke-Checked 'Zhihu Reader compile' { & $npm run compile-reader }
     Invoke-Optional 'npm audit (tools/zhihu-packer)' { & $npm audit }
-} finally {
-    Pop-Location
-}
-
-Push-Location (Join-Path $root 'tools\podcast-transcriber')
-try {
-    Invoke-Checked 'Podcast Ruff' { & $ruff.Source check scripts tests }
-    if ((Split-Path -Leaf $python) -ieq 'py.exe') {
-        Invoke-Checked 'Podcast tests' { & $python -3 -m pytest -q }
-        Invoke-Checked 'Podcast quick validation' { & $python -3 scripts\quick_validate.py }
-    } else {
-        Invoke-Checked 'Podcast tests' { & $python -m pytest -q }
-        Invoke-Checked 'Podcast quick validation' { & $python scripts\quick_validate.py }
-    }
 } finally {
     Pop-Location
 }

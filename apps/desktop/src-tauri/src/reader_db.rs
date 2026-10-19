@@ -287,7 +287,7 @@ impl ReaderDb {
         self.conn
             .execute(
                 "INSERT INTO books(book_id, dir_rel, source, format, updated_at) VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(book_id) DO UPDATE SET dir_rel = excluded.dir_rel, source = excluded.source, format = excluded.format, updated_at = excluded.updated_at",
+                 ON CONFLICT(book_id) DO UPDATE SET dir_rel = excluded.dir_rel, source = excluded.source, format = excluded.format, updated_at = excluded.updated_at WHERE books.dir_rel IS NOT excluded.dir_rel OR books.source IS NOT excluded.source OR books.format IS NOT excluded.format",
                 params![book_id, dir_rel, source, format, now_stamp()],
             )
             .map_err(|error| error.to_string())?;

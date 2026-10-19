@@ -82,7 +82,7 @@ jobs:
       - name: Run tests and contract parity
         shell: pwsh
         run: |
-          python -m pip install --quiet -r tools/podcast-transcriber/requirements-dev.txt
+          python -m pip install --quiet jsonschema==4.26.0
           python scripts/verify_contract_parity.py
           npm test --prefix packages/contracts
           npm run build --prefix packages/contracts
@@ -99,18 +99,6 @@ jobs:
           npm run build --prefix tools/zhihu-packer
           npm run compile-reader --prefix tools/zhihu-packer
           npm test --prefix tools/zhihu-packer
-
-      - name: Podcast transcriber lint and tests
-        shell: pwsh
-        run: |
-          ruff check tools/podcast-transcriber/scripts tools/podcast-transcriber/tests
-          Push-Location tools/podcast-transcriber
-          try {
-            python -m pytest -q
-            python scripts/quick_validate.py
-          } finally {
-            Pop-Location
-          }
 
       - name: Build signed Windows release
         env:

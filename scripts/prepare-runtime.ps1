@@ -2,8 +2,6 @@
 param(
     [switch]$ValidateOnly,
     [switch]$RefreshApps,
-    [string]$PodcastSource = '',
-    [string]$PythonRoot = 'G:\python',
     [string]$EdgeRoot = 'C:\Program Files (x86)\Microsoft\Edge\Application'
 )
 
@@ -16,29 +14,9 @@ $root = Get-RepoRoot
 $runtime = Join-Path $root 'runtime'
 $fullRuntime = [IO.Path]::GetFullPath($runtime)
 $zhihuSource = Join-Path $root 'tools\zhihu-packer'
-$podcastAppSource = Join-Path $root 'tools\podcast-transcriber'
 $contractsSource = Join-Path $root 'packages\contracts'
-# site-packages bootstrap order: an explicit -PodcastSource is honored as-is;
-# otherwise the tool's own dev venv (the real upstream source) wins, then — to
-# keep refreshes working — the already-provisioned runtime. Without the venv
-# fallback a clean machine dead-ended: building runtime required runtime.
-$podcastSitePackagesCandidates = @()
-if ($PodcastSource) {
-    $podcastSitePackagesCandidates += Join-Path $PodcastSource '.venv\Lib\site-packages'
-} else {
-    $podcastSitePackagesCandidates += Join-Path $podcastAppSource '.venv\Lib\site-packages'
-    $podcastSitePackagesCandidates += Join-Path $runtime 'podcast\python\Lib\site-packages'
-}
-$podcastSitePackages = [string]($podcastSitePackagesCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1)
-$podcastModels = if ($PodcastSource) {
-    Join-Path $PodcastSource 'models'
-} else {
-    Join-Path $runtime 'podcast\models'
-}
 $node = Require-Command -Name 'node.exe'
 $npm = Require-Command -Name 'npm.cmd'
-$ffmpeg = Require-Command -Name 'ffmpeg.exe'
-$ffprobe = Require-Command -Name 'ffprobe.exe'
 
 function Require-Path {
     param([Parameter(Mandatory)][string]$Path)
@@ -154,37 +132,7 @@ function Assert-ZhihuNode {
     Write-Output "[runtime] $Label node.exe $version (node:sqlite ok)"
 }
 
-function Assert-MediaTool {
-    param(
-        [Parameter(Mandatory)][string]$Exe,
-        [Parameter(Mandatory)][string]$Label
-    )
-    # ffmpeg/ffprobe must run and report a modern version — a binary that
-    # cannot execute means the vendored copy is corrupt.
-    $line = [string](& $Exe -version 2>&1 | Select-Object -First 1)
-    if ([string]::IsNullOrWhiteSpace($line) -or $line -notmatch 'version (\d+(?:\.\d+)+)') {
-        throw "$Label 无法报告版本（可能损坏）：$Exe"
-    }
-    if ([version]$Matches[1] -lt [version]'5.0') {
-        throw "$Label 版本过旧（要求 >= 5.0）：$Exe"
-    }
-    Write-Output "[runtime] $Label $line"
-}
 
-function Assert-PythonRuntime {
-    param(
-        [Parameter(Mandatory)][string]$PythonExe,
-        [Parameter(Mandatory)][string]$Label
-    )
-    $line = [string](& $PythonExe --version 2>&1 | Select-Object -First 1)
-    if ($line -notmatch 'Python (\d+\.\d+\.\d+)') {
-        throw "$Label python.exe 无法报告版本（可能损坏）：$PythonExe"
-    }
-    if ([version]$Matches[1] -lt [version]'3.9.0') {
-        throw "$Label python.exe 版本过旧（要求 >= 3.9）：$PythonExe"
-    }
-    Write-Output "[runtime] $Label $line"
-}
 
 function Get-ExeVersionLine {
     # Best-effort version string: run the tool's version flag, else fall back
@@ -202,44 +150,11 @@ function Get-ExeVersionLine {
 }
 
 function Get-RuntimeComponents {
-    # Provenance record for manifest.json: which exact binaries went in, where
-    # they came from, and their versions — a path/bytes/sha256 manifest alone
-    # can never answer "what version is inside this runtime".
-    param(
-        [Parameter(Mandatory)][string]$NodeSourceExe,
-        [Parameter(Mandatory)][string]$PythonSourceExe,
-        [Parameter(Mandatory)][string]$FfmpegSourceExe,
-        [Parameter(Mandatory)][string]$FfprobeSourceExe,
-        [Parameter(Mandatory)][string]$ChromiumSourceExe,
-        [Parameter(Mandatory)][string]$ModelsSource
-    )
-    $components = [ordered]@{}
-    foreach ($spec in @(
-        @{ key = 'node'; exe = $NodeSourceExe; arg = '--version' },
-        @{ key = 'python'; exe = $PythonSourceExe; arg = '--version' },
-        @{ key = 'ffmpeg'; exe = $FfmpegSourceExe; arg = '-version' },
-        @{ key = 'ffprobe'; exe = $FfprobeSourceExe; arg = '-version' }
-    )) {
-        $components[$spec.key] = [ordered]@{
-            source = [string]$spec.exe
-            version = Get-ExeVersionLine -Exe $spec.exe -VersionArg $spec.arg
-            sha256 = (Get-FileSha256Hex -Path $spec.exe)
-        }
+    param([string]$NodeSourceExe, [string]$ChromiumSourceExe)
+    return [ordered]@{
+        node = [ordered]@{ source = $NodeSourceExe; version = (Get-ExeVersionLine -Exe $NodeSourceExe -VersionArg '--version'); sha256 = (Get-FileSha256Hex -Path $NodeSourceExe) }
+        chromium = [ordered]@{ source = $ChromiumSourceExe; version = [string](Get-Item -LiteralPath $ChromiumSourceExe).VersionInfo.ProductVersion; sha256 = (Get-FileSha256Hex -Path $ChromiumSourceExe) }
     }
-    # Never spawn msedge.exe for a version query — the PE product version is
-    # equally authoritative and cannot flash a browser window.
-    $components['chromium'] = [ordered]@{
-        source = [string]$ChromiumSourceExe
-        version = [string](Get-Item -LiteralPath $ChromiumSourceExe).VersionInfo.ProductVersion
-        sha256 = (Get-FileSha256Hex -Path $ChromiumSourceExe)
-    }
-    $modelFiles = @(Get-ChildItem -LiteralPath $ModelsSource -File -Recurse -ErrorAction SilentlyContinue)
-    $components['models'] = [ordered]@{
-        source = [string]$ModelsSource
-        files = $modelFiles.Count
-        bytes = [long](($modelFiles | Measure-Object Length -Sum).Sum)
-    }
-    return $components
 }
 
 function Assert-PreservedRuntimeEntries {
@@ -255,7 +170,7 @@ function Assert-PreservedRuntimeEntries {
         return
     }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $refreshedRoots = @('zhihu/app/', 'podcast/app/', 'packages/contracts/')
+    $refreshedRoots = @('zhihu/app/', 'podcast/', 'packages/contracts/')
     $checked = 0
     foreach ($entry in @($manifest.entries)) {
         $relative = [string]$entry.path
@@ -281,14 +196,14 @@ function Get-CriticalRuntimeFiles {
 
     $codeRoots = @(
         (Join-Path $RuntimeRoot 'zhihu\app'),
-        (Join-Path $RuntimeRoot 'podcast\app'),
+
         (Join-Path $RuntimeRoot 'packages\contracts')
     )
     $binaryRoots = @(
         (Join-Path $RuntimeRoot 'zhihu\node'),
-        (Join-Path $RuntimeRoot 'zhihu\chromium'),
-        (Join-Path $RuntimeRoot 'podcast\python'),
-        (Join-Path $RuntimeRoot 'podcast\ffmpeg')
+        (Join-Path $RuntimeRoot 'zhihu\chromium')
+
+
     )
     $files = @()
     foreach ($codeRoot in $codeRoots) {
@@ -301,10 +216,6 @@ function Get-CriticalRuntimeFiles {
             $files += Get-ChildItem -LiteralPath $binaryRoot -File -Recurse |
                 Where-Object { $_.Extension.ToLowerInvariant() -in @('.exe', '.dll', '.pyd', '.pak', '.bin', '.dat') }
         }
-    }
-    $modelRoot = Join-Path $RuntimeRoot 'podcast\models'
-    if (Test-Path -LiteralPath $modelRoot) {
-        $files += Get-ChildItem -LiteralPath $modelRoot -File -Recurse
     }
     $files | Sort-Object -Property FullName -Unique
 }
@@ -351,9 +262,9 @@ if ($RefreshApps) {
     # shipping a runtime without the zhihu sidecar entry point.
     foreach ($requiredRuntime in @(
         (Join-Path $runtime 'zhihu\node\node.exe'),
-        (Join-Path $runtime 'podcast\python\python.exe'),
-        (Join-Path $runtime 'podcast\ffmpeg\ffmpeg.exe'),
-        (Join-Path $runtime 'podcast\models'),
+
+
+
         (Join-Path $zhihuSource 'dist\server.js'),
         (Join-Path $zhihuSource 'node_modules'),
         (Join-Path $contractsSource 'dist\index.js')
@@ -363,65 +274,42 @@ if ($RefreshApps) {
     # Vendored binaries are refreshed into installs unchanged — they must run
     # and meet minimum versions, not merely exist.
     Assert-ZhihuNode -NodeExe (Join-Path $runtime 'zhihu\node\node.exe') -Label 'vendored'
-    Assert-PythonRuntime -PythonExe (Join-Path $runtime 'podcast\python\python.exe') -Label 'vendored'
-    Assert-MediaTool -Exe (Join-Path $runtime 'podcast\ffmpeg\ffmpeg.exe') -Label 'vendored ffmpeg'
+
+
     Assert-RuntimeNotInUse
     # The manifest is about to be rewritten to the post-refresh state — prove
     # the parts RefreshApps keeps (binaries, models) are still intact first,
     # or a corrupted runtime would be blessed by its own new manifest.
     Assert-PreservedRuntimeEntries -RuntimeRoot $runtime
     $zhihuApp = Join-Path $runtime 'zhihu\app'
-    $podcastApp = Join-Path $runtime 'podcast\app'
     $contractsRuntime = Join-Path $runtime 'packages\contracts'
     Reset-AppDestination -Destination $zhihuApp
-    Reset-AppDestination -Destination $podcastApp
     Reset-AppDestination -Destination $contractsRuntime
     Copy-Tree -Source $zhihuSource -Destination $zhihuApp `
         -ExcludeDirectories $ZhihuAppExcludedDirectories `
         -ExcludeFiles $ZhihuAppExcludedFiles
     Prune-DevDependencies -AppDir $zhihuApp
-    Copy-Tree -Source $podcastAppSource -Destination $podcastApp `
-        -ExcludeDirectories @('.git', '.venv', 'models', 'input', 'output', 'work', '.pytest_cache', '__pycache__') `
-        -ExcludeFiles @('config.json', '*.log', '*.pyc')
     Copy-Tree -Source $contractsSource -Destination $contractsRuntime `
         -ExcludeDirectories @('.git', 'node_modules')
-    $refreshComponents = Get-RuntimeComponents `
-        -NodeSourceExe (Join-Path $runtime 'zhihu\node\node.exe') `
-        -PythonSourceExe (Join-Path $runtime 'podcast\python\python.exe') `
-        -FfmpegSourceExe (Join-Path $runtime 'podcast\ffmpeg\ffmpeg.exe') `
-        -FfprobeSourceExe (Join-Path $runtime 'podcast\ffmpeg\ffprobe.exe') `
-        -ChromiumSourceExe (Join-Path $runtime 'zhihu\chromium\msedge.exe') `
-        -ModelsSource (Join-Path $runtime 'podcast\models')
+    $refreshComponents = Get-RuntimeComponents -NodeSourceExe (Join-Path $runtime 'zhihu\node\node.exe') -ChromiumSourceExe (Join-Path $runtime 'zhihu\chromium\msedge.exe')
     Write-CriticalRuntimeManifest -RuntimeRoot $runtime -Components $refreshComponents
     Write-Output '[runtime] application code refreshed without rebuilding large assets'
     exit 0
 }
 
-if (-not $podcastSitePackages) {
-    if ($PodcastSource) {
-        throw "-PodcastSource 缺少 site-packages：$(Join-Path $PodcastSource '.venv\Lib\site-packages')（需要 .venv 布局的旧安装/开发目录）。"
-    }
-    throw "找不到 Podcast site-packages 来源。请为 tools\podcast-transcriber 创建 .venv（pip install -r requirements.txt）、传入 -PodcastSource <旧安装目录>，或先恢复现有 runtime。"
-}
-if ($podcastSitePackages -ieq (Join-Path $runtime 'podcast\python\Lib\site-packages')) {
-    Write-Warning '[runtime] site-packages 复用自现有 runtime；如需干净自举请改用 tools\podcast-transcriber\.venv 或 -PodcastSource。'
-}
-if (-not (Test-Path -LiteralPath $podcastModels)) {
-    throw "缺少 Podcast 模型目录：$podcastModels（模型不在仓库内；传 -PodcastSource 或先恢复现有 runtime）。"
-}
 $required = @(
     (Join-Path $zhihuSource 'dist\server.js'),
     (Join-Path $zhihuSource 'node_modules'),
     (Join-Path $contractsSource 'dist\index.js'),
-    (Join-Path $podcastAppSource 'scripts\sidecar_server.py'),
-    $podcastSitePackages,
-    $podcastModels,
-    (Join-Path $PythonRoot 'python.exe'),
-    (Join-Path $PythonRoot 'Lib'),
+
+
+
+
+
     (Join-Path $EdgeRoot 'msedge.exe'),
-    $node,
-    $ffmpeg,
-    $ffprobe
+    $node
+
+
 )
 $required | ForEach-Object { Require-Path -Path $_ }
 
@@ -429,9 +317,9 @@ $required | ForEach-Object { Require-Path -Path $_ }
 # zhihu sidecar needs node:sqlite (Node >= 22.5.0) and a binary that cannot
 # execute here would ship broken.
 Assert-ZhihuNode -NodeExe $node -Label 'source'
-Assert-PythonRuntime -PythonExe (Join-Path $PythonRoot 'python.exe') -Label 'source'
-Assert-MediaTool -Exe $ffmpeg -Label 'source ffmpeg'
-Assert-MediaTool -Exe $ffprobe -Label 'source ffprobe'
+
+
+
 
 if ($ValidateOnly) {
     Write-Output '[runtime] all reusable sources are available'
@@ -457,7 +345,6 @@ Remove-DirectoryTree -Path $fullStagingRuntime
 Remove-DirectoryTree -Path $fullPreviousRuntime
 
 $zhihuRuntime = Join-Path $stagingRuntime 'zhihu'
-$podcastRuntime = Join-Path $stagingRuntime 'podcast'
 
 New-Item -ItemType Directory -Path (Join-Path $zhihuRuntime 'node') -Force | Out-Null
 Copy-Item -LiteralPath $node -Destination (Join-Path $zhihuRuntime 'node\node.exe')
@@ -469,33 +356,15 @@ Copy-Tree -Source $EdgeRoot -Destination (Join-Path $zhihuRuntime 'chromium')
 Copy-Tree -Source $contractsSource -Destination (Join-Path $stagingRuntime 'packages\contracts') `
     -ExcludeDirectories @('.git', 'node_modules')
 
-Copy-Tree -Source $podcastAppSource -Destination (Join-Path $podcastRuntime 'app') `
-    -ExcludeDirectories @('.git', '.venv', 'models', 'input', 'output', 'work', '.pytest_cache', '__pycache__') `
-    -ExcludeFiles @('config.json', '*.log', '*.pyc')
-Copy-Tree -Source $PythonRoot -Destination (Join-Path $podcastRuntime 'python') `
-    -ExcludeDirectories @((Join-Path $PythonRoot 'Lib\site-packages'), (Join-Path $PythonRoot 'Scripts'), (Join-Path $PythonRoot 'Doc'), (Join-Path $PythonRoot 'testing'))
-Copy-Tree -Source $podcastSitePackages `
-    -Destination (Join-Path $podcastRuntime 'python\Lib\site-packages')
-New-Item -ItemType Directory -Path (Join-Path $podcastRuntime 'ffmpeg') -Force | Out-Null
-Copy-Item -LiteralPath $ffmpeg -Destination (Join-Path $podcastRuntime 'ffmpeg\ffmpeg.exe')
-Copy-Item -LiteralPath $ffprobe -Destination (Join-Path $podcastRuntime 'ffmpeg\ffprobe.exe')
-Copy-Tree -Source $podcastModels -Destination (Join-Path $podcastRuntime 'models')
-
 # The staged binaries must actually run before the swap: a truncated copy
 # would otherwise only fail at first launch, after the previous runtime was
 # already replaced.
 Assert-ZhihuNode -NodeExe (Join-Path $stagingRuntime 'zhihu\node\node.exe') -Label 'vendored'
-Assert-PythonRuntime -PythonExe (Join-Path $stagingRuntime 'podcast\python\python.exe') -Label 'vendored'
-Assert-MediaTool -Exe (Join-Path $stagingRuntime 'podcast\ffmpeg\ffmpeg.exe') -Label 'vendored ffmpeg'
-Assert-MediaTool -Exe (Join-Path $stagingRuntime 'podcast\ffmpeg\ffprobe.exe') -Label 'vendored ffprobe'
 
-Write-CriticalRuntimeManifest -RuntimeRoot $stagingRuntime -Components (Get-RuntimeComponents `
-    -NodeSourceExe $node `
-    -PythonSourceExe (Join-Path $PythonRoot 'python.exe') `
-    -FfmpegSourceExe $ffmpeg `
-    -FfprobeSourceExe $ffprobe `
-    -ChromiumSourceExe (Join-Path $EdgeRoot 'msedge.exe') `
-    -ModelsSource $podcastModels)
+
+
+
+Write-CriticalRuntimeManifest -RuntimeRoot $stagingRuntime -Components (Get-RuntimeComponents -NodeSourceExe $node -ChromiumSourceExe (Join-Path $EdgeRoot 'msedge.exe'))
 
 # Swap staging in only after it is fully built and manifest-verified: move the
 # old runtime aside first so a failed swap can be rolled back, then delete the

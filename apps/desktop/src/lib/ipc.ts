@@ -51,11 +51,11 @@ const COMMAND_TIMEOUT_MS: Record<string, number> = {
 	open_task_result: 30_000,
 	// EPUB reader surface + reader database.
 	get_readable_chapter: 60_000,
-	get_reader_locator: 15_000,
+	load_reader_locator: 15_000,
 	save_reader_locator: 15_000,
-	list_bookmarks: 15_000,
-	add_bookmark: 15_000,
-	remove_bookmark: 15_000,
+	list_reader_bookmarks: 15_000,
+	add_reader_bookmark: 15_000,
+	remove_reader_bookmark: 15_000,
 	search_book: 60_000,
 	// Android bridges: SAF staging streams whole documents; the pending-open
 	// drain and the volume-key toggle are cheap plugin round-trips.

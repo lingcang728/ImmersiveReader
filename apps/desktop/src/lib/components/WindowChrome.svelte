@@ -71,8 +71,7 @@
 	}
 
 	function requestAppExit() {
-		// Same event the tray menu emits — the page-level listener runs the
-		// full preserve/cancel flow (flush edits, guard unsaved work).
+		// The page-level listener flushes edits and guards unsaved work.
 		void emit('request-app-exit', { mode: 'preserve' }).catch(() => {});
 	}
 
@@ -135,11 +134,10 @@
 		}
 	}
 
-	function onMenuItem(action: 'minimize' | 'maximize' | 'hide' | 'exit') {
+	function onMenuItem(action: 'minimize' | 'maximize' | 'exit') {
 		closeSystemMenu();
 		if (action === 'minimize') void minimize();
 		else if (action === 'maximize') void toggleMaximize();
-		else if (action === 'hide') void closeWindow();
 		else requestAppExit();
 	}
 
@@ -261,8 +259,8 @@
 		<button
 			type="button"
 			class="chrome-btn chrome-btn-close"
-			aria-label="隐藏到托盘"
-			title="隐藏到托盘（在托盘图标中退出）"
+			aria-label="关闭应用"
+			title="关闭应用"
 			on:click={() => void closeWindow()}
 		>
 			<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
@@ -295,9 +293,6 @@
 		</button>
 		<button type="button" role="menuitem" class="chrome-menu-item" on:click={() => onMenuItem('maximize')}>
 			{maximized ? '还原' : '最大化'}
-		</button>
-		<button type="button" role="menuitem" class="chrome-menu-item" on:click={() => onMenuItem('hide')}>
-			隐藏到托盘
 		</button>
 		<div class="chrome-menu-sep" role="separator"></div>
 		<button type="button" role="menuitem" class="chrome-menu-item" on:click={() => onMenuItem('exit')}>

@@ -58,7 +58,7 @@ export function normalizeReaderAnchor(raw: unknown): ReaderAnchor | null {
 						quote: anchor.quote,
 						offset:
 							typeof anchor.offset === "number" && Number.isFinite(anchor.offset)
-								? Math.max(0, anchor.offset)
+								? Math.max(0, Math.trunc(anchor.offset))
 								: 0,
 					}
 				: null;

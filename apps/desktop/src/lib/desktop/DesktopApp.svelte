@@ -62,12 +62,11 @@
 		getImportStatus,
 		importPhaseLabel,
 		isTerminalImportState,
-		suggestedImportTitle,
 		uriLooksLikeMarkdown,
 		type BeginImportArgs,
 		type ImportStatus,
 	} from "$lib/platform/importOps";
-	import { getReaderLocator, saveReaderLocator } from "$lib/epub/ipc";
+	import { getReaderLocator } from "$lib/epub/ipc";
 	import type { Publication, ReaderLocator } from "$lib/epub/types";
 	import { flowThemeVars } from "$lib/theme/themes";
 	import SearchBar from "$lib/components/SearchBar.svelte";
@@ -138,7 +137,6 @@
 	const loadSettingsPanel = lazyModule(() => import("$lib/components/SettingsPanel.svelte"));
 	const loadEpubReader = lazyModule(() => import("$lib/epub/EpubReader.svelte"));
 	const loadTrashPanel = lazyModule(() => import("$lib/components/TrashPanel.svelte"));
-	const loadPodcastWorkflow = lazyModule(() => import("$lib/components/PodcastWorkflow.svelte"));
 	const loadZhihuWorkflow = lazyModule(() => import("$lib/components/ZhihuWorkflow.svelte"));
 
 	// SettingsPanel 在原实现中常驻挂载（内部自管 `$settingsOpen` 弹层）。为不在
@@ -706,7 +704,7 @@
 	let importFolderBusy = false;
 	let flowReaderStarting = false;
 	let appSettings: AppSettings | null = null;
-	let podcastWorkflowOpen = false;
+	const podcastWorkflowOpen = false;
 	let zhihuWorkflowOpen = false;
 	let taskSyncState: TaskSyncState = snapshotState([]);
 	let acquisitionTasks: readonly TaskSnapshot[] = [];
@@ -1492,10 +1490,6 @@
 		return !!el?.closest("input, textarea, select, [contenteditable='true']");
 	}
 
-	function isMarkdownPath(path: string): boolean {
-		const lower = path.toLowerCase();
-		return lower.endsWith('.md') || lower.endsWith('.markdown');
-	}
 
 	// Read one 0-based line without materializing a full split("\n") array —
 	// the edit-save path only needs the lines adjacent to the edited block.
@@ -1968,18 +1962,6 @@
 		}, 9000);
 	}
 
-	// First-run hint: the window X hides to the tray (tasks keep running) — it
-	// does not quit. Shown once per install via a localStorage flag.
-	function maybeShowTrayHint() {
-		try {
-			if (localStorage.getItem("mmbook-tray-hint-shown")) return;
-			localStorage.setItem("mmbook-tray-hint-shown", "1");
-		} catch {
-			return;
-		}
-		showAppNotice("提示：右上角 X 会把窗口最小化到系统托盘（任务继续运行），托盘菜单选「退出」才会真正关闭");
-	}
-
 	// Quiet transient notice (e.g. "updated in background").
 	let appNoticeText = "";
 	let appNoticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2021,8 +2003,12 @@
 		const nonce = ++libraryRefreshNonce;
 		// Runs on every task event — only the first load may flip the view to a
 		// spinner; later refreshes update in place so the resume card doesn't flash.
-		if (!libraryLoadedOnce) libraryLoading = true;
-		try {
+        if (!libraryLoadedOnce) libraryLoading = true;
+        try {
+            if (!libraryLoadedOnce) {
+                const cached = await invoke<{ books: BookSummary[]; issues: LibraryIssue[]; writable: boolean } | null>("load_library_snapshot").catch(() => null);
+                if (cached && nonce === libraryRefreshNonce) { libraryBooks = cached.books; libraryIssues = cached.issues; libraryWritable = cached.writable; libraryLoading = false; libraryLoadedOnce = true; }
+            }
 			// The trash list is only read while its panel is open — the bookshelf
 			// badge follows the panel's own refreshes instead. On mobile a wedged
 			// IPC call must surface the error banner rather than spin forever.
@@ -2087,7 +2073,9 @@
 	let activeImportOperationId: string | null = null;
 	let pendingImportTitle: { request: PendingImportRequest; draft: string } | null = null;
 
-	async function runImport(request: PendingImportRequest, title?: string) {
+    let lastImportRequest: PendingImportRequest | null = null;
+    async function runImport(request: PendingImportRequest, title?: string) {
+        lastImportRequest = request;
 		if (importBusy) return;
 		importBusy = true;
 		importFolderBusy = true;
@@ -2169,8 +2157,9 @@
 					console.warn("open imported book failed:", error);
 				}
 			}
-		} else if (status.state === "cancelled") {
-			showAppNotice("已取消导入");
+        } else if (status.state === "cancelled") {
+            await refreshLibrary();
+            showAppNotice("已取消导入，已完成的书目保留在书架");
 		} else {
 			noticeError("导入失败", status.error ?? "未知错误");
 		}
@@ -2190,13 +2179,7 @@
 		importStatus = null;
 	}
 
-	function promptImportTitle(request: PendingImportRequest) {
-		if (importBusy || pendingImportTitle) return;
-		const uris = request.kind === "uris" ? request.uris
-			: request.kind === "files" ? request.paths
-			: [request.path];
-		pendingImportTitle = { request, draft: suggestedImportTitle(uris) };
-	}
+	function promptImportTitle(request: PendingImportRequest) { void runImport(request); }
 
 	function confirmImportTitle() {
 		const pending = pendingImportTitle;
@@ -2370,10 +2353,6 @@
 		zhihuWorkflowOpen = true;
 	}
 
-	function openPodcastWorkflowPanel() {
-		if (isMobile) return;
-		podcastWorkflowOpen = true;
-	}
 
 	async function openBrowserReader(bookId: string) {
 		if (flowReaderStarting) return;
@@ -2396,16 +2375,6 @@
 		}
 	}
 
-	async function startPodcastTask(taskId: string) {
-		try {
-			// Backend returns false when the worker slot is taken and the task
-			// stays Queued — "已启动" would lie about a task that is not running.
-			const started = await invoke<boolean>("start_podcast_task", { taskId });
-			showAppNotice(started ? "播客任务已启动" : "播客任务已排队，等待空闲槽位");
-		} catch (error) {
-			noticeError("无法启动播客任务", error);
-		}
-	}
 
 	async function startZhihuTask(taskId: string, expectedRevision: number) {
 		try {
@@ -2438,77 +2407,22 @@
 		}
 	}
 
-	async function restartPodcastTask(taskId: string, budgetLimitCny?: number) {
-		try {
-			showAppNotice("正在重试播客任务…");
-			const snapshot = await invoke<{
-				id: string;
-				outcome?: string;
-				lifecycleState?: string;
-			}>("restart_podcast_task", {
-				taskId,
-				budgetLimitCny: budgetLimitCny ?? null
-			});
-			if (snapshot.outcome === "success") {
-				showAppNotice("发布成功，文稿已保存到 书库/播客");
-			} else {
-				// Same task id = in-place resume reusing the checkpoint; a new
-				// id means a full re-run on a cloned task.
-				showAppNotice(
-					snapshot.id === taskId ? "已从上次进度续跑" : "已重新开始转写"
-				);
-			}
-			await refreshAcquisitionSnapshot();
-		} catch (error) {
-			// Never let a retry error look like a silent crash — surface it clearly.
-			showAppNotice(
-				String(error).includes("INPUT_MISSING") || String(error).includes("TASK_CONTRACT_MISSING")
-					? "无法重试：原音频或任务信息已丢失，请重新添加音频。"
-					: `无法重试播客任务：${reportError("重试播客任务", error)}`
-			);
-			await refreshAcquisitionSnapshot();
-		}
-	}
 
-	async function openPodcastTaskResult(taskId: string) {
+	async function openTaskResult(taskId: string) {
 		try {
 			const detail = await invoke<BookDetail>("open_task_result", { taskId });
 			await refreshLibrary();
 			await openLibraryBook(detail.manifest.bookId);
 		} catch (error) {
-			const description = reportError("打开播客结果", error);
+			const description = reportError("打开任务结果", error);
 			showAppNotice(
 				String(error).includes("Book not found") || String(error).includes("书架中找不到")
-					? "无法打开播客：书架中还没有这本书。若转写刚完成，请点「重试」或重新打开。"
-					: `无法打开播客结果：${description}`
+					? "无法打开内容：书架中还没有这本书。若归档刚完成，请点「重试」或重新打开。"
+					: `无法打开任务结果：${description}`
 			);
 		}
 	}
 
-	async function controlPodcastTask(
-		taskId: string,
-		action: "pause" | "resume" | "cancel" | "cancel_and_discard",
-		expectedRevision: number
-	) {
-		// TaskRow already confirms discard in its own dialog — a second
-		// confirmAction here made every discard ask twice.
-		try {
-			await invoke("control_podcast_task", {
-				taskId,
-				action,
-				expectedRevision,
-				requestId: await stableRequestId("control_podcast_task", taskId, action, expectedRevision)
-			});
-			showAppNotice(
-				action === "pause" ? "任务已暂停"
-				: action === "resume" ? "任务已恢复"
-				: action === "cancel_and_discard" ? "任务缓存已丢弃"
-				: "任务已取消"
-			);
-		} catch (error) {
-			noticeError("任务控制失败", error);
-		}
-	}
 
 	async function refreshTrash(): Promise<void> {
 		trashLoading = true;
@@ -2966,7 +2880,8 @@
 			try {
 				locator = await getReaderLocator(bookId);
 			} catch {
-				locator = null;
+				showAppNotice('无法恢复阅读进度，请重试打开');
+				return false;
 			}
 		}
 		selectedBookDetail = null;
@@ -2978,7 +2893,7 @@
 	function handleEpubLocator(locator: ReaderLocator) {
 		const session = epubSession;
 		if (!session || locator.bookId !== session.detail.manifest.bookId) return;
-		void saveReaderLocator(locator.bookId, locator).catch(() => {});
+		session.locator = locator;
 	}
 
 	function closeEpubSession() {
@@ -3157,10 +3072,10 @@
 	}
 
 	onMount(() => {
-		void checkForDesktopUpdate(false);
+		const updateTimer = setTimeout(() => void checkForDesktopUpdate(false), 5000);
 		const checkInitialFile = () => {
 			if ((window as any).__INITIAL_FILE__) {
-				openFile((window as any).__INITIAL_FILE__);
+				void openManagedPaths([(window as any).__INITIAL_FILE__]);
 				delete (window as any).__INITIAL_FILE__;
 			}
 		};
@@ -3484,7 +3399,7 @@
 				if ($currentFilePath && !saveStateTimer) {
 					saveStateTimer = setTimeout(() => {
 						saveStateTimer = null;
-						void saveState();
+						void saveState().catch(() => {});
 					}, 5000);
 				}
 			});
@@ -3701,20 +3616,14 @@
 					selectedBookDetail !== null ||
 					trashOpen
 				) return;
-				const mdFile = event.payload.paths.find(
-					(p: string) => isMarkdownPath(p)
-				);
-				if (mdFile) {
-					// openFile will handle canceling any active edit
-					openFile(mdFile);
-				}
+				void openManagedPaths(event.payload.paths);
 			}
 		});
 
 		// macOS: file opened via Apple Event (double-click / Open With)
 		const unlistenOpenFile = listenManaged<string>('open-file', (event) => {
 			// openFile will handle canceling any active edit
-			openFile(event.payload);
+			void openManagedPaths([event.payload]);
 		});
 		// C6: the acquisition engine only exists on desktop builds — on mobile
 		// the subscription can never fire and snapshot polling would just burn
@@ -3741,10 +3650,10 @@
 		// B6: mobile webviews can be frozen/killed without a beforeunload —
 		// pagehide and the transition to hidden are the reliable save points.
 		const flushOnPageHide = () => {
-			void flushSaveState();
+			void flushSaveState().catch(() => {});
 		};
 		const flushOnVisibilityHidden = () => {
-			if (document.visibilityState === "hidden") void flushSaveState();
+			if (document.visibilityState === "hidden") void flushSaveState().catch(() => {});
 		};
 		window.addEventListener("pagehide", flushOnPageHide);
 		document.addEventListener("visibilitychange", flushOnVisibilityHidden);
@@ -3933,8 +3842,7 @@
 				clearSearchHighlights();
 			} else if (trashOpen) {
 				trashOpen = false;
-			} else if (podcastWorkflowOpen) {
-				podcastWorkflowOpen = false;
+
 			} else if (zhihuWorkflowOpen) {
 				zhihuWorkflowOpen = false;
 			} else if (selectedBookDetail !== null) {
@@ -3970,12 +3878,11 @@
 		};
 		window.addEventListener("resize", handleResize);
 		const handleBeforeUnload = () => {
-			if ($currentFilePath && contentEl) void flushSaveState();
+			if ($currentFilePath && contentEl) void flushSaveState().catch(() => {});
 		};
 		window.addEventListener("beforeunload", handleBeforeUnload);
 
-		// Window X / chrome close: save reading state and hide to tray so acquisition
-		// tasks keep running. Only tray "退出" ends the process (preserve / cleanup).
+		// Window X and Alt+F4 share the same durable-save and exit path.
 		let isClosing = false;
 		// One-shot race timeouts below are tracked so teardown can cancel a
 		// pending exit flow instead of letting callbacks fire post-destroy.
@@ -3996,20 +3903,10 @@
 				}
 			});
 		};
-		const finishExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
+		const finishExit = async (mode: "preserve" | "cancel_and_discard") => {
 			try {
-				try {
-					await appWindow.hide();
-				} catch (hideErr) {
-					// Hiding is best-effort: a missing allow-hide capability or an
-					// already-gone window must not skip the graceful flush below —
-					// quit_app still has to run or only the hard tray fallback exits.
-					console.warn("Window hide failed; continuing exit cleanup.", hideErr);
-				}
-				if (editingParagraph) {
-					await raceWithTimeout(finishEdit(), 1200, false);
-				}
-				await raceWithTimeout(flushSaveState(), 500, undefined);
+                if (editingParagraph && !(await finishEdit())) throw new Error("编辑内容尚未保存");
+                await flushSaveState();
 				// Exit path skips the nav-guard (already confirmed "退出应用")
 				// and bounds the close so a wedged session can't stall shutdown.
 				await raceWithTimeout(closeFlowReaderSession(), 1500, undefined);
@@ -4019,23 +3916,16 @@
 					await invoke("cancel_and_discard");
 				}
 			} catch (err) {
-				console.error("Failed to finish app exit:", err);
+                console.error("Failed to finish app exit:", err);
+                showAppNotice("退出前保存失败，请重试。");
 			} finally {
 				isClosing = false;
 			}
 		};
-		const requestExit = async (mode: "hide" | "preserve" | "cancel_and_discard") => {
+		const requestExit = async (mode: "preserve" | "cancel_and_discard") => {
 			if (isClosing) return;
-			if (mode !== "hide") {
-				if ((await requestNavigationGuard("退出应用")) === "cancel") {
-					// The tray armed a hard-exit fallback before we could ask —
-					// disarm it or the app dies anyway seconds later.
-					await invoke("cancel_exit_fallback").catch(() => {});
-					return;
-				}
-			} else if (editingParagraph || $currentFilePath) {
-				// Soft hide: still flush edits, but do not treat as app exit.
-			}
+			if ((await requestNavigationGuard("退出应用")) === "cancel") return;
+			if (isClosing) return;
 			isClosing = true;
 			void finishExit(mode);
 		};
@@ -4048,7 +3938,7 @@
 			: appWindow.onCloseRequested((event) => {
 				if (isClosing) return;
 				event.preventDefault();
-				void requestExit("hide");
+				void requestExit("preserve");
 			});
 
 		void refreshLibrary();
@@ -4103,7 +3993,6 @@
 			recentFiles = files;
 		});
 		void hydrateDurableReaderPreferences();
-		maybeShowTrayHint();
 
 		// Prewarm the markdown worker off the critical path: the first render
 		// then only pays postMessage latency, not worker script load/eval.
@@ -4213,6 +4102,7 @@
 				taskPollTimer = null;
 			}
 			clearTimeout(initialFileTimer);
+            clearTimeout(updateTimer);
 			if (workerPrewarmIdleId !== null) cancelIdleCallback(workerPrewarmIdleId);
 			if (workerPrewarmTimer) clearTimeout(workerPrewarmTimer);
 			exitTimers.forEach((timer) => clearTimeout(timer));
@@ -4364,33 +4254,18 @@
 	});
 
 	let fileDialogOpen = false;
+	let epubReaderRef: { flushLocator(): Promise<void> } | null = null;
+	async function openManagedPaths(paths: string[]) {
+		if ((await requestNavigationGuard("打开内容")) === "cancel") return;
+		await runImport({ kind: "files", paths });
+	}
 	async function openFileDialog() {
-		// Re-entry (repeat Ctrl+O / double activation) must not stack dialogs.
 		if (fileDialogOpen) return;
 		fileDialogOpen = true;
 		try {
-			const selected = await open({
-				multiple: false,
-				filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
-			}).catch((error) => {
-				// Android: a missing/broken picker Activity rejects instead of
-				// resolving null. Keep desktop semantics unchanged.
-				if (!isMobile) throw error;
-				noticeError("无法打开文件选择器", error);
-				return null;
-			});
-			if (selected) {
-				// Android SAF returns a content:// URI — stage it into the app
-				// cache so the Rust reader (std::fs) can open it as a real file.
-				if (isMobile) {
-					await openMobilePickedFile(selected as string);
-				} else {
-					openFile(selected as string);
-				}
-			}
-		} finally {
-			fileDialogOpen = false;
-		}
+			const selected = await open({ multiple: true, title: "打开书籍或文档", filters: [{ name: "书籍与文档", extensions: ["epub", "md", "markdown", "txt"] }] });
+			if (selected) await openManagedPaths(Array.isArray(selected) ? selected : [selected]);
+		} finally { fileDialogOpen = false; }
 	}
 
 	// Mobile single-file open: copy the picked content:// document into the
@@ -4520,6 +4395,10 @@
 	};
 
 	async function openFile(path: string, options: OpenFileOptions = {}): Promise<boolean> {
+		if (!options.bookChapter) {
+			await openManagedPaths([path]);
+			return importStatus?.state === 'completed';
+		}
 		if (
 			options.expectedNavigationGeneration !== undefined &&
 			options.expectedNavigationGeneration !== navigationGeneration
@@ -5213,6 +5092,7 @@
 				saveStateFailureNotified = true;
 				showAppNotice("阅读进度保存失败，退出前请确认进度已记录");
 			}
+			throw e;
 		}
 	}
 
@@ -5229,6 +5109,7 @@
 	}
 
 	async function flushSaveState() {
+		await epubReaderRef?.flushLocator();
 		if (saveStateTimer) {
 			clearTimeout(saveStateTimer);
 			saveStateTimer = null;
@@ -6884,7 +6765,7 @@
 	<!-- Settings overlay（首次打开设置时才加载组件，之后保持挂载） -->
 	{#if settingsPanelRequested}
 		{#await loadSettingsPanel() then { default: SettingsPanel }}
-			<SettingsPanel />
+			<SettingsPanel onLibraryChanged={() => void refreshLibrary()} />
 		{/await}
 	{/if}
 
@@ -6975,6 +6856,7 @@
 			<section class="epub-reader-workspace" aria-label="EPUB 阅读">
 				{#await loadEpubReader() then { default: EpubReader }}
 					<EpubReader
+						bind:this={epubReaderRef}
 						bookId={epubSession.detail.manifest.bookId}
 						bookDir={epubSession.bookDir}
 						publication={epubSession.publication}
@@ -7058,13 +6940,13 @@
 				onOpenFile={() => void openFileDialog()}
 				onOpenTemporary={(path) => void openFile(path)}
 				onOpenZhihuWorkflow={openZhihuWorkflowPanel}
-				onOpenPodcastWorkflow={openPodcastWorkflowPanel}
-				onStartTask={(taskId) => void startPodcastTask(taskId)}
+
+				onStartTask={() => {}}
 				onStartZhihuTask={(taskId, revision) => void startZhihuTask(taskId, revision)}
-				onOpenTaskResult={(taskId) => void openPodcastTaskResult(taskId)}
-				onRestartTask={(taskId) => void restartPodcastTask(taskId)}
-				onApproveBudget={(taskId, limit) => void restartPodcastTask(taskId, limit)}
-				onControlTask={(taskId, action, revision) => void controlPodcastTask(taskId, action, revision)}
+				onOpenTaskResult={(taskId) => void openTaskResult(taskId)}
+				onRestartTask={() => {}}
+				onApproveBudget={() => {}}
+				onControlTask={() => {}}
 				onControlZhihuTask={(taskId, action, revision) => void controlZhihuTask(taskId, action, revision)}
 				onChooseLibrary={() => void chooseLibraryRoot()}
 				onOpenTrash={openTrashPanel}
@@ -7074,17 +6956,7 @@
 				onDeleteBook={(bookId, title, chapterCount) =>
 					void deleteLibraryBook(bookId, title, chapterCount)}
 			/>
-			{#if podcastWorkflowOpen && !isMobile}
-				{#await loadPodcastWorkflow() then { default: PodcastWorkflow }}
-					<PodcastWorkflow
-						tasks={acquisitionTasks}
-						onClose={() => (podcastWorkflowOpen = false)}
-						onRefreshTasks={() => void refreshAcquisitionSnapshot()}
-						onStartTask={(taskId) => void startPodcastTask(taskId)}
-						onOpenResult={(taskId) => void openPodcastTaskResult(taskId)}
-					/>
-				{/await}
-			{/if}
+
 			{#if zhihuWorkflowOpen && !isMobile}
 				{#await loadZhihuWorkflow() then { default: ZhihuWorkflow }}
 					<ZhihuWorkflow
@@ -7278,7 +7150,10 @@
 			{#if importStatus.currentFile}
 				<div class="import-current" title={importStatus.currentFile}>{importStatus.currentFile}</div>
 			{/if}
-			{#if importStatus.issues.length > 0}
+            {#if importStatus.state === "completed" && importStatus.books?.length}
+                <ul class="import-issues">{#each importStatus.books.slice(0, 8) as book (book.bookId)}<li>✓ {book.title}</li>{/each}</ul>
+            {/if}
+            {#if importStatus.issues.length > 0}
 				<ul class="import-issues">
 					{#each importStatus.issues.slice(0, 4) as issue}
 						<li>{issue.message}{issue.path ? ` · ${issue.path}` : ""}</li>
@@ -7295,7 +7170,8 @@
 				{#if !isTerminalImportState(importStatus.state)}
 					<button type="button" class="import-btn" on:click={() => void cancelActiveImport()}>取消导入</button>
 				{:else}
-					<button type="button" class="import-btn" on:click={dismissImportStatus}>关闭</button>
+                    {#if lastImportRequest && (importStatus.issues.length > 0 || importStatus.state === "failed")}<button type="button" class="import-btn" on:click={() => lastImportRequest && void runImport(lastImportRequest)}>重试</button>{/if}
+                    <button type="button" class="import-btn" on:click={dismissImportStatus}>关闭</button>
 				{/if}
 			</div>
 		</div>

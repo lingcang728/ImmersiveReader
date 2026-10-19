@@ -33,6 +33,7 @@ if ($InstallDir -ieq $monorepoRoot -or
     $InstallDir.StartsWith($monorepoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
   Write-Warning "InstallDir is inside the source tree ($InstallDir); runtime rebuilds and 'git clean -xdf' can destroy the installed app. Prefer an external per-user directory."
 }
+. (Join-Path $PSScriptRoot 'desktop-boundary.ps1')
 $sourceRuntime = Join-Path $monorepoRoot 'runtime'
 Set-Location $desktopRoot
 
@@ -345,12 +346,12 @@ function Get-ProcessesUnderDirectory {
 function Stop-ProcessesUnderDirectory {
   param([Parameter(Mandatory)][string]$Root)
 
-  # The app's close handler flushes state before prevent_close hides the
-  # window to the tray, so give GUI processes a graceful window first, then
+  # The app's close handler flushes state and exits. Give GUI processes a graceful window first, then
   # force-kill: sidecars/workers keep runtime files open and a robocopy /MIR
   # or NSIS overwrite against them produces a torn install.
   $running = @(Get-ProcessesUnderDirectory -Root $Root)
   if ($running.Count -eq 0) { return }
+  Assert-CodingDesktopProcesses -Processes $running
   $names = ($running | ForEach-Object { "$($_.ProcessName) (PID $($_.Id)) $($_.Path)" }) -join ', '
   Write-Warning "Stopping processes under $Root before replacing files: $names"
   foreach ($process in $running) {
@@ -375,16 +376,10 @@ function Assert-RuntimeAppHashes {
   $zhihuSourceServer = Join-Path $monorepoRoot "tools\zhihu-packer\dist\server.js"
   $contractsAppIndex = Join-Path $monorepoRoot "runtime\packages\contracts\dist\index.js"
   $contractsSourceIndex = Join-Path $monorepoRoot "packages\contracts\dist\index.js"
-  $podcastAppPolish = Join-Path $monorepoRoot "runtime\podcast\app\scripts\polish_interview_markdown.py"
-  $podcastSourcePolish = Join-Path $monorepoRoot "tools\podcast-transcriber\scripts\polish_interview_markdown.py"
-  $podcastAppLanguage = Join-Path $monorepoRoot "runtime\podcast\app\scripts\podcast_transcriber\language.py"
-  $podcastSourceLanguage = Join-Path $monorepoRoot "tools\podcast-transcriber\scripts\podcast_transcriber\language.py"
   foreach ($pair in @(
     @{ Name = "Reader template"; Source = $zhihuSourceTemplate; Runtime = $zhihuAppTemplate },
     @{ Name = "Zhihu sidecar server"; Source = $zhihuSourceServer; Runtime = $zhihuAppServer },
-    @{ Name = "Contracts runtime"; Source = $contractsSourceIndex; Runtime = $contractsAppIndex },
-    @{ Name = "Podcast final markdown generator"; Source = $podcastSourcePolish; Runtime = $podcastAppPolish },
-    @{ Name = "Podcast language classifier"; Source = $podcastSourceLanguage; Runtime = $podcastAppLanguage }
+    @{ Name = "Contracts runtime"; Source = $contractsSourceIndex; Runtime = $contractsAppIndex }
   )) {
     if (-not (Test-Path -LiteralPath $pair.Source)) {
       throw "Ship preflight missing source: $($pair.Name) ($($pair.Source))"
@@ -528,7 +523,7 @@ if ([System.IO.Path]::GetFullPath($sourceRuntime) -ne [System.IO.Path]::GetFullP
   Assert-NotReparsePoint -Path $sourceRuntime
   Assert-NotReparsePoint -Path $targetRuntime
   Assert-NotReparsePoint -Path $InstallDir
-  & robocopy $sourceRuntime $targetRuntime /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+  & robocopy $sourceRuntime $targetRuntime /MIR /XD (Join-Path $sourceRuntime 'podcast') (Join-Path $targetRuntime 'podcast') /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
   if ($LASTEXITCODE -gt 7) { throw "Runtime install failed with robocopy exit code $LASTEXITCODE" }
 }
 
@@ -550,10 +545,7 @@ foreach ($required in @(
   'runtime\zhihu\chromium\msedge.exe',
   'runtime\zhihu\app\dist\server.js',
   'runtime\zhihu\app\dist\reader-template.html',
-  'runtime\packages\contracts\dist\index.js',
-  'runtime\podcast\python\python.exe',
-  'runtime\podcast\ffmpeg\ffmpeg.exe',
-  'runtime\podcast\models'
+  'runtime\packages\contracts\dist\index.js'
 )) {
   if (-not (Test-Path -LiteralPath (Join-Path $InstallDir $required))) {
     throw "Installed runtime is incomplete: $required"

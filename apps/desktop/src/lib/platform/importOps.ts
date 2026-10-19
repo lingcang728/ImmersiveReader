@@ -34,8 +34,9 @@ export interface ImportStatus {
 	completedFiles: number;
 	currentFile: string | null;
 	issues: ImportIssue[];
-	bookId: string | null;
-	error: string | null;
+    bookId: string | null;
+    books?: { bookId: string; title: string }[];
+    error: string | null;
 }
 
 // A `type` alias (not interface) so the object literal is assignable to
@@ -110,6 +111,16 @@ function normalizeIssues(raw: unknown): ImportIssue[] {
 	return issues;
 }
 
+function importedBooks(raw: RawStatus): { bookId: string; title: string }[] {
+    const books = new Map<string, { bookId: string; title: string }>();
+    const visit = (value: RawStatus) => {
+        if (Array.isArray(value.results)) for (const result of value.results) if (result && typeof result === "object") visit(result as RawStatus);
+        const bookId = pickString(value, "bookId", "book_id");
+        if (bookId && !books.has(bookId)) books.set(bookId, { bookId, title: pickString(value, "title") ?? bookId });
+    };
+    visit(raw); return [...books.values()];
+}
+
 /**
  * Normalize whatever the backend serializes into a stable `ImportStatus`.
  * Accepts snake_case and camelCase spellings; absent fields degrade to a
@@ -152,7 +163,8 @@ export function normalizeImportStatus(
 			pickString(resultBag, "book_id", "bookId"),
 		// The backend reports terminal detail in `message` (only ever set on
 		// failure/cancel) — treat it as the error text.
-		error: pickString(bag, "error", "error_message", "message"),
+        books: importedBooks(resultBag),
+        error: pickString(bag, "error", "error_message", "message"),
 	};
 }
 

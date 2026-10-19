@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookSummary {
     pub book_id: String,
@@ -21,14 +21,14 @@ pub struct BookSummary {
     pub last_read_at: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryIssue {
     pub path: String,
     pub message: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryScan {
     pub books: Vec<BookSummary>,
@@ -94,6 +94,15 @@ pub(crate) fn collect_manifests(
     issues: &mut Vec<LibraryIssue>,
     inside_book: bool,
 ) -> usize {
+    // A publication is a leaf of the library tree. Its content/assets are
+    // not candidate books and their depth must not generate shelf warnings.
+    if inside_book {
+        return 0;
+    }
+    if depth > 0 && dir.join("manifest.json").is_file() {
+        manifests.push(dir.join("manifest.json"));
+        return 0;
+    }
     if depth > 3 {
         issues.push(LibraryIssue {
             path: dir.to_string_lossy().into_owned(),
@@ -273,7 +282,7 @@ fn read_json_file_capped(path: &Path) -> Result<String, String> {
     if metadata.len() > crate::MAX_MARKDOWN_FILE_BYTES {
         return Err("FILE_TOO_LARGE".to_string());
     }
-    fs::read_to_string(&normalized).map_err(|error| error.to_string())
+    crate::atomic_file::read_to_string(&normalized).map_err(|error| error.to_string())
 }
 
 pub(crate) fn read_manifest(path: &Path) -> Result<Manifest, String> {
@@ -407,6 +416,7 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
     // reconcile needs; keeping the whole Manifest here would deep-clone every
     // book's chapter list on each shelf scan.
     let mut live_books: Vec<(PathBuf, String, String)> = Vec::new();
+    let reader_db = crate::reader_db::ReaderDb::open_current().ok();
     for path in paths {
         match load_book_at(&path) {
             Ok((manifest, progress)) => {
@@ -422,7 +432,7 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
                     .iter()
                     .find(|chapter| chapter.id == progress.current)
                     .map(|chapter| chapter.title.clone());
-                books.push(BookSummary {
+                let mut summary = BookSummary {
                     book_id: manifest.book_id.clone(),
                     title: manifest.title.clone(),
                     source: manifest.source.clone(),
@@ -430,9 +440,21 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
                     read_count: progress.read.len(),
                     progress: progress_value(&manifest, &progress),
                     current_chapter_title: title,
-                    updated_at: manifest.updated_at,
+                    updated_at: manifest.updated_at.clone(),
                     last_read_at: (!progress.updated.is_empty()).then_some(progress.updated),
-                });
+                };
+                if path
+                    .parent()
+                    .is_some_and(|dir| dir.join("publication.json").is_file())
+                {
+                    if let Some(raw) = reader_db
+                        .as_ref()
+                        .and_then(|db| db.load_locator(&manifest.book_id).ok().flatten())
+                    {
+                        apply_epub_locator(&mut summary, &manifest, &raw);
+                    }
+                }
+                books.push(summary);
             }
             Err(message) => issues.push(LibraryIssue {
                 path: path.to_string_lossy().into_owned(),
@@ -452,6 +474,29 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan, String> {
         issues,
         writable,
     })
+}
+
+fn apply_epub_locator(summary: &mut BookSummary, manifest: &Manifest, raw: &str) {
+    let Ok(locator) = serde_json::from_str::<crate::contracts::ReaderLocator>(raw) else {
+        return;
+    };
+    if crate::contracts::validate_reader_locator(&locator).is_err()
+        || locator.book_id != manifest.book_id
+    {
+        return;
+    }
+    let Some(index) = manifest
+        .chapters
+        .iter()
+        .position(|chapter| chapter.id == locator.chapter_id)
+    else {
+        return;
+    };
+    summary.progress =
+        ((index as f64 + locator.ratio) / manifest.chapters.len() as f64).clamp(0.0, 1.0);
+    summary.read_count = index;
+    summary.current_chapter_title = Some(manifest.chapters[index].title.clone());
+    summary.last_read_at = Some(locator.updated);
 }
 
 /// Index one live book into reader.db: `book_id → dir_rel` where dir_rel is
@@ -600,6 +645,7 @@ fn find_book(root: &Path, book_id: &str) -> Result<(PathBuf, Manifest, ReadingPr
     Ok(found)
 }
 
+#[cfg(test)]
 pub fn open_book(root: &Path, book_id: &str) -> Result<BookDetail, String> {
     open_book_with_root(root, book_id).map(|(detail, _)| detail)
 }
@@ -634,7 +680,7 @@ fn book_detail_from(book_root: &Path, manifest: Manifest, progress: ReadingProgr
     };
     // `publication.json` presence decides the branch — Markdown books never
     // touch the epub parser at all.
-    let publication = if crate::epub::publication_path(book_root).is_file() {
+    let mut publication = if crate::epub::publication_path(book_root).is_file() {
         match crate::epub::load_publication(book_root) {
             Ok(publication) => publication,
             Err(error) => {
@@ -651,6 +697,15 @@ fn book_detail_from(book_root: &Path, manifest: Manifest, progress: ReadingProgr
     } else {
         None
     };
+    // Old publications key resources by publisher OPF ids, while spine uses generated chapter ids.
+    // Add the actual chapter paths so internal links and search work for both formats without rewriting user files.
+    if let Some(publication) = &mut publication {
+        for chapter in &manifest.chapters {
+            publication
+                .resources
+                .insert(chapter.id.clone(), chapter.path.clone());
+        }
+    }
     BookDetail {
         manifest,
         progress,
@@ -664,29 +719,6 @@ fn book_detail_from(book_root: &Path, manifest: Manifest, progress: ReadingProgr
             .trim_start_matches("\\\\?\\")
             .to_string(),
     }
-}
-
-pub fn find_book_by_source_id(root: &Path, source_id: &str) -> Result<Option<Manifest>, String> {
-    let mut paths = Vec::new();
-    collect_manifests(
-        &crate::atomic_file::long_path(root),
-        0,
-        &mut paths,
-        &mut Vec::new(),
-        false,
-    );
-    // P3-17: same deterministic ordering as find_book — first match in
-    // sorted manifest path order wins.
-    paths.sort();
-    for path in paths {
-        let Ok(manifest) = read_manifest(&path) else {
-            continue;
-        };
-        if manifest.source_id.as_deref() == Some(source_id) {
-            return Ok(Some(manifest));
-        }
-    }
-    Ok(None)
 }
 
 pub fn book_context(
@@ -826,6 +858,43 @@ mod tests {
     }
 
     #[test]
+    fn hundred_book_scan_and_snapshot_benchmark() {
+        let root = temp_library("hundred-books");
+        for index in 0..100 {
+            write_fixture_book(
+                &root,
+                &format!(
+                    "benchmark-{index}-{}",
+                    root.file_name().unwrap().to_string_lossy()
+                ),
+                &format!("book-{index:03}"),
+            );
+        }
+        let start = std::time::Instant::now();
+        let cold = scan_library(&root).unwrap();
+        let cold_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let start = std::time::Instant::now();
+        let warm = scan_library(&root).unwrap();
+        let warm_ms = start.elapsed().as_secs_f64() * 1000.0;
+        super::save_snapshot(&root, &warm);
+        let start = std::time::Instant::now();
+        let cached = super::load_snapshot(&root).unwrap();
+        let snapshot_ms = start.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(cold.books.len(), 100);
+        assert_eq!(cached.books.len(), 100);
+        println!("IR_BENCH books=100 cold_scan_ms={cold_ms:.2} warm_scan_ms={warm_ms:.2} cached_snapshot_ms={snapshot_ms:.2}");
+        if let Ok(db) = crate::reader_db::ReaderDb::open_current() {
+            for book in cold.books {
+                let _ = db.remove_book(&book.book_id);
+            }
+        }
+        if let Ok(path) = super::snapshot_path(&root) {
+            let _ = fs::remove_file(path);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn progress_counts_current_unread_fraction() {
         let manifest: Manifest = serde_json::from_str(include_str!(
             "../../../../packages/contracts/fixtures/manifest.valid.json"
@@ -885,6 +954,53 @@ mod tests {
     }
 
     #[test]
+    fn scan_does_not_enter_publication_resources() {
+        let root = temp_library("deep-assets");
+        write_fixture_book(&root, "manual:deep", "深层资源");
+        let assets = root.join("手动/深层资源/content/OEBPS/Text/part/figures");
+        fs::create_dir_all(&assets).expect("assets");
+        fs::write(assets.join("cover.svg"), "<svg/>").expect("image");
+        let scan = scan_library(&root).expect("scan");
+        assert_eq!(scan.books.len(), 1);
+        assert!(scan.issues.is_empty(), "{:?}", scan.issues);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn epub_summary_uses_locator_chapter_ratio_and_time() {
+        let mut manifest: Manifest = serde_json::from_str(include_str!(
+            "../../../../packages/contracts/fixtures/manifest.valid.json"
+        ))
+        .expect("fixture");
+        let mut second = manifest.chapters[0].clone();
+        second.id = "c2".into();
+        second.title = "第二章".into();
+        manifest.chapters.push(second);
+        let mut summary = super::BookSummary {
+            book_id: manifest.book_id.clone(),
+            title: manifest.title.clone(),
+            source: manifest.source.clone(),
+            chapter_count: manifest.chapters.len(),
+            read_count: 0,
+            progress: 0.0,
+            current_chapter_title: None,
+            updated_at: manifest.updated_at.clone(),
+            last_read_at: None,
+        };
+        let raw = serde_json::json!({"schemaVersion": 1, "bookId": manifest.book_id, "chapterId": manifest.chapters[1].id, "anchor": {"kind": "ratio"}, "ratio": 0.5, "updated": "2026-10-18T13:00:00Z"}).to_string();
+        super::apply_epub_locator(&mut summary, &manifest, &raw);
+        assert_eq!(summary.progress, 0.75);
+        assert_eq!(
+            summary.current_chapter_title,
+            Some(manifest.chapters[1].title.clone())
+        );
+        assert_eq!(
+            summary.last_read_at.as_deref(),
+            Some("2026-10-18T13:00:00Z")
+        );
+    }
+
+    #[test]
     fn legacy_null_manifest_heals_itself_on_scan() {
         // Pre-null-fix writers persisted `"sourceId": null` etc.; those books
         // must load (and the file must be rewritten canonically) instead of
@@ -920,7 +1036,7 @@ mod tests {
         assert_eq!(scan.books[0].book_id, "manual:legacy-null");
         assert!(scan.issues.is_empty(), "issues: {:?}", scan.issues);
         // The on-disk file is healed — a second read sees no nulls.
-        let healed = fs::read_to_string(&manifest_path).expect("read healed");
+        let healed = crate::atomic_file::read_to_string(&manifest_path).expect("read healed");
         assert!(!healed.contains(": null"), "healed manifest: {healed}");
         let _ = fs::remove_dir_all(&root);
     }
@@ -999,5 +1115,36 @@ mod tests {
         assert!(book_root.ends_with(Path::new("手动").join("一次打开")));
         assert!(book_root.join("manifest.json").is_file());
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct ShelfSnapshot {
+    root: String,
+    scan: LibraryScan,
+}
+fn snapshot_path(root: &Path) -> Result<PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
+    Ok(crate::storage::StorageLocations::current()?
+        .cache_root
+        .join("Shelf")
+        .join(format!("{hash}.json")))
+}
+pub(crate) fn load_snapshot(root: &Path) -> Option<LibraryScan> {
+    let path = snapshot_path(root).ok()?;
+    let raw = read_json_file_capped(&path).ok()?;
+    let snapshot: ShelfSnapshot = serde_json::from_str(&raw).ok()?;
+    (snapshot.root == root.to_string_lossy()).then_some(snapshot.scan)
+}
+pub(crate) fn save_snapshot(root: &Path, scan: &LibraryScan) {
+    if let Ok(path) = snapshot_path(root) {
+        let snapshot = ShelfSnapshot {
+            root: root.to_string_lossy().into_owned(),
+            scan: scan.clone(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&snapshot) {
+            let _ = crate::atomic_file::write(&path, &bytes);
+        }
     }
 }

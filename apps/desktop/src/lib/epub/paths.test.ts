@@ -86,6 +86,10 @@ describe("url classification", () => {
 });
 
 describe("joinNativePath", () => {
+    it("resolves sibling resources against the complete chapter directory", () => {
+        expect(joinNativePath("/book/OEBPS/Text", "../Images/one.png")).toBe("/book/OEBPS/Images/one.png");
+        expect(joinNativePath("C:\\book\\Text", "../Styles/book.css")).toBe("C:\\book\\Styles\\book.css");
+    });
 	it("uses the base separator style", () => {
 		expect(joinNativePath("C:\\book\\dir", "img/a.png")).toBe("C:\\book\\dir\\img\\a.png");
 		expect(joinNativePath("/home/book/dir", "img/a.png")).toBe("/home/book/dir/img/a.png");

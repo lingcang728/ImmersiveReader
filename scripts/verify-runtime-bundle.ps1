@@ -120,9 +120,7 @@ try {
     $pairs = @(
         @{ Name = 'Reader template'; Source = 'tools\zhihu-packer\dist\reader-template.html'; Runtime = 'zhihu\app\dist\reader-template.html' },
         @{ Name = 'Zhihu sidecar server'; Source = 'tools\zhihu-packer\dist\server.js'; Runtime = 'zhihu\app\dist\server.js' },
-        @{ Name = 'Contracts runtime'; Source = 'packages\contracts\dist\index.js'; Runtime = 'packages\contracts\dist\index.js' },
-        @{ Name = 'Podcast final markdown generator'; Source = 'tools\podcast-transcriber\scripts\polish_interview_markdown.py'; Runtime = 'podcast\app\scripts\polish_interview_markdown.py' },
-        @{ Name = 'Podcast language classifier'; Source = 'tools\podcast-transcriber\scripts\podcast_transcriber\language.py'; Runtime = 'podcast\app\scripts\podcast_transcriber\language.py' }
+        @{ Name = 'Contracts runtime'; Source = 'packages\contracts\dist\index.js'; Runtime = 'packages\contracts\dist\index.js' }
     )
     foreach ($pair in $pairs) {
         $sourcePath = Join-Path $root $pair.Source

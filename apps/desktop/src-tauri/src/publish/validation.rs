@@ -50,8 +50,10 @@ pub fn validate_book(
     // Hash and parse the SAME bytes — a `hash_file` + `fs::read` pair reads
     // the file twice, so a mid-check rewrite could satisfy the journal hash
     // while the parsed JSON differs (or vice versa).
-    let manifest_bytes = fs::read(&manifest_path).map_err(|error| error.to_string())?;
-    let provenance_bytes = fs::read(&provenance_path).map_err(|error| error.to_string())?;
+    let manifest_bytes =
+        crate::atomic_file::read(&manifest_path).map_err(|error| error.to_string())?;
+    let provenance_bytes =
+        crate::atomic_file::read(&provenance_path).map_err(|error| error.to_string())?;
     let manifest_hash = format!("{:x}", Sha256::digest(&manifest_bytes));
     let provenance_hash = format!("{:x}", Sha256::digest(&provenance_bytes));
     if manifest_hash != transaction.manifest_sha256

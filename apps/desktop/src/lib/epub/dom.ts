@@ -11,7 +11,6 @@ import {
 	isProtocolRelative,
 	hasUriScheme,
 	joinNativePath,
-	normalizeBookPath,
 	safeDecodeUri,
 	splitHref,
 } from "./paths";
@@ -80,7 +79,7 @@ function resolveResourceUrl(raw: string, baseDir: string, convert: FileSrcConver
 	const decoded = safeDecodeUri(raw.trim());
 	const { path, query } = splitHref(decoded);
 	if (!isResolvableRelative(path)) return raw;
-	const absolute = joinNativePath(baseDir, normalizeBookPath(path));
+	const absolute = joinNativePath(baseDir, path);
 	return `${convert(absolute)}${query}`;
 }
 
@@ -115,9 +114,10 @@ export function rewriteCssUrls(
 		/url\(\s*(["']?)([^"')]+)\1\s*\)/gi,
 		(full, _quote: string, url: string) => {
 			const trimmed = url.trim();
+			if (isInlineOrAssetUrl(trimmed)) return full;
 			if (isRemoteUrl(trimmed)) return "url(\"data:,\")";
 			if (!isResolvableRelative(trimmed)) return full;
-			const absolute = joinNativePath(baseDir, normalizeBookPath(trimmed));
+			const absolute = joinNativePath(baseDir, trimmed);
 			return `url("${convert(absolute)}")`;
 		},
 	);
@@ -236,7 +236,7 @@ export function postProcessChapterDom(
 				el.setAttribute(attr, resolveResourceUrl(decoded, baseDir, convert));
 			}
 		}
-		if (!el.isConnected) continue;
+		if (!articleEl.contains(el)) continue;
 		const srcset = el.getAttribute("srcset");
 		if (srcset) {
 			const rewritten = resolveSrcset(srcset, baseDir, convert);
@@ -283,23 +283,50 @@ export function elementCssPath(el: Element, root: Element): string {
 	return `${root.tagName.toLowerCase()} > ${segments.join(" > ")}`;
 }
 
-/** First block-level element intersecting the scroller's top edge. */
-export function firstVisibleBlockAnchor(
-	articleEl: HTMLElement,
-	scrollerEl: HTMLElement,
-): ReaderAnchor {
-	if (typeof document === "undefined") return { kind: "ratio" };
-	const viewTop = scrollerEl.getBoundingClientRect().top;
-	const viewBottom = viewTop + scrollerEl.clientHeight;
-	const blocks = articleEl.querySelectorAll(ANCHOR_BLOCK_SELECTOR);
-	for (const block of Array.from(blocks)) {
-		const rect = block.getBoundingClientRect();
-		if (rect.bottom > viewTop + 8 && rect.top < viewBottom) {
-			return { kind: "element", path: elementCssPath(block, articleEl) };
-		}
-		if (rect.top >= viewBottom) break;
+function readableTop(scroller: HTMLElement): number {
+    const toolbar = scroller.ownerDocument.querySelector<HTMLElement>('[data-testid="reader-toolbar"]:not([aria-hidden="true"])');
+    return Math.max(scroller.getBoundingClientRect().top, toolbar?.getBoundingClientRect().bottom ?? 0);
+}
+
+/** Capture the first readable text line, excluding wrapper containers and overlaid chrome. */
+export function firstVisibleBlockAnchor(articleEl: HTMLElement, scrollerEl: HTMLElement): ReaderAnchor {
+    if (typeof document === "undefined") return { kind: "ratio" };
+    const viewTop = readableTop(scrollerEl);
+    const viewBottom = scrollerEl.getBoundingClientRect().bottom;
+    const nodes = anchorTextNodes(articleEl);
+    const text = nodes.map(node => node.data).join('');
+    for (const block of Array.from(articleEl.querySelectorAll(ANCHOR_BLOCK_SELECTOR))) {
+        if (block.querySelector(ANCHOR_BLOCK_SELECTOR)) continue;
+        const rect = block.getBoundingClientRect();
+        if (rect.bottom <= viewTop + 8 || rect.top >= viewBottom) continue;
+        const doc = articleEl.ownerDocument as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+        const caret = doc.caretRangeFromPoint?.(Math.min(rect.right - 2, rect.left + 8), Math.max(viewTop + 10, rect.top + 4));
+        const target = caret && articleEl.contains(caret.startContainer) && caret.startContainer.nodeType === Node.TEXT_NODE
+            ? caret.startContainer : nodes.find(node => block.contains(node));
+        if (target) {
+            let offset = 0;
+            for (const node of nodes) {
+                if (node === target) {
+                    offset += Array.from(node.data.slice(0, caret?.startContainer === node ? caret.startOffset : 0)).length;
+                    const quote = Array.from(text).slice(offset, offset + 64).join('');
+                    if (quote.trim()) return { kind: "text", quote, offset };
+                    break;
+                }
+                offset += Array.from(node.data).length;
+            }
+        }
+        return { kind: "element", path: elementCssPath(block, articleEl) };
+    }
+    return { kind: "ratio" };
+}
+
+function anchorTextNodes(article: HTMLElement): Text[] {
+	const walker = article.ownerDocument.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+	const nodes: Text[] = [];
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+		if (!(node.parentElement?.closest('style, script, [hidden]'))) nodes.push(node as Text);
 	}
-	return { kind: "ratio" };
+	return nodes;
 }
 
 function queryWithin(articleEl: HTMLElement, path: string): Element | null {
@@ -373,6 +400,24 @@ export function restoreLocatorScroll(
 			return;
 		}
 	} else if (anchor.kind === "text") {
+		const nodes = anchorTextNodes(articleEl);
+		const text = nodes.map(node => node.data).join('');
+		const expected = Array.from(text).slice(0, anchor.offset).join('').length;
+		const targetOffset = text.startsWith(anchor.quote, expected) ? expected : text.indexOf(anchor.quote);
+		if (targetOffset >= 0) {
+			let remaining = targetOffset;
+			for (const node of nodes) {
+				if (remaining < node.length) {
+					const range = articleEl.ownerDocument.createRange();
+					range.setStart(node, remaining);
+					range.setEnd(node, Math.min(node.length, remaining + 1));
+					const rect = range.getBoundingClientRect();
+					scrollerEl.scrollTop += rect.top - readableTop(scrollerEl) - 8;
+					return;
+				}
+				remaining -= node.length;
+			}
+		}
 		const el = findTextBlock(articleEl, anchor.quote);
 		if (el) {
 			el.scrollIntoView({ block: "start" });
@@ -455,4 +500,38 @@ export function clearFocusLite(articleEl: HTMLElement): void {
 	for (const child of Array.from(articleEl.children)) {
 		child.classList.remove("epub-focus-current");
 	}
+}
+
+/** Scope styles in an inert template before a chapter can affect application chrome. */
+export async function prepareChapterHtml(html: string, baseDir: string, convert: FileSrcConverter): Promise<string> {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    const container = document.createElement("div");
+    container.append(template.content);
+    for (const link of Array.from(container.querySelectorAll<HTMLLinkElement>('link'))) {
+        const href = link.getAttribute("href") ?? "";
+        const stylesheet = link.rel.toLowerCase().split(/\s+/).includes("stylesheet");
+        link.remove();
+        if (!stylesheet || !isResolvableRelative(href)) continue;
+        try {
+            const native = joinNativePath(baseDir, safeDecodeUri(splitHref(href).path));
+            const response = await fetch(convert(native), { signal: AbortSignal.timeout(3000) });
+            if (!response.ok || !response.body) continue;
+            const reader = response.body.getReader(); let size = 0; const chunks: Uint8Array[] = [];
+            for (;;) {
+                const {done, value} = await reader.read(); if (done) break;
+                size += value.byteLength;
+                if (size > 1024 * 1024) { await reader.cancel(); throw new Error("EPUB stylesheet exceeds limit"); }
+                chunks.push(value);
+            }
+            const bytes = new Uint8Array(size); let offset = 0;
+            for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+            const cssBase = native.slice(0, Math.max(native.lastIndexOf("/"), native.lastIndexOf("\\")));
+            const style = document.createElement("style");
+            style.textContent = scopeCssText(new TextDecoder().decode(bytes), ".epub-content", cssBase, convert) ?? "";
+            container.prepend(style);
+        } catch (error) { console.warn("[epub] stylesheet unavailable", error); }
+    }
+    postProcessChapterDom(container, baseDir, convert);
+    return container.innerHTML;
 }

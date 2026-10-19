@@ -212,14 +212,12 @@ Describe 'runtime bundle pack/verify round-trip' {
     It 'round-trips parts, bundle hash, manifest and source parity' {
         $rt = Join-Path $TestDrive 'runtime'
         $out = Join-Path $TestDrive 'bundle-out'
-        # The bundle verifier hash-compares five app-code pairs against the
+        # The bundle verifier hash-compares three app-code pairs against the
         # checkout — copy the real build outputs so parity holds.
         $pairs = @(
             @{ Source = 'tools\zhihu-packer\dist\reader-template.html'; Runtime = 'zhihu/app/dist/reader-template.html' },
             @{ Source = 'tools\zhihu-packer\dist\server.js'; Runtime = 'zhihu/app/dist/server.js' },
-            @{ Source = 'packages\contracts\dist\index.js'; Runtime = 'packages/contracts/dist/index.js' },
-            @{ Source = 'tools\podcast-transcriber\scripts\polish_interview_markdown.py'; Runtime = 'podcast/app/scripts/polish_interview_markdown.py' },
-            @{ Source = 'tools\podcast-transcriber\scripts\podcast_transcriber\language.py'; Runtime = 'podcast/app/scripts/podcast_transcriber/language.py' }
+            @{ Source = 'packages\contracts\dist\index.js'; Runtime = 'packages/contracts/dist/index.js' }
         )
         $files = @{}
         foreach ($pair in $pairs) {

@@ -92,7 +92,7 @@ pub fn publication_path(book_root: &Path) -> PathBuf {
 /// Load `publication.json`; `Ok(None)` means this is a Markdown book.
 pub fn load_publication(book_root: &Path) -> Result<Option<Publication>, String> {
     let path = publication_path(book_root);
-    let bytes = match fs::read(crate::atomic_file::long_path(&path)) {
+    let bytes = match crate::atomic_file::read(crate::atomic_file::long_path(&path)) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("EPUB_PUBLICATION_READ: {error}")),
@@ -2086,7 +2086,7 @@ pub fn import_epub_file(
                         .filter(|stem| !stem.trim().is_empty())
                 })
                 .unwrap_or_else(|| format!("章节 {}", index + 1));
-            let words = fs::read(staging.join(&path))
+            let words = crate::atomic_file::read(staging.join(&path))
                 .ok()
                 .and_then(|bytes| {
                     let decoded = decode_xml_bytes(&bytes);
@@ -2108,13 +2108,9 @@ pub fn import_epub_file(
             return Err("EPUB_MALFORMED_SPINE: no chapters extracted".to_string());
         }
         let now = Utc::now().to_rfc3339();
-        let book_id = match opf.identifier().filter(|id| !id.trim().is_empty()) {
-            Some(identifier) => {
-                let digest = Sha256::digest(format!("{identifier}\u{1f}{title}").as_bytes());
-                format!("epub:{:x}", digest)[..18].to_string()
-            }
-            None => format!("epub:{}", &file_sha256[..16]),
-        };
+        // Different editions can share both publisher identifier and title.
+        // Content identity keeps their locators/bookmarks independent.
+        let book_id = format!("epub:{}", &file_sha256[..24]);
         let source_id = opf
             .identifier()
             .map(|id| id.trim().to_string())
@@ -2247,7 +2243,8 @@ pub fn read_epub_chapter_with_neighbors(
     let path = crate::atomic_file::long_path(
         &book_root.join(chapter.path.replace('/', std::path::MAIN_SEPARATOR_STR)),
     );
-    let bytes = fs::read(&path).map_err(|error| format!("EPUB_CHAPTER_READ: {error}"))?;
+    let bytes =
+        crate::atomic_file::read(&path).map_err(|error| format!("EPUB_CHAPTER_READ: {error}"))?;
     let decoded = decode_xml_bytes(&bytes);
     // Defense-in-depth: content was sanitized at import; re-run the pass so a
     // tampered book file still reaches the reader sanitized.
@@ -2278,7 +2275,8 @@ pub fn chapter_plain_text(book_root: &Path, chapter: &Chapter) -> Result<String,
     let path = crate::atomic_file::long_path(
         &book_root.join(chapter.path.replace('/', std::path::MAIN_SEPARATOR_STR)),
     );
-    let bytes = fs::read(&path).map_err(|error| format!("EPUB_CHAPTER_READ: {error}"))?;
+    let bytes =
+        crate::atomic_file::read(&path).map_err(|error| format!("EPUB_CHAPTER_READ: {error}"))?;
     let decoded = decode_xml_bytes(&bytes);
     xhtml_to_text(decoded.as_bytes())
 }

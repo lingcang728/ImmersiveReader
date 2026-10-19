@@ -108,10 +108,11 @@ fn validate(settings: &AppSettings) -> Result<(), String> {
 }
 
 pub(crate) fn load_compatible_from(path: &Path) -> Result<AppSettings, String> {
+    crate::atomic_file::recover_file(path).map_err(|error| error.to_string())?;
     if !path.exists() {
         return Ok(default_settings());
     }
-    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let raw = crate::atomic_file::read_to_string(path).map_err(|error| error.to_string())?;
     // PowerShell / some editors write UTF-8 with BOM; serde_json rejects it as
     // "expected value at line 1 column 1".
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw.as_str());
@@ -412,7 +413,8 @@ mod tests {
 
         assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.library_root, r"C:\Library");
-        let saved = fs::read_to_string(&path).expect("migrated settings must persist");
+        let saved =
+            crate::atomic_file::read_to_string(&path).expect("migrated settings must persist");
         assert!(saved.contains("companionRoot"));
         assert!(saved.contains("temporaryRoots"));
         fs::remove_dir_all(root).expect("temp directory must be removed");
@@ -433,7 +435,8 @@ mod tests {
         assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.library_root, r"D:\My Reading");
         assert_eq!(
-            fs::read_to_string(&path).expect("source settings must remain readable"),
+            crate::atomic_file::read_to_string(&path)
+                .expect("source settings must remain readable"),
             original
         );
         fs::remove_dir_all(root).expect("temp directory must be removed");
@@ -495,8 +498,9 @@ mod tests {
     fn shared_settings_fixtures_match_schema_verdicts() {
         let fixtures_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../packages/contracts/fixtures");
-        let raw = std::fs::read_to_string(fixtures_dir.join("settings-expectations.json"))
-            .expect("fixtures/settings-expectations.json must exist");
+        let raw =
+            crate::atomic_file::read_to_string(fixtures_dir.join("settings-expectations.json"))
+                .expect("fixtures/settings-expectations.json must exist");
         let expectations: Vec<SettingsExpectation> =
             serde_json::from_str(&raw).expect("settings-expectations.json must parse");
         assert!(
@@ -510,7 +514,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("temp directory must be created");
         for entry in expectations {
-            let text = std::fs::read_to_string(fixtures_dir.join(&entry.fixture))
+            let text = crate::atomic_file::read_to_string(fixtures_dir.join(&entry.fixture))
                 .unwrap_or_else(|error| panic!("{}: {error}", entry.fixture));
             let path = root.join("settings.json");
             fs::write(&path, &text).expect("fixture must write");

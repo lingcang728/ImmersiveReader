@@ -13,12 +13,14 @@
 	import { onDestroy, onMount, tick } from "svelte";
 	import { convertFileSrc } from "@tauri-apps/api/core";
 	import { openUrl } from "@tauri-apps/plugin-opener";
+	import { fontScale, clampFontScale } from "$lib/stores/app";
 	import EpubToc from "$lib/components/epub/EpubToc.svelte";
 	import EpubSearch from "$lib/components/epub/EpubSearch.svelte";
 	import EpubBookmarks from "$lib/components/epub/EpubBookmarks.svelte";
 	import {
 		getReadableChapter,
 		saveReaderLocator,
+		flushReaderLocatorWrites,
 		listBookmarks,
 		addBookmark,
 		removeBookmark,
@@ -46,7 +48,7 @@
 		excerptAtAnchor,
 		findTextBlock,
 		firstVisibleBlockAnchor,
-		postProcessChapterDom,
+		prepareChapterHtml,
 		restoreLocatorScroll,
 		scrollToFragment,
 		swipeExcluded,
@@ -105,7 +107,8 @@
 	let errorChapterId = "";
 	let panel: Panel = "";
 	let focusLite = false;
-	let fontPct = loadFontPct();
+	let fontPct = 100;
+    $: fontPct = Math.round($fontScale * 100);
 	let noticeDismissed = false;
 	let transientNotice = "";
 	let transientTimer: ReturnType<typeof setTimeout> | null = null;
@@ -120,6 +123,8 @@
 	let pendingTextTarget = "";
 	let loadSeq = 0;
 	let destroyed = false;
+	let saveError = "";
+	let lastSave: Promise<void> = Promise.resolve();
 
 	const hrefMap = buildChapterHrefMap(publication);
 	const navTitle = new Map<string, string>();
@@ -160,7 +165,7 @@
 	// on every throttled sample.
 	let lastMetaKey = "";
 	function emitMeta() {
-		if (!embedded) return;
+        if (!embedded || loading) return;
 		const meta = {
 			chapterId: chapter?.chapterId ?? "",
 			chapterTitle: chapter?.title ?? "",
@@ -178,46 +183,18 @@
 	}
 	$: {
 		// Touch the reactive inputs so this block re-runs on chapter/scroll.
-		void chapter;
-		void currentLocator;
+        void chapter;
+        void loading;
+        void currentLocator;
 		void progressPct;
 		void spineIndex;
 		emitMeta();
 	}
 
 	// ---------- font size ----------
-	const FONT_PCT_KEY = "ir-epub-font-pct";
-	const FONT_PCT_MIN = 80;
-	const FONT_PCT_MAX = 160;
-
-	function clampFontPct(value: number): number {
-		if (!Number.isFinite(value)) return 100;
-		return Math.min(FONT_PCT_MAX, Math.max(FONT_PCT_MIN, Math.round(value)));
-	}
-
-	function loadFontPct(): number {
-		try {
-			const raw =
-				typeof localStorage !== "undefined" ? localStorage.getItem(FONT_PCT_KEY) : null;
-			if (raw !== null) return clampFontPct(Number.parseFloat(raw));
-		} catch {
-			// localStorage disabled
-		}
-		return 100;
-	}
-
-	function persistFontPct() {
-		try {
-			localStorage.setItem(FONT_PCT_KEY, String(fontPct));
-		} catch {
-			// localStorage disabled
-		}
-	}
-
 	async function setFontPct(value: number) {
 		const anchorSnapshot = currentLocator;
-		fontPct = clampFontPct(value);
-		persistFontPct();
+		fontScale.set(clampFontScale(value / 100));
 		// Reflow shifts offsets — re-anchor at the same element/ratio.
 		await tick();
 		if (articleEl && scrollerEl && anchorSnapshot) {
@@ -238,6 +215,9 @@
 		restore: ReaderLocator | null = null,
 		fragment = "",
 	) {
+		if (chapter && !loading) { sampleScroll(); emitLocatorNow(); }
+		throttledSample.cancel();
+		throttledEmit.cancel();
 		const seq = ++loadSeq;
 		loading = true;
 		errorMsg = "";
@@ -249,12 +229,15 @@
 					? markdownFallbackHtml(ch.content)
 					: await sanitizeChapterHtml(ch.content);
 			if (seq !== loadSeq || destroyed) return;
-			chapter = ch;
-			chapterHtml = html;
+            const prepared = await prepareChapterHtml(html, chapterBaseDir(ch), convertFileSrc);
+            if (seq !== loadSeq || destroyed) return;
+            chapter = ch;
+            chapterHtml = prepared;
+            currentLocator = restore ?? makeLocator(bookId, ch.chapterId, { kind: "ratio" }, 0);
 			loading = false;
 			await tick();
-			if (seq !== loadSeq || destroyed || !articleEl || !scrollerEl) return;
-			postProcessChapterDom(articleEl, chapterBaseDir(ch), convertFileSrc);
+            if (seq !== loadSeq || destroyed || !articleEl || !scrollerEl) return;
+            layoutObserver?.disconnect(); layoutObserver?.observe(articleEl);
 
 			if (restore) {
 				restoreLocatorScroll(articleEl, scrollerEl, restore);
@@ -289,8 +272,8 @@
 		const target =
 			direction > 0 ? chapter?.nextChapterId : chapter?.prevChapterId;
 		if (!target) return;
-		void loadChapter(target);
-	}
+        void loadChapter(target, direction < 0 ? makeLocator(bookId, target, { kind: "ratio" }, 1) : null);
+    }
 
 	function goToChapter(chapterId: string, fragment = "") {
 		if (!chapterId) return;
@@ -309,7 +292,7 @@
 
 	// ---------- locator sampling / emitting ----------
 	function sampleScroll() {
-		if (destroyed || !scrollerEl || !articleEl || !chapter) return;
+		if (destroyed || loading || !scrollerEl || !articleEl || !chapter) return;
 		const ratio = ratioFromScroll(
 			scrollerEl.scrollTop,
 			scrollerEl.scrollHeight,
@@ -331,8 +314,11 @@
 		if (sameLocator(currentLocator, lastEmitted)) return;
 		lastEmitted = currentLocator;
 		onLocator(currentLocator);
-		// 持久化兜底：父级也可能在 onLocator 里落库，重复写同值是无害的。
-		void saveReaderLocator(bookId, currentLocator).catch((error) => {
+		// The kernel owns the serialized persistent save; parents only update metadata.
+		lastSave = saveReaderLocator(bookId, currentLocator);
+		void lastSave.then(() => { saveError = ""; }).catch((error) => {
+			lastEmitted = null;
+			saveError = "阅读进度保存失败，已保留本机恢复记录";
 			console.warn("[epub] save_reader_locator:", error);
 		});
 	}
@@ -582,11 +568,9 @@
 	}
 
 	// ---------- exit ----------
-	function handleExit() {
-		sampleScroll();
-		throttledEmit.flush();
-		emitLocatorNow();
-		onExit();
+	async function handleExit() {
+		try { await flushLocator(); onExit(); }
+		catch { saveError = "阅读进度保存失败，请重试后返回"; }
 	}
 
 	function handleVisibility() {
@@ -597,7 +581,21 @@
 		}
 	}
 
-	// ---------- lifecycle ----------
+    let layoutObserver: ResizeObserver | null = null;
+    let layoutFrame: number | null = null;
+    function restoreAfterLayout() {
+        if (loading || destroyed || !currentLocator || !articleEl || !scrollerEl) return;
+        const saved = currentLocator;
+        if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
+        layoutFrame = requestAnimationFrame(() => {
+            layoutFrame = null;
+            if (loading || destroyed || !articleEl || !scrollerEl) return;
+            restoreLocatorScroll(articleEl, scrollerEl, saved);
+            sampleScroll(); emitLocatorNow();
+        });
+    }
+
+    // ---------- lifecycle ----------
 	function init() {
 		const locator = normalizeReaderLocator(initialLocator, bookId);
 		const startId =
@@ -617,8 +615,10 @@
 	}
 
 	onMount(() => {
-		init();
-		window.addEventListener("keydown", handleKeydown);
+        init();
+        layoutObserver = new ResizeObserver(restoreAfterLayout);
+        if (articleEl) layoutObserver.observe(articleEl);
+        window.addEventListener("keydown", handleKeydown);
 		document.addEventListener("visibilitychange", handleVisibility);
 		if (scrollerEl) {
 			scrollerEl.addEventListener("scroll", handleScroll, { passive: true });
@@ -637,7 +637,9 @@
 		sampleScroll();
 		throttledEmit.flush();
 		emitLocatorNow();
-		destroyed = true;
+        destroyed = true;
+        layoutObserver?.disconnect();
+        if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
 		loadSeq += 1;
 		window.removeEventListener("keydown", handleKeydown);
 		document.removeEventListener("visibilitychange", handleVisibility);
@@ -694,10 +696,12 @@
 	}
 
 	/** Called by the shell before leaving: persist the freshest locator. */
-	export function flushLocator() {
+	export async function flushLocator(): Promise<void> {
 		sampleScroll();
 		throttledEmit.flush();
 		emitLocatorNow();
+		await lastSave;
+		await flushReaderLocatorWrites(bookId);
 	}
 
 	export function getFocusContext(): {
@@ -705,7 +709,7 @@
 		scrollerEl: HTMLElement;
 		contentKey: string;
 	} | null {
-		if (!articleEl || !scrollerEl || !chapter) return null;
+		if (loading || !articleEl || !scrollerEl || !chapter) return null;
 		return { articleEl, scrollerEl, contentKey: chapter.chapterId };
 	}
 
@@ -788,6 +792,9 @@
 		</div>
 	{/if}
 
+	{#if saveError}
+		<div class="epub-unsupported" role="alert"><span>{saveError}</span><button type="button" class="epub-tool" on:click={() => void flushLocator().catch(() => {})}>重试保存</button></div>
+	{/if}
 	<div class="epub-scroll" bind:this={scrollerEl}>
 		{#if loading}
 			<div class="epub-skeleton" aria-hidden="true">
@@ -816,7 +823,7 @@
 			<article
 				class="epub-content"
 				bind:this={articleEl}
-				style:--epub-font-pct={fontPct / 100}
+				style:--epub-font-pct={1}
 			>{@html chapterHtml}</article>
 			<nav class="epub-chapter-nav" aria-label="章节导航">
 				{#if chapter?.prevChapterId}
@@ -918,7 +925,7 @@
 					<button
 						type="button"
 						class="epub-pop-btn"
-						disabled={fontPct >= 160}
+						disabled={fontPct >= 150}
 						on:click={() => void setFontPct(fontPct + 10)}
 						aria-label="增大字号"
 					>A＋</button>
@@ -927,7 +934,7 @@
 					type="range"
 					class="epub-pop-range"
 					min="80"
-					max="160"
+					max="150"
 					step="5"
 					value={fontPct}
 					on:input={(e) =>
@@ -1131,6 +1138,11 @@
 	.epub-content :global(img) {
 		max-width: 100%;
 		height: auto;
+	}
+	.mobile .epub-content {
+		padding-left: max(var(--mobile-article-padding, 20px), var(--ir-safe-left, 0px));
+		padding-right: max(var(--mobile-article-padding, 20px), var(--ir-safe-right, 0px));
+		padding-bottom: calc(100px + var(--ir-safe-bottom, 0px));
 	}
 	.epub-content :global(table) {
 		max-width: 100%;

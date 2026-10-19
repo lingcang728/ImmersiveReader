@@ -76,9 +76,12 @@ pub(crate) fn android_staging_dirs(app_cache: &Path) -> Vec<PathBuf> {
 /// death either), so startup sweeps them all. Returns the removed dir
 /// count for the log line.
 #[cfg(target_os = "android")]
-pub(crate) fn sweep_app_cache_staging(app_cache: &Path) -> usize {
+pub(crate) fn sweep_stale_app_cache_staging(app_cache: &Path, stale: &[PathBuf]) -> usize {
     let mut removed = 0_usize;
-    for dir in android_staging_dirs(app_cache) {
+    for dir in stale {
+        if dir.parent() != Some(app_cache) {
+            continue;
+        }
         if fs::remove_dir_all(&dir).is_ok() {
             removed += 1;
         }
@@ -90,7 +93,7 @@ pub(crate) fn sweep_app_cache_staging(app_cache: &Path) -> usize {
 /// shared cleanup code compiles without `#[cfg]` at the call site.
 #[cfg(not(target_os = "android"))]
 #[allow(dead_code)]
-pub(crate) fn sweep_app_cache_staging(_app_cache: &Path) -> usize {
+pub(crate) fn sweep_stale_app_cache_staging(_app_cache: &Path, _stale: &[PathBuf]) -> usize {
     0
 }
 

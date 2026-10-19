@@ -75,10 +75,14 @@ export function isWindowsAbsolutePath(path: string): boolean {
  */
 export function joinNativePath(baseDir: string, rel: string): string {
 	const sep = baseDir.includes("\\") ? "\\" : "/";
-	const normalizedRel = rel.replace(/[\\/]+/g, sep);
-	if (!baseDir) return normalizedRel;
-	if (baseDir.endsWith("/") || baseDir.endsWith("\\")) return `${baseDir}${normalizedRel}`;
-	return `${baseDir}${sep}${normalizedRel}`;
+    const combined = `${baseDir}${sep}${rel}`.replace(/[\\/]+/g, sep);
+    const parts: string[] = [];
+    for (const part of combined.split(sep)) {
+        if (part === ".") continue;
+        if (part === "..") { if (parts.length > 1) parts.pop(); continue; }
+        parts.push(part);
+    }
+    return parts.join(sep);
 }
 
 export interface SplitHref {

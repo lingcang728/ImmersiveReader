@@ -175,22 +175,19 @@ pub struct ToolStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolKind {
     Zhihu,
-    Podcast,
 }
 
 impl ToolKind {
     fn parse(tool: &str) -> Result<Self, String> {
         match tool {
             "zhihu" => Ok(Self::Zhihu),
-            "podcast" => Ok(Self::Podcast),
-            _ => Err("Only the configured Zhihu and Podcast tools may be launched".to_string()),
+            _ => Err("Only the configured Zhihu tool may be launched".to_string()),
         }
     }
 
     const fn key(self) -> &'static str {
         match self {
             Self::Zhihu => "zhihu",
-            Self::Podcast => "podcast",
         }
     }
 }
@@ -213,7 +210,6 @@ pub(crate) fn recover_stale_engine_instances() -> Result<(), String> {
 #[cfg(windows)]
 pub(crate) fn stop_all() -> Result<(), String> {
     tool_manager()?.clear();
-    crate::podcast::stop_workers()?;
     Ok(())
 }
 
@@ -225,7 +221,6 @@ pub(crate) fn stop_all() -> Result<(), String> {
             .map_err(|_| "Tool launch state is unavailable".to_string())?
             .clear();
     }
-    crate::podcast::stop_workers()?;
     Ok(())
 }
 
@@ -692,6 +687,6 @@ mod tests {
     fn rejects_arbitrary_commands() {
         assert!(action_for("cmd /c calc").is_err());
         assert!(action_for("zhihu").is_ok());
-        assert!(action_for("podcast").is_ok());
+        assert!(action_for("podcast").is_err());
     }
 }
