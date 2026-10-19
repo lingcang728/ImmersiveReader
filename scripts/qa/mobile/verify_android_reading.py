@@ -128,6 +128,18 @@ def main():
         record('local stylesheet and relative font load through real CSP',{'spacing':spacing,'font':fonts})
         with (OUT/'focus-130-percent.png').open('wb') as screenshot:
             subprocess.run([ADB,'-s',SERIAL,'exec-out','screencap','-p'],stdout=screenshot,check=True,timeout=10,creationflags=subprocess.CREATE_NO_WINDOW)
+        first_title=page.locator('[data-testid="reader-chapter-title"]').text_content()
+        for _ in range(80):
+            page.get_by_role('button',name='下一句',exact=True).click()
+            page.wait_for_timeout(370)
+            if page.locator('[data-testid="reader-chapter-title"]').text_content()!=first_title: break
+        page.wait_for_timeout(650)
+        assert page.locator('[data-testid="reader-chapter-title"]').text_content()!=first_title
+        assert '1 / 3' in page.locator('[data-testid="focus-hud"]').inner_text()
+        page.get_by_role('button',name='上一句',exact=True).click(); page.wait_for_timeout(900)
+        assert page.locator('[data-testid="reader-chapter-title"]').text_content()==first_title
+        assert '3 / 3' in page.locator('[data-testid="focus-hud"]').inner_text()
+        record('focus crosses to next chapter start and previous chapter end',True)
         page.get_by_role('button',name='退出专注模式').click(); page.wait_for_timeout(200)
         # Background flush and in-app return retain the latest cursor.
         page.evaluate('window.dispatchEvent(new Event("pagehide"))'); page.wait_for_timeout(300)
@@ -138,6 +150,14 @@ def main():
         record('background/foreground cursor retained',saved['ratio'])
         ensure=page.locator('[data-testid="reader-back"]'); ensure.click(); page.wait_for_selector('[data-testid="shelf-continue"]'); record('reader returns to shelf after durable native save','visible')
         page.wait_for_timeout(500); assert status_bar_visible(); record('status bar restored on shelf',True)
+        # Native system Back unwinds focus first, then returns to the shelf.
+        open_book(page,book); page.wait_for_selector('[data-testid="focus-hud"]')
+        adb('shell','input','keyevent','4'); page.wait_for_timeout(400)
+        assert page.locator('[data-testid="reader-screen"]').count() == 1
+        assert not page.locator('[data-testid="focus-hud"]').count()
+        adb('shell','input','keyevent','4'); page.wait_for_selector('[data-testid="shelf-continue"]')
+        page.wait_for_timeout(500); assert status_bar_visible()
+        record('native system Back exits focus then reader and restores status bar',True)
         (OUT/'gfxinfo.txt').write_text(adb('shell','dumpsys','gfxinfo',PACKAGE),encoding='utf-8')
         (OUT/'memory.txt').write_text(adb('shell','dumpsys','meminfo',PACKAGE),encoding='utf-8')
         browser.close()
