@@ -538,16 +538,6 @@ fn initial_file_path(args: &[String]) -> Option<String> {
     None
 }
 
-/// P3-23: the bootstrap `window.__INITIAL_FILE__` injection. The path goes
-/// through `serde_json::to_string` so quotes/backslashes can never break out
-/// of the JS string literal — interpolating the raw path into eval'd script
-/// would be an injection hole.
-fn initial_file_eval_script(file_path: &str) -> Option<String> {
-    serde_json::to_string(file_path)
-        .ok()
-        .map(|encoded| format!("window.__INITIAL_FILE__ = {encoded};"))
-}
-
 /// File mtime in milliseconds since epoch — the frontend polls this to
 /// auto-reload when the file is changed by an external editor.
 #[tauri::command]
@@ -3585,19 +3575,28 @@ pub fn run() {
     }
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
+    {
+        // Queue before creating the WebView: setup-time eval can run in the
+        // initial blank document and disappear before the frontend mounts.
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(path) = initial_markdown_path(&args).or_else(|| initial_file_path(&args)) {
+            queue_pending_open_uri(path);
+        }
+    }
+    #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-        if let Some(window) = app.get_webview_window("main") {
+        if let Some(path) = initial_markdown_path(&args).or_else(|| initial_file_path(&args)) {
+            // Persist first, then notify/focus. Both an already mounted page
+            // and a page still starting drain the same queue exactly once.
+            queue_pending_open_uri(path);
+            let _ = app.emit("pending-open-files", ());
+        }
+        let hidden_qa = matches!(settings::AppChannel::current(), settings::AppChannel::Qa(_))
+            && std::env::var("IMMERSIVE_QA_HEADLESS").as_deref() == Ok("1");
+        if let Some(window) = app.get_webview_window("main").filter(|_| !hidden_qa) {
             let _ = window.show();
             let _ = window.unminimize();
             let _ = window.set_focus();
-        }
-        if let Some(file_path) = initial_markdown_path(&args) {
-            register_opened_markdown(Path::new(&file_path));
-            let _ = app.emit("open-file", file_path);
-        } else if let Some(file_path) = initial_file_path(&args) {
-            // Windows "open with" on .epub/.zip — the frontend drains the
-            // queue via take_pending_open_uris and runs begin_import.
-            queue_pending_open_uri(file_path);
         }
     }));
     #[cfg(desktop)]
@@ -3852,16 +3851,6 @@ pub fn run() {
                     }
                 });
             }
-            #[cfg(desktop)]
-            if let Some(window) = app.get_webview_window("main") {
-                let args: Vec<String> = std::env::args().collect();
-                if let Some(file_path) = initial_markdown_path(&args) {
-                    register_opened_markdown(Path::new(&file_path));
-                    if let Some(script) = initial_file_eval_script(&file_path) {
-                        let _ = window.eval(script);
-                    }
-                }
-            }
             Ok(())
         })
         .build(context)
@@ -4002,8 +3991,8 @@ mod recent_file_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        book_asset_root, get_platform_capabilities, initial_file_eval_script,
-        initial_markdown_path, is_markdown_path, reconcile_discard_markers,
+        book_asset_root, get_platform_capabilities, initial_file_path, initial_markdown_path,
+        is_markdown_path, reconcile_discard_markers,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -4263,20 +4252,19 @@ mod tests {
     }
 
     #[test]
-    fn initial_file_eval_script_stays_a_json_string_literal() {
-        // P3-23 regression: `window.__INITIAL_FILE__` must be injected as a
-        // serde_json string literal — a path with quotes/backslashes would
-        // break out of a naive `"{path}"` interpolation inside eval'd JS.
-        let hostile = r#"C:\weird "quoted"\backslash\file.md"#;
-        let script = initial_file_eval_script(hostile).expect("path serialization must succeed");
-        assert!(script.contains(r#""quoted\""#));
-        // The injected literal decodes back to exactly the original path.
-        let literal = script
-            .trim_start_matches("window.__INITIAL_FILE__ = ")
-            .trim_end_matches(';');
-        let decoded: String =
-            serde_json::from_str(literal).expect("injected literal must be valid JSON");
-        assert_eq!(decoded, hostile);
-        assert!(initial_file_eval_script("plain.md").is_some());
+    fn initial_file_path_preserves_existing_epub_path_and_rejects_flags() {
+        let dir = scoped_temp_dir("launch path with spaces");
+        let path = dir.join("book.epub");
+        fs::write(&path, b"synthetic launch fixture").unwrap();
+        let raw = path.to_string_lossy().into_owned();
+        assert_eq!(
+            initial_file_path(&["reader.exe".into(), raw.clone()]),
+            Some(raw)
+        );
+        assert_eq!(
+            initial_file_path(&["reader.exe".into(), "--help".into()]),
+            None
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 }

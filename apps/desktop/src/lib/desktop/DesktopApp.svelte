@@ -2262,8 +2262,9 @@
 	// A9: ACTION_VIEW / SEND intents land in a backend queue — drain on mount
 	// and on every resume so a cold or warm open both reach the document.
 	let pendingUriDrainActive = false;
+    let pendingUriDrainAgain = false;
 	async function drainPendingOpenUris() {
-		if (pendingUriDrainActive) return;
+		if (pendingUriDrainActive) { pendingUriDrainAgain = true; return; }
 		if (!deviceInfo.isAndroid && !$platformCapabilities.openWith) return;
 		pendingUriDrainActive = true;
 		try {
@@ -2280,15 +2281,21 @@
 			// (epub, zip, opaque URIs, or a multi-pick) goes through the import
 			// pipeline so it lands in the library as a book.
 			if (markdownUris.length === 1 && importUris.length === 0) {
-				await openMobilePickedFile(markdownUris[0]);
+				if (isMobile) await openMobilePickedFile(markdownUris[0]);
+                else await openManagedPaths(markdownUris);
 			} else {
-				promptImportTitle({ kind: "uris", uris: [...markdownUris, ...importUris] });
+				if (isMobile) promptImportTitle({ kind: "uris", uris: [...markdownUris, ...importUris] });
+                else await openManagedPaths([...markdownUris, ...importUris]);
 			}
 		} catch (error) {
 			// Older backends lack the command — keep it silent.
 			console.warn("pending open uris drain failed:", error);
 		} finally {
 			pendingUriDrainActive = false;
+            if (pendingUriDrainAgain) {
+                pendingUriDrainAgain = false;
+                void drainPendingOpenUris();
+            }
 		}
 	}
 
@@ -3082,14 +3089,6 @@
 
 	onMount(() => {
 		const updateTimer = setTimeout(() => void checkForDesktopUpdate(false), 5000);
-		const checkInitialFile = () => {
-			if ((window as any).__INITIAL_FILE__) {
-				void openManagedPaths([(window as any).__INITIAL_FILE__]);
-				delete (window as any).__INITIAL_FILE__;
-			}
-		};
-		checkInitialFile();
-		const initialFileTimer = setTimeout(checkInitialFile, 200);
 
 		const handleKeydown = (e: KeyboardEvent) => {
 			// Keyboard scrolling is user scroll intent too.
@@ -3634,6 +3633,9 @@
 			// openFile will handle canceling any active edit
 			void openManagedPaths([event.payload]);
 		});
+        const unlistenPendingFiles = listenManaged('pending-open-files', () => {
+            void drainPendingOpenUris();
+        });
 		// C6: the acquisition engine only exists on desktop builds — on mobile
 		// the subscription can never fire and snapshot polling would just burn
 		// failing IPC calls.
@@ -4110,7 +4112,6 @@
 				clearInterval(taskPollTimer);
 				taskPollTimer = null;
 			}
-			clearTimeout(initialFileTimer);
             clearTimeout(updateTimer);
 			if (workerPrewarmIdleId !== null) cancelIdleCallback(workerPrewarmIdleId);
 			if (workerPrewarmTimer) clearTimeout(workerPrewarmTimer);
@@ -4135,6 +4136,7 @@
 			}
 			unlistenDrop.then(fn => fn());
 			unlistenOpenFile();
+            unlistenPendingFiles();
 			unlistenTaskEvents();
 			unlistenExit();
 			unlistenClose.then(fn => fn());

@@ -1,6 +1,7 @@
 """Exercise the installed Windows executable with isolated data and an invisible QA window."""
 import argparse
 import base64
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / 'output/repair-20261018/windows-installed'
 OUT.mkdir(parents=True, exist_ok=True)
+ACTIVE_PROCESSES = []
 sys.path.insert(0, str(Path(__file__).parent / 'mobile'))
 from verify_android_reading import fixture
 
@@ -63,6 +65,7 @@ def start(playwright, exe, run_id, port, expected, open_path=None):
     before = time.perf_counter()
     before_epoch_ms = time.time() * 1000
     process = subprocess.Popen([exe, *([open_path] if open_path else [])], env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+    ACTIVE_PROCESSES.append(process)
     try:
         browser = None
         for _ in range(200):
@@ -78,7 +81,7 @@ def start(playwright, exe, run_id, port, expected, open_path=None):
         assert browser, 'WebView2 CDP unavailable'
         page = browser.contexts[0].pages[0]
         if expected is None:
-            page.wait_for_function("document.querySelector('.article')?.textContent.includes('IRQA associated file')", timeout=20000, polling=50)
+            page.wait_for_function("() => document.querySelector('.article')?.textContent.includes('IRQA associated file')", timeout=20000, polling=50)
         else:
             page.wait_for_function('(n) => document.querySelectorAll(".book-card").length === n', arg=expected, timeout=15000, polling=50)
         observed = round((time.perf_counter() - before) * 1000, 2)
@@ -95,10 +98,26 @@ def start(playwright, exe, run_id, port, expected, open_path=None):
 
 
 def close(process, browser, page):
-    page.locator('.chrome-btn-close').evaluate('(el) => el.click()')
-    process.wait(timeout=15)
-    assert process.returncode == 0, process.returncode
-    browser.close()
+    # Retain handles to the actual QA descendants before exiting. Waiting on
+    # handles also avoids PID reuse, and prevents a warm relaunch from racing
+    # WebView2's asynchronous profile shutdown.
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForMultipleObjects.argtypes = [ctypes.c_ulong, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.c_ulong]
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    handles = [handle for row in child_processes(process.pid) if (handle := kernel.OpenProcess(0x100000, False, row['ProcessId']))]
+    try:
+        page.locator('.chrome-btn-close').evaluate('(el) => el.click()')
+        process.wait(timeout=15)
+        assert process.returncode == 0, process.returncode
+        browser.close()
+        if handles:
+            result = kernel.WaitForMultipleObjects(len(handles), (ctypes.c_void_p * len(handles))(*handles), True, 10000)
+            assert result == 0, f'QA child processes did not exit: wait={result}'
+    finally:
+        for handle in handles:
+            kernel.CloseHandle(handle)
 
 
 def main():
@@ -128,6 +147,10 @@ def main():
         record('native closeRequested exits installed process', 0)
         process, browser, page, elapsed = start(playwright, args.exe, args.run_id, args.port, 100)
         record('100-book warm launch ready including CDP connection overhead', elapsed)
+        for sample in range(2):
+            close(process, browser, page)
+            process, browser, page, elapsed = start(playwright, args.exe, args.run_id, args.port, 100)
+            record('100-book additional warm launch', dict(sample=sample+2, **elapsed))
         archive = fixture()
         op = call(page, 'begin_import', {'request': {'kind':'files', 'paths':[str(archive)]}})
         for _ in range(200):
@@ -136,10 +159,13 @@ def main():
             page.wait_for_timeout(100)
         assert status['status'] == 'succeeded', status
         book_id = status['result']['bookId']
+        hits = call(page, 'search_book', {'bookId':book_id, 'query':'长句', 'limit':10})
+        assert len(hits) == 2, hits
+        record('native EPUB search indexes both chapters and supports short CJK queries', len(hits))
         page.reload()
-        page.wait_for_function('document.querySelectorAll(".book-card").length === 101', polling=50)
+        page.wait_for_function('() => document.querySelectorAll(".book-card").length === 101', polling=50)
         page.get_by_role('searchbox', name='搜索书架').fill('QA 长句与进度')
-        page.locator('.book-card').get_by_role('button', name='精读', exact=True).evaluate('(el) => el.click()')
+        page.locator('.book-card').get_by_role('button', name='阅读', exact=True).evaluate('(el) => el.click()')
         page.wait_for_selector('.epub-content #long')
         page.wait_for_timeout(700)
         spacing = page.locator('.epub-content #long').evaluate('(el) => getComputedStyle(el).letterSpacing')
@@ -168,7 +194,22 @@ def main():
             assert source.read_text(encoding='utf-8') == content
             close(process, browser, page)
             record('native file-opening arguments import once and preserve original', dict(attempt=attempt+1, bookCount=102))
+        process, browser, page, _ = start(playwright, args.exe, args.run_id, args.port, 102)
+        incoming = subprocess.Popen([args.exe, str(archive)], env={**os.environ, 'IMMERSIVE_QA_RUN_ID':args.run_id, 'IMMERSIVE_QA_HEADLESS':'1'}, creationflags=subprocess.CREATE_NO_WINDOW)
+        ACTIVE_PROCESSES.append(incoming)
+        assert incoming.wait(timeout=15) == 0
+        page.wait_for_selector('.epub-content #long')
+        assert len(call(page, 'scan_library')['books']) == 102
+        close(process, browser, page)
+        record('second-instance EPUB handoff opens existing managed book', 102)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        # Only processes created by this isolated QA run may be terminated.
+        for process in ACTIVE_PROCESSES:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=15)

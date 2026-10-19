@@ -16,6 +16,7 @@
 - 补充审计修复：重复书目比较 publication.json 时归一化映射顺序；部分书签复制成功后重试可跳过已合并的记录，避免修复卡在主键冲突。
 - 真机 CSP 复核发现：Tauri 注入 nonce 后，`unsafe-inline` 不再允许样式块；章节完成净化和作用域限制后复用应用 head 的可信 nonce。nonce 属性须写入可序列化的内容属性，不能只设置 DOM property。内联样式属性单独由 `style-src-attr` 允许，脚本策略不变。依据：[Tauri CSP](https://v2.tauri.app/security/csp/)、[MDN nonce](https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/nonce)。
 - Windows QA 运行另设 WebView 配置和单实例标识；隐藏 QA 窗口只允许在有效 QA 数据通道下启用。安装脚本对仍在运行的窗口检查桌面，无法确认属于 coding 时停止。
+- 安装版额外发现并修复冷启动文件关联丢失：旧方案在 setup 内向尚未导航的 WebView 注入路径，可能落在空白文档后丢失。改为创建 WebView 前入后端队列，冷启动、第二实例和前台恢复统一排队消费；桌面路径直接使用自动入库流程，不调用 Android URI 暂存命令。正在消费时收到新通知会再排空一次。隐藏 QA 的第二实例也不显示窗口。
 
 ## 自动化证据
 
@@ -23,7 +24,7 @@
 
 | 检查 | 结果及证据 |
 | --- | --- |
-| `scripts/verify.ps1` | 最终 `verify-clean-exit.log` 到达 `all checks passed`，完整命令退出码 0，无须清理进程解锁；前端 268、Rust 222、脚本 14、契约 60 fixtures；Svelte 0 errors / 0 warnings，Rust check / clippy / fmt 通过。移除播客专属运行时后 1315 项校验通过。报告模式的依赖审计项见下文，不能视为严格审计通过。 |
+| `scripts/verify.ps1` | 文件关联补修后的 `verify-final-source.log` 到达 `all checks passed`，完整命令退出码 0，无须清理进程解锁；前端 268、Rust 222、脚本 14、契约 60 fixtures；Svelte 0 errors / 0 warnings，Rust check / clippy / fmt 通过。移除播客专属运行时后 1315 项校验通过。报告模式的依赖审计项见下文，不能视为严格审计通过。 |
 | 4 种手机宽度 | 359/360/390/412 CSS px；最终 `layout-final.log` 94 通过、0 失败、0 跳过，48 张截图；专注截图关闭设置面板并实际推进后采集。 |
 | 阅读持久化与样式隔离 | `reading-floating-csp.log` 8 项通过：832 px 位置重启恢复到 812 px、字号变化保留句内锚点、书签持久化、退出等保存、严格 nonce CSP 下 head 样式生效且不影响界面、130% 长句句内连续分页和反向分页、无未处理错误。最终 APK 另行复验。 |
 | 重复合并中断恢复 | `duplicate-recovery.log` 2 项通过，覆盖 publication 映射顺序不同、部分书签已合并后重试、保留最新进度与书签。 |
@@ -36,6 +37,7 @@
 
 - QA APK 与生产 Android 包分开，QA 包名为 `com.lingcang.immersivereading.qa`。原生库以 APK 内部条目判断 ABI，不能沿用 Gradle 的 `universal` 文件名推断。
 - 生产手机安装前版本为 1.3.0，versionCode 1003000，首次安装时间 `2026-10-18 19:12:30`。后续更新必须保留该首次安装时间，不卸载生产包。
+- 10 月 19 日恢复无线连接后，`pm list packages -u lingcang` 仅列出 QA 包，生产包已不存在。本轮未卸载生产包；当前设备无法验收原生产包的原位更新和原首次安装时间保留，后续实际安装需明确记为新装。
 - 现有 Android Release 证书 SHA-256：`fa0f4cf8bd8ec5b30d5440a10f46fb52a19421be2f6d431ca045d3822d7170ed`。
 - 最终 QA APK（arm64-v8a、1.3.1-qa）：SHA-256 `69120E663CE3949FA98F6850D20F9556752D6067BBC87D35DF4451F0F965FFAE`，同证书签名；`adb install -r` 成功，旧 QA 合成书目保留。
 - Windows 安装包、生产 EXE 时间戳和 SHA-256、Android 最终 APK 哈希、Release Lint 及安装结果：待终验填入。
