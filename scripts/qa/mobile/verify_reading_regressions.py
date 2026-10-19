@@ -53,7 +53,10 @@ def main():
         assert len(rows) == 1, rows
         record("bookmark uses native row shape and persists", len(rows))
         page.keyboard.press("Escape"); page.keyboard.press("Escape"); page.wait_for_selector('[data-testid="shelf-continue"]')
-        record("reader exits after durable save", "shelf visible")
+        page.wait_for_selector('[data-testid="reader-screen"]', state='detached')
+        after_exit = page.evaluate('JSON.parse(localStorage.getItem("qa:locator:epub-xiao-wang-zi"))')
+        assert after_exit and after_exit['ratio'] > 0.4, after_exit
+        record("reader unmount retains the durable nonzero locator", after_exit)
         context.close()
         context = new_context(browser, viewport)
         # Match packaged Tauri: a nonce disables unsafe-inline for style blocks.

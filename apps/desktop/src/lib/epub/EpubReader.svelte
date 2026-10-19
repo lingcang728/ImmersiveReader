@@ -293,6 +293,10 @@
 	// ---------- locator sampling / emitting ----------
 	function sampleScroll() {
 		if (destroyed || loading || !scrollerEl || !articleEl || !chapter) return;
+		// Svelte teardown may already have detached the article. Its layout
+		// metrics then read as zero; keep the locator captured before exit
+		// instead of overwriting a durable reading position with the start.
+		if (!scrollerEl.isConnected || !articleEl.isConnected) return;
 		const ratio = ratioFromScroll(
 			scrollerEl.scrollTop,
 			scrollerEl.scrollHeight,
