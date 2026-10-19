@@ -554,53 +554,6 @@ fn launch(tool: &str, settings: &AppSettings) -> Result<(), String> {
     Ok(())
 }
 
-/// Requests that `kind` be spawned, health-checked, and registered on a
-/// dedicated background thread. Non-blocking: `TOOL_MANAGER` is held only for
-/// the dedupe/claim check; if the engine already has a live managed process or
-/// a launch is already in flight the request coalesces into a no-op. No
-/// `block_on` runs on the caller's thread.
-pub fn request_engine_warmup(kind: ToolKind) {
-    #[cfg(windows)]
-    {
-        let key = kind.key();
-        let claimed = tool_manager()
-            .and_then(|mut manager| manager.begin_launch(key))
-            .map(|claim| matches!(claim, LaunchClaim::Acquired))
-            .unwrap_or(false);
-        if !claimed {
-            return;
-        }
-        let spawned = std::thread::Builder::new()
-            .name(format!("{key}-engine-warmup"))
-            .spawn(move || {
-                let _launch_guard = EngineLaunchGuard::new(key);
-                let result = recover_stale_engine_instances()
-                    .and_then(|()| crate::settings::load_settings())
-                    .and_then(|settings| {
-                        let runtime_root = crate::settings::runtime_root()?;
-                        let token = uuid::Uuid::new_v4().simple().to_string();
-                        // P2-26: record the exited instance this warmup is
-                        // about to replace — same rule as `launch`.
-                        persist_pending_exit(kind)?;
-                        launch_claimed_engine(kind, &runtime_root, &settings, token)
-                    });
-                if let Err(error) = result {
-                    eprintln!("[tools] {key} engine warmup failed: {error}");
-                }
-            });
-        if spawned.is_err() {
-            // The warmup thread never started: release the claim and wake
-            // waiters so a later request can retry.
-            if let Ok(mut manager) = tool_manager() {
-                manager.finish_launch(key);
-            }
-            LAUNCH_UPDATED.notify_all();
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = kind;
-}
-
 #[cfg(windows)]
 fn zhihu_client(settings: &AppSettings) -> Result<SidecarHttpClient, String> {
     launch("zhihu", settings)?;
@@ -630,8 +583,8 @@ fn zhihu_client(settings: &AppSettings) -> Result<SidecarHttpClient, String> {
     SidecarHttpClient::new(&format!("http://127.0.0.1:{port}"), &token)
 }
 
-/// Ensure the Zhihu sidecar is launched and responsive (synchronous variant;
-/// snapshot-style callers should prefer [`request_engine_warmup`]).
+/// Start the Zhihu sidecar for an explicit archival action. Snapshot callers
+/// must only inspect cached status and never launch an engine.
 #[allow(dead_code)]
 pub(crate) fn ensure_zhihu_ready(settings: &AppSettings) -> Result<(), String> {
     #[cfg(windows)]

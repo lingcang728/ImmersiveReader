@@ -1999,6 +1999,14 @@
 	// Only the latest call may land its results.
 	let libraryRefreshNonce = 0;
 	let libraryLoadedOnce = false;
+    let shelfReadyMarked = false;
+    function markShelfReady() {
+        if (shelfReadyMarked) return;
+        shelfReadyMarked = true;
+        // Record DOM readiness before any DevTools attachment; hidden QA
+        // windows cannot provide a physical-paint measurement.
+        void tick().then(() => performance.mark('ir-shelf-ready'));
+    }
 	async function refreshLibrary() {
 		const nonce = ++libraryRefreshNonce;
 		// Runs on every task event — only the first load may flip the view to a
@@ -2007,7 +2015,7 @@
         try {
             if (!libraryLoadedOnce) {
                 const cached = await invoke<{ books: BookSummary[]; issues: LibraryIssue[]; writable: boolean } | null>("load_library_snapshot").catch(() => null);
-                if (cached && nonce === libraryRefreshNonce) { libraryBooks = cached.books; libraryIssues = cached.issues; libraryWritable = cached.writable; libraryLoading = false; libraryLoadedOnce = true; }
+                if (cached && nonce === libraryRefreshNonce) { libraryBooks = cached.books; libraryIssues = cached.issues; libraryWritable = cached.writable; libraryLoading = false; libraryLoadedOnce = true; markShelfReady(); }
             }
 			// The trash list is only read while its panel is open — the bookshelf
 			// badge follows the panel's own refreshes instead. On mobile a wedged
@@ -2049,6 +2057,7 @@
 			if (nonce === libraryRefreshNonce) {
 				libraryLoadedOnce = true;
 				libraryLoading = false;
+                markShelfReady();
 			}
 		}
 	}

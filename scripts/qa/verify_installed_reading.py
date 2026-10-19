@@ -1,5 +1,6 @@
 """Exercise the installed Windows executable with isolated data and an invisible QA window."""
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,26 @@ def call(page, command, args=None):
     return page.evaluate('([c,a]) => window.__TAURI_INTERNALS__.invoke(c,a||{})', [command, args])
 
 
+def child_processes(process_id):
+    # Read only this isolated QA process tree; never inspect unrelated command lines.
+    script = r'''
+    $ProgressPreference = 'SilentlyContinue'
+    $rows = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath)
+    $ids = [Collections.Generic.HashSet[uint32]]::new()
+    [void]$ids.Add(__QA_PID__)
+    do {
+      $changed = $false
+      foreach ($row in $rows) {
+        if ($ids.Contains([uint32]$row.ParentProcessId) -and $ids.Add([uint32]$row.ProcessId)) { $changed = $true }
+      }
+    } while ($changed)
+    ConvertTo-Json -Compress -InputObject @($rows | Where-Object { $_.ProcessId -ne __QA_PID__ -and $ids.Contains([uint32]$_.ProcessId) })
+    '''.replace('__QA_PID__', str(int(process_id)))
+    encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+    raw = subprocess.check_output(['powershell.exe', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', encoded], encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
+    return json.loads(raw)
+
+
 def prepare(run_id):
     library = OUT / run_id / 'Library'
     library.mkdir(parents=True, exist_ok=True)
@@ -36,11 +57,12 @@ def prepare(run_id):
     settings.write_text(json.dumps(dict(schemaVersion=3, libraryRoot=str(library))), encoding='utf-8')
 
 
-def start(playwright, exe, run_id, port, expected):
+def start(playwright, exe, run_id, port, expected, open_path=None):
     env = os.environ.copy()
     env.update(IMMERSIVE_QA_RUN_ID=run_id, IMMERSIVE_QA_HEADLESS='1', WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f'--remote-debugging-port={port}')
     before = time.perf_counter()
-    process = subprocess.Popen([exe], env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+    before_epoch_ms = time.time() * 1000
+    process = subprocess.Popen([exe, *([open_path] if open_path else [])], env=env, creationflags=subprocess.CREATE_NO_WINDOW)
     try:
         browser = None
         for _ in range(200):
@@ -55,8 +77,13 @@ def start(playwright, exe, run_id, port, expected):
                 time.sleep(.05)
         assert browser, 'WebView2 CDP unavailable'
         page = browser.contexts[0].pages[0]
-        page.wait_for_function('(n) => document.querySelectorAll(".book-card").length === n', arg=expected, timeout=15000, polling=50)
-        elapsed = round((time.perf_counter() - before) * 1000, 2)
+        if expected is None:
+            page.wait_for_function("document.querySelector('.article')?.textContent.includes('IRQA associated file')", timeout=20000, polling=50)
+        else:
+            page.wait_for_function('(n) => document.querySelectorAll(".book-card").length === n', arg=expected, timeout=15000, polling=50)
+        observed = round((time.perf_counter() - before) * 1000, 2)
+        timing = page.evaluate("() => ({origin:performance.timeOrigin,ready:performance.getEntriesByName('ir-shelf-ready')[0]?.startTime??null})")
+        elapsed = dict(observedWithCdpMs=observed, nativeDomReadyMs=round(timing['origin']+timing['ready']-before_epoch_ms,2) if timing['ready'] is not None else None, frontendReadyMs=timing['ready'], processToNavigationMs=round(timing['origin']-before_epoch_ms,2))
         locations = call(page, 'get_storage_locations')
         assert locations['channel'] == 'qa', locations
         assert page.get_by_role('button', name='关闭应用', exact=True).count() == 1
@@ -90,6 +117,12 @@ def main():
     with sync_playwright() as playwright:
         process, browser, page, elapsed = start(playwright, args.exe, args.run_id, args.port, 100)
         record('100-book first launch ready including CDP connection overhead', elapsed)
+        call(page, 'get_acquisition_snapshot', {'kind':None})
+        page.wait_for_timeout(700)
+        children = child_processes(process.pid)
+        engines = [row for row in children if row['Name'].lower() in ('node.exe', 'python.exe', 'pythonw.exe')]
+        assert not engines, engines
+        record('bookshelf startup does not launch acquisition engines', [row['Name'] for row in children])
         assert not call(page, 'scan_library')['issues']
         close(process, browser, page)
         record('native closeRequested exits installed process', 0)
@@ -123,6 +156,18 @@ def main():
         assert .3 < saved['ratio'] < .5, saved
         record('installed executable reloads SQLite locator after exit', saved)
         close(process, browser, page)
+        source_dir = OUT / args.run_id / 'source'
+        source_dir.mkdir(exist_ok=True)
+        source = source_dir / 'associated-file.md'
+        content = '# IRQA associated file\n\nNative command-line opening automatically adds a managed copy.\n'
+        source.write_text(content, encoding='utf-8')
+        for attempt in range(2):
+            process, browser, page, _ = start(playwright, args.exe, args.run_id, args.port, None, str(source))
+            scan = call(page, 'scan_library')
+            assert len(scan['books']) == 102, len(scan['books'])
+            assert source.read_text(encoding='utf-8') == content
+            close(process, browser, page)
+            record('native file-opening arguments import once and preserve original', dict(attempt=attempt+1, bookCount=102))
 
 
 if __name__ == '__main__':

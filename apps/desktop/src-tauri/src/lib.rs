@@ -1675,12 +1675,8 @@ async fn get_acquisition_snapshot(
     kind: Option<tasks::TaskKind>,
     app: tauri::AppHandle,
 ) -> Result<tasks::AcquisitionSnapshot, String> {
-    // Warm up the Zhihu engine on a dedicated background worker (deduped
-    // internally) instead of launching it inline here — the snapshot path must
-    // never spawn the engine or wait on its readiness/health probes itself.
-    if matches!(kind, None | Some(tasks::TaskKind::Zhihu)) {
-        crate::tools::request_engine_warmup(crate::tools::ToolKind::Zhihu);
-    }
+    // Shelf/resume snapshots are read-only. Explicit archival actions own
+    // engine startup; merely opening the reader must not spawn a service.
     tauri::async_runtime::spawn_blocking(move || -> Result<tasks::AcquisitionSnapshot, String> {
         tools::recover_stale_engine_instances()?;
         // Reconcile sidecar truth over stale desktop mirrors (including
